@@ -3,5 +3,6 @@
   {"name": "pi2", "systemd": true},
   {"name": "pi3", "systemd": true},
   {"name": "pi4", "systemd": true},
-  {"name": "grok-bot-box", "systemd": false}
+  {"name": "grok-bot-box", "systemd": false},
+  {"name": "us1", "systemd": true}
 ]

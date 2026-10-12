@@ -81,7 +81,7 @@ func TestSnippetsMatchDisk(t *testing.T) {
 	}
 	var buf strings.Builder
 	buf.WriteString(strings.Join(problems, "\n"))
-	for _, name := range []string{"pi1", "pi2", "pi3", "pi4", "grok-bot-box"} {
+	for _, name := range []string{"pi1", "pi2", "pi3", "pi4", "grok-bot-box", "us1"} {
 		path := filepath.Join(root, "telegraf", name+".conf")
 		current, err := os.ReadFile(path)
 		if err != nil {
@@ -144,10 +144,10 @@ func TestSnippetsAreTOML(t *testing.T) {
 
 func TestEveryNodeHasABoundedProcstatScan(t *testing.T) {
 	rendered := mustRenderAll(t)
-	if len(rendered) != 5 {
+	if len(rendered) != 6 {
 		t.Fatalf("nodes: %d", len(rendered))
 	}
-	for _, name := range []string{"pi1", "pi2", "pi3", "pi4", "grok-bot-box"} {
+	for _, name := range []string{"pi1", "pi2", "pi3", "pi4", "grok-bot-box", "us1"} {
 		if _, ok := rendered[name]; !ok {
 			t.Fatalf("missing %s", name)
 		}
