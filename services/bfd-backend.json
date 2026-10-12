@@ -1,0 +1,8 @@
+{
+  "name": "bfd-backend",
+  "project": "briefed",
+  "host": "pi1",
+  "port": 3021,
+  "health_url": "http://127.0.0.1:3021/health",
+  "process_match": "/home/joe/workspace/briefed/bfd-backend"
+}

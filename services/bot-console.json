@@ -1,0 +1,9 @@
+{
+  "name": "bot-console",
+  "project": "deploybot",
+  "host": "pi2",
+  "port": 5180,
+  "health_url": "http://127.0.0.1:5180/",
+  "systemd_unit": "bot-console.service",
+  "systemd_scope": "user"
+}

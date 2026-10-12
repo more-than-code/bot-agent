@@ -1,0 +1,9 @@
+{
+  "name": "postgres",
+  "project": "postgres",
+  "host": "pi4",
+  "port": 5432,
+  "systemd_unit": "postgresql@18-main.service",
+  "systemd_scope": "system",
+  "process_match": "postgres"
+}

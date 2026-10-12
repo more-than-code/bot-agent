@@ -1,0 +1,8 @@
+{
+  "name": "pgadmin",
+  "project": "pgadmin",
+  "host": "pi4",
+  "port": 5050,
+  "health_url": "http://127.0.0.1:5050/",
+  "process_match": "pgadmin4"
+}

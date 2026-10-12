@@ -1,0 +1,10 @@
+{
+  "name": "tra-backend",
+  "project": "tour-agent",
+  "host": "pi1",
+  "port": 3031,
+  "health_url": "http://127.0.0.1:3031/health",
+  "systemd_unit": "tra-backend.service",
+  "systemd_scope": "user",
+  "process_match": "/home/joe/workspace/tour-agent/tra-backend"
+}

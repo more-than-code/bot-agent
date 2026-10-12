@@ -1,0 +1,8 @@
+{
+  "name": "bfd-webapp",
+  "project": "briefed",
+  "host": "pi1",
+  "port": 5174,
+  "health_url": "http://127.0.0.1:5174/",
+  "process_match": "/home/joe/workspace/briefed/bfd-webapp"
+}

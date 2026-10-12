@@ -1,0 +1,10 @@
+{
+  "name": "tra-webapp",
+  "project": "tour-agent",
+  "host": "pi1",
+  "port": 5176,
+  "health_url": "http://127.0.0.1:5176/",
+  "systemd_unit": "tra-webapp.service",
+  "systemd_scope": "user",
+  "process_match": "/home/joe/workspace/tour-agent/tra-webapp"
+}

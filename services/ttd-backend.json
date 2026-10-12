@@ -1,0 +1,10 @@
+{
+  "name": "ttd-backend",
+  "project": "tutored",
+  "host": "pi1",
+  "port": 3001,
+  "health_url": "http://127.0.0.1:3001/health",
+  "systemd_unit": "ttd-backend.service",
+  "systemd_scope": "user",
+  "process_match": "/home/joe/workspace/tutored/ttd-backend"
+}
