@@ -1,0 +1,29 @@
+[Unit]
+Description=bot-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot-agent
+Group=bot-agent
+SupplementaryGroups=
+ExecStart=/usr/local/bin/bot-agent run
+EnvironmentFile=/etc/bot-agent/env
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=default
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/bot-agent /etc/bot-agent
+InaccessiblePaths=/run/docker.sock /var/run/docker.sock
+StateDirectory=bot-agent
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

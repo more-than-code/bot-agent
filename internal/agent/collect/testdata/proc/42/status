@@ -1,0 +1,10 @@
+Name:	nginx
+Umask:	0022
+State:	S (sleeping)
+Pid:	42
+PPid:	1
+Uid:	33	33	33	33
+Gid:	33	33	33	33
+Threads:	4
+VmRSS:	    2048 kB
+VmSize:	   12345 kB

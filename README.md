@@ -104,3 +104,13 @@ Then stop the running Telegraf and start it again. Running the script while Tele
 Destructive once Joe runs it: the 7-day retention policies drop chunks older than 7 days (`procstat` is empty today; the new tables start empty), and the seed `DELETE` removes registry names not in the list. The file does not `DROP` a table. The header comment has a rollback (`remove_retention_policy` and `DROP TABLE`) that is not run. Dropping `metrics.procstat` would destroy the existing table.
 
 About 2 to 3 million procstat rows if all five hosts run the snippet for the full 7-day retention. The other raw metrics tables still have no retention policy.
+
+## bot-agent daemon
+
+`bot-agent run` is the default and takes no arguments. `bot-agent version` prints the agent version. `init` reads the join token from stdin so it does not show up in process arguments:
+
+```bash
+printf '%s\n' '<token>' | bot-agent init --server '<wss-url>' --join-token-stdin
+```
+
+The token is one trimmed line, 16–128 characters of `[A-Za-z0-9_-]`. `--join-token <tok>` is rejected. Optional `--env-file` selects the env file (default `/etc/bot-agent/env`). Nothing from the env file is printed.

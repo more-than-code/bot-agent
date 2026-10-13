@@ -1,6 +1,6 @@
 # bot-agent
 
-Design v2 (2026-10-13): `docs/design.md` adds the `cmd/bot-agent` daemon, which replaces Telegraf after an overlap period. Cross-repo design: umbrella `docs/design-bot-agent-deploy.md`. Design only; the renderer below stays current until then.
+Design v2 (2026-10-13): `docs/design.md` adds the `cmd/bot-agent` daemon, which replaces Telegraf after an overlap period. Cross-repo design: umbrella `docs/design-bot-agent-deploy.md`. Phase 1 of the daemon (`cmd/bot-agent`, `internal/agent/`, `packaging/`) is implemented and not installed on any host; build with `go build ./cmd/bot-agent` and test with `go test ./...`. The renderer below stays current until the overlap ends.
 
 Telegraf snippets and Services SQL for deploybot. Umbrella: `/home/joe/workspace/deploybot`. Spec: `docs/spec-v1.md` (Services).
 
