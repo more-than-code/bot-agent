@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
@@ -37,21 +38,35 @@ func (r Result) ServiceFor(pid int, cgroup string) string {
 }
 
 // Scan reads procRoot/net/tcp, tcp6, and per-pid fd links.
-// Unreadable fd directories are skipped. They never fail the scan.
-func Scan(procRoot string) (Result, error) {
+// passwdPath names socket uids. An empty or unreadable file leaves the uid
+// numeric. Unreadable fd directories are skipped. They never fail the scan.
+func Scan(procRoot, passwdPath string) (Result, error) {
 	listeners, err := readListeners(procRoot)
 	if err != nil {
 		return Result{}, err
 	}
 	owners := mapInodes(procRoot)
-	return build(listeners, owners, procRoot), nil
+	return build(listeners, owners, procRoot, readPasswd(passwdPath)), nil
+}
+
+func readPasswd(path string) string {
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 type listener struct {
-	port  int
-	inode uint64
-	pid   int
-	known bool
+	port   int
+	inode  uint64
+	uid    string
+	hasUID bool
+	pid    int
+	known  bool
 }
 
 func readListeners(procRoot string) ([]listener, error) {
@@ -75,6 +90,7 @@ func readListeners(procRoot string) ([]listener, error) {
 
 // ParseNetTCP parses one /proc/net/tcp or tcp6 table.
 // Only state 0A on 0.0.0.0, 127.0.0.1, or :: is returned.
+// The uid column is kept so the caller can name the socket owner.
 func ParseNetTCP(data string) ([]listener, error) {
 	var out []listener
 	for _, line := range strings.Split(data, "\n") {
@@ -101,9 +117,23 @@ func ParseNetTCP(data string) ([]listener, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, listener{port: int(port), inode: inode})
+		uid, hasUID := socketUID(f)
+		out = append(out, listener{port: int(port), inode: inode, uid: uid, hasUID: hasUID})
 	}
 	return out, nil
+}
+
+// socketUID reads the uid column. The kernel prints it between retrnsmt and
+// timeout, which is field 7 once the line is split on whitespace.
+func socketUID(fields []string) (string, bool) {
+	if len(fields) < 10 {
+		return "", false
+	}
+	n, err := strconv.ParseUint(fields[7], 10, 32)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatUint(n, 10), true
 }
 
 func parseProcIP(s string) (net.IP, error) {
@@ -180,16 +210,17 @@ func socketInode(target string) (uint64, bool) {
 }
 
 type group struct {
-	kind  string
-	unit  string
-	scope string
-	name  string
-	pids  []int
-	comm  string
-	ports map[int]bool
+	kind     string
+	unit     string
+	scope    string
+	name     string
+	pids     []int
+	comm     string
+	ports    map[int]bool
+	portUser map[int]string
 }
 
-func build(listeners []listener, owners map[uint64]int, procRoot string) Result {
+func build(listeners []listener, owners map[uint64]int, procRoot, passwd string) Result {
 	res := Result{byPID: map[int]string{}, byUnit: map[string]string{}}
 	groups := map[string]*group{}
 	var order []string
@@ -211,7 +242,7 @@ func build(listeners []listener, owners map[uint64]int, procRoot string) Result 
 				groups[key] = g
 				order = append(order, key)
 			}
-			g.ports[ln.port] = true
+			g.addListener(ln, passwd)
 			continue
 		}
 		comm := readComm(procRoot, ln.pid)
@@ -232,7 +263,7 @@ func build(listeners []listener, owners map[uint64]int, procRoot string) Result 
 					order = append(order, key)
 				}
 				g.pids = append(g.pids, ln.pid)
-				g.ports[ln.port] = true
+				g.addListener(ln, passwd)
 				if g.comm == "" {
 					g.comm = comm
 				}
@@ -251,7 +282,7 @@ func build(listeners []listener, owners map[uint64]int, procRoot string) Result 
 			order = append(order, key)
 		}
 		g.pids = append(g.pids, ln.pid)
-		g.ports[ln.port] = true
+		g.addListener(ln, passwd)
 		if g.comm == "" {
 			g.comm = comm
 		}
@@ -299,6 +330,13 @@ func (g *group) discovered() protocol.Discovered {
 		Kind:  g.kind,
 		Ports: ports,
 	}
+	// Several sockets merge into one service. The lowest port owns the user.
+	// A repeated port keeps the first uid that parsed.
+	if len(ports) > 0 {
+		if u, ok := g.portUser[ports[0]]; ok {
+			d.User = protocol.Str(u)
+		}
+	}
 	if g.kind == "systemd" {
 		d.SystemdUnit = protocol.Str(g.unit)
 		d.SystemdScope = protocol.Str(g.scope)
@@ -312,6 +350,20 @@ func (g *group) discovered() protocol.Discovered {
 		d.ProcessName = protocol.Str(g.comm)
 	}
 	return d.NormalizePorts()
+}
+
+func (g *group) addListener(ln listener, passwd string) {
+	g.ports[ln.port] = true
+	if !ln.hasUID {
+		return
+	}
+	if g.portUser == nil {
+		g.portUser = map[int]string{}
+	}
+	if _, seen := g.portUser[ln.port]; seen {
+		return
+	}
+	g.portUser[ln.port] = collect.LookupUser(passwd, ln.uid)
 }
 
 func uniqueName(base string, used map[string]bool) string {

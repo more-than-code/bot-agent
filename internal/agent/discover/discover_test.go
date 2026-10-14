@@ -23,7 +23,7 @@ func TestScan(t *testing.T) {
 	_, readErr := os.ReadDir(fd)
 	hidden := readErr != nil
 
-	res, err := Scan(dst)
+	res, err := Scan(dst, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestNameCollision(t *testing.T) {
 	if err := os.Symlink("socket:[2]", filepath.Join(dir, "2", "fd", "3")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Scan(dir)
+	res, err := Scan(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +130,69 @@ func TestNameCollision(t *testing.T) {
 	}
 	if mustSvc(t, res, "nginx-2").Kind != "process" {
 		t.Fatal("collision suffix")
+	}
+}
+
+func TestSocketOwner(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One unit owns three sockets. The rows are ordered so the lowest port
+	// is neither the first nor the last, and its uid is neither the smallest
+	// nor the largest. port 80 / uid 1000 must win.
+	write("net/tcp", "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"+
+		"   0: 00000000:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1234 0 1 1 0 100 0 0 10 0\n"+
+		"   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 2 1 0 100 0 0 10 0\n"+
+		"   2: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 3 1 0 100 0 0 10 0\n"+
+		"   3: 00000000:0009 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 4 1 0 100 0 0 10 0\n"+
+		"   4: 0100007F:0007 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1234 0 5 1 0 100 0 0 10 0\n")
+	write("10/comm", "web\n")
+	write("10/cgroup", "0::/system.slice/web.service\n")
+	for _, fd := range []struct{ name, target string }{
+		{"3", "socket:[1]"},
+		{"4", "socket:[2]"},
+		{"5", "socket:[3]"},
+	} {
+		path := filepath.Join(dir, "10", "fd", fd.name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(fd.target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("passwd", "root:x:0:0:root:/root:/bin/bash\njoe:x:1000:1000:Joe:/home/joe:/bin/bash\n")
+
+	res, err := Scan(dir, filepath.Join(dir, "passwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := mustSvc(t, res, "web")
+	if web.Kind != "systemd" || str(web.User) != "joe" || !slices.Equal(web.Ports, []int{80, 3000, 8080}) {
+		t.Fatalf("web %+v", web)
+	}
+	root := mustSvc(t, res, "port-9")
+	if root.Kind != "process" || root.PID != nil || str(root.User) != "root" || !slices.Equal(root.Ports, []int{9}) {
+		t.Fatalf("port-9 %+v", root)
+	}
+	unknown := mustSvc(t, res, "port-7")
+	if unknown.Kind != "process" || unknown.PID != nil || str(unknown.User) != "1234" || !slices.Equal(unknown.Ports, []int{7}) {
+		t.Fatalf("port-7 %+v", unknown)
+	}
+	raw, err := protocol.Marshal(protocol.Services{V: protocol.Version, Type: "services", Services: res.Services})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := protocol.ValidateAgent(raw); err != nil {
+		t.Fatal(err)
 	}
 }
 

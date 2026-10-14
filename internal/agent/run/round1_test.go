@@ -373,6 +373,57 @@ func TestServicesAfterDiscoveryChange(t *testing.T) {
 	}
 }
 
+func TestServicesWhenOwnerChanges(t *testing.T) {
+	clearAgentEnv(t)
+	srv := fakeserver.Start(t)
+	srv.Heartbeat = 120
+	srv.Config.MetricsIntervalSec = 60
+	srv.Config.ProcessIntervalSec = 300
+	proc, sys, passwd := fixtureProc(t, 9)
+	envPath, token := writeEnv(t, srv.URL, t.TempDir())
+	var logBuf bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{
+			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
+			StatFS:        statFS(1000, 1000),
+			EUID:          func() int { return 1000 },
+			DiscoverEvery: 40 * time.Millisecond,
+			Sleep:         func(context.Context, time.Duration) error { return nil },
+			Log:           stdLog(&logBuf),
+		})
+	}()
+	defer stopRun(t, cancel, errCh)
+	if !srv.Wait(4*time.Second, func(fr []fakeserver.Frame) bool {
+		for _, f := range fr {
+			if f.Type == "hello" && strings.Contains(string(f.Raw), `"user":"root"`) {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("hello %v log %s", frameTypes(srv.Frames()), redactLog(&logBuf, token, srv.Credential))
+	}
+	if countType(srv.Frames(), "services") != 0 {
+		t.Fatal("services sent before the owner changed")
+	}
+	rewriteListenerUIDs(t, proc)
+	if !srv.Wait(3*time.Second, func(fr []fakeserver.Frame) bool {
+		for _, f := range fr {
+			if f.Type == "services" && strings.Contains(string(f.Raw), `"user":"1000"`) {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("no services frame %v log %s", frameTypes(srv.Frames()), redactLog(&logBuf, token, srv.Credential))
+	}
+	if v := srv.Violations(); len(v) != 0 {
+		t.Fatalf("violations %v", v)
+	}
+}
+
 func TestTaskWaitsAndExpires(t *testing.T) {
 	clearAgentEnv(t)
 	srv := fakeserver.Start(t)
@@ -572,6 +623,23 @@ func writeCredEnv(t *testing.T, srv *fakeserver.Server, state string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func rewriteListenerUIDs(t *testing.T, proc string) {
+	t.Helper()
+	path := filepath.Join(proc, "net", "tcp")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := []byte("00000000     0        0 ")
+	next := []byte("00000000  1000        0 ")
+	if !bytes.Contains(b, old) {
+		t.Fatalf("uid column not found")
+	}
+	if err := os.WriteFile(path, bytes.ReplaceAll(b, old, next), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func addExtraListener(t *testing.T, proc string) {

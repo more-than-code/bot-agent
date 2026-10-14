@@ -348,7 +348,7 @@ func (a *agent) sendMetrics(ctx context.Context, w *writer, host, procs bool, he
 }
 
 func (a *agent) discover() discover.Result {
-	res, err := discover.Scan(a.opt.ProcRoot)
+	res, err := discover.Scan(a.opt.ProcRoot, a.opt.Passwd)
 	if err != nil {
 		a.opt.Log.Printf("bot-agent: discovery failed")
 		res = discover.Result{}

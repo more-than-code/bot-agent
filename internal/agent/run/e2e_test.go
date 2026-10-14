@@ -534,6 +534,9 @@ func assertNginx(t *testing.T, fr []fakeserver.Frame, live int) {
 			t.Fatal(err)
 		}
 		for _, s := range hello.Services {
+			if s.User == nil || *s.User == "" {
+				t.Fatalf("service %s has no user", s.Name)
+			}
 			if s.Name != "nginx" {
 				continue
 			}
@@ -546,7 +549,7 @@ func assertNginx(t *testing.T, fr []fakeserver.Frame, live int) {
 					has9 = true
 				}
 			}
-			if !hasLive || !has9 || s.Kind != "systemd" {
+			if !hasLive || !has9 || s.Kind != "systemd" || *s.User != "root" {
 				t.Fatalf("nginx %+v", s)
 			}
 			return

@@ -62,6 +62,8 @@ type Envelope struct {
 }
 
 // Discovered is one listening service.
+// User is the socket owner's name, or the numeric uid when passwd has no
+// entry. It is null when the uid column is not a number.
 type Discovered struct {
 	Name          string  `json:"name"`
 	Kind          string  `json:"kind"`
@@ -71,6 +73,7 @@ type Discovered struct {
 	ContainerName *string `json:"container_name"`
 	ProcessName   *string `json:"process_name"`
 	PID           *int    `json:"pid"`
+	User          *string `json:"user"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.

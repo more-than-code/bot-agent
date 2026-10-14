@@ -88,6 +88,19 @@ func TestValidateHelloAndReject(t *testing.T) {
 	if err := ValidateAgent([]byte(hello)); err != nil {
 		t.Fatal(err)
 	}
+	if err := ValidateAgent([]byte(strings.Replace(hello, `"pid":1}`, `"pid":1,"user":"joe"}`, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAgent([]byte(strings.Replace(hello, `"pid":1}`, `"pid":1,"user":null}`, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAgent([]byte(strings.Replace(hello, `"pid":1}`, `"pid":1,"user":1}`, 1))); err == nil {
+		t.Fatal("user must be a string or null")
+	}
+	svc := `{"v":1,"type":"services","services":[{"name":"port-9","kind":"process","ports":[9],"systemd_unit":null,"systemd_scope":null,"container_name":null,"process_name":null,"pid":null,"user":"1234"}]}`
+	if err := ValidateAgent([]byte(svc)); err != nil {
+		t.Fatal(err)
+	}
 	if err := ValidateAgent([]byte(strings.Replace(hello, `["metrics","probe"]`, `["probe","metrics"]`, 1))); err == nil {
 		t.Fatal("capability order")
 	}
