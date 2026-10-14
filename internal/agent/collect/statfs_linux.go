@@ -4,16 +4,21 @@ package collect
 
 import "syscall"
 
-// HostStatFS reads filesystem size with the Linux statfs syscall.
-// avail is the space available to an unprivileged user (Bavail).
-func HostStatFS(path string) (total, avail uint64, err error) {
+// HostStatFS reads filesystem block counts with the Linux statfs syscall.
+// Bavail is the space available to an unprivileged user. Bfree includes
+// blocks reserved for root, which df does not count as used.
+func HostStatFS(path string) (FSStat, error) {
 	var st syscall.Statfs_t
-	if err = syscall.Statfs(path, &st); err != nil {
-		return 0, 0, err
+	if err := syscall.Statfs(path, &st); err != nil {
+		return FSStat{}, err
 	}
-	bsize := uint64(st.Bsize)
-	if bsize == 0 {
-		return 0, 0, syscall.EINVAL
+	if st.Bsize <= 0 {
+		return FSStat{}, syscall.EINVAL
 	}
-	return uint64(st.Blocks) * bsize, uint64(st.Bavail) * bsize, nil
+	return FSStat{
+		Blocks: uint64(st.Blocks),
+		Bfree:  uint64(st.Bfree),
+		Bavail: uint64(st.Bavail),
+		Bsize:  uint64(st.Bsize),
+	}, nil
 }

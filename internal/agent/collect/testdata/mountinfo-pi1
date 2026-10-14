@@ -1,0 +1,6 @@
+23 1 179:2 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+25 23 179:1 / /boot/firmware rw,relatime shared:5 - vfat /dev/mmcblk0p1 rw
+300 23 179:2 /etc/bot-agent /etc/bot-agent rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+301 23 179:2 /tmp/systemd-private-x/tmp /tmp rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+302 23 179:2 /var/tmp/systemd-private-x/tmp /var/tmp rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+303 23 179:2 /var/lib/bot-agent /var/lib/bot-agent rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw

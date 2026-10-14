@@ -11,8 +11,9 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
-// Fixtures under testdata/ are Linux /proc and /sys shapes written from
-// memory on macOS. They were not copied from a live system.
+// Fixtures under testdata/proc and testdata/sys are Linux shapes written
+// from memory on macOS. testdata/mountinfo-pi1 is the pi1 mount table from
+// the field report.
 
 func TestGoldenHostAndProc(t *testing.T) {
 	dst := t.TempDir()
@@ -22,17 +23,17 @@ func TestGoldenHostAndProc(t *testing.T) {
 		Proc:   proc,
 		Sys:    filepath.Join(dst, "sys"),
 		Passwd: filepath.Join(dst, "passwd"),
-	}, func(path string) (uint64, uint64, error) {
+	}, func(path string) (FSStat, error) {
 		switch path {
 		case "/":
-			return 10000, 2500, nil
+			return FSStat{Blocks: 10000, Bfree: 2500, Bavail: 2500, Bsize: 1}, nil
 		case "/home":
-			return 20000, 20000, nil
+			return FSStat{Blocks: 20000, Bfree: 20000, Bavail: 20000, Bsize: 1}, nil
 		case "/home/user/My Files":
-			return 5000, 1000, nil
+			return FSStat{Blocks: 5000, Bfree: 1000, Bavail: 1000, Bsize: 1}, nil
 		default:
 			t.Errorf("unexpected statfs %s", path)
-			return 0, 0, os.ErrNotExist
+			return FSStat{}, os.ErrNotExist
 		}
 	})
 	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
@@ -199,6 +200,95 @@ func TestGoldenHostAndProc(t *testing.T) {
 	mustValidate(t, procs2)
 }
 
+func TestParseMountInfoPi1(t *testing.T) {
+	body, err := os.ReadFile("testdata/mountinfo-pi1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := ParseMountInfo(string(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 2 || mounts[0].Path != "/" || mounts[0].FSType != "ext4" || mounts[1].Path != "/boot/firmware" || mounts[1].FSType != "vfat" {
+		t.Fatalf("%+v", mounts)
+	}
+}
+
+func TestParseMountInfoShortest(t *testing.T) {
+	// The shorter mount of a device wins even when it is listed later.
+	// An equal-length second mount stays dropped. Pseudo and non-root binds do too.
+	const data = "" +
+		"50 1 8:1 / /var/lib/extra rw - ext4 /dev/sda1 rw\n" +
+		"51 1 8:1 / / rw - ext4 /dev/sda1 rw\n" +
+		"52 1 8:1 / /var/lib/extra2 rw - ext4 /dev/sda1 rw\n" +
+		"53 1 8:2 / /boot rw - vfat /dev/sda2 rw\n" +
+		"54 1 8:2 / /boot-alt rw - vfat /dev/sda2 rw\n" +
+		"60 1 8:3 / /data rw - xfs /dev/sda3 rw\n" +
+		"61 1 8:3 / /disk rw - xfs /dev/sda3 rw\n" +
+		"70 1 8:4 /tmp /tmp rw - ext4 /dev/sda4 rw\n" +
+		"71 1 0:1 / /run rw - tmpfs tmpfs rw\n"
+	mounts, err := ParseMountInfo(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Mount{
+		{Path: "/", FSType: "ext4"},
+		{Path: "/boot", FSType: "vfat"},
+		{Path: "/data", FSType: "xfs"},
+	}
+	if len(mounts) != len(want) {
+		t.Fatalf("%+v", mounts)
+	}
+	for i := range want {
+		if mounts[i] != want[i] {
+			t.Fatalf("got %+v want %+v", mounts, want)
+		}
+	}
+}
+
+func TestDiskDFParity(t *testing.T) {
+	dir := t.TempDir()
+	proc := filepath.Join(dir, "proc")
+	if err := os.MkdirAll(filepath.Join(proc, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const info = "23 1 179:2 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw\n"
+	if err := os.WriteFile(filepath.Join(proc, "self", "mountinfo"), []byte(info), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Roots{Proc: proc}, func(path string) (FSStat, error) {
+		if path != "/" {
+			t.Errorf("unexpected statfs %s", path)
+			return FSStat{}, os.ErrNotExist
+		}
+		return FSStat{Blocks: 1000, Bfree: 400, Bavail: 350, Bsize: 4096}, nil
+	})
+	var view HostView
+	samples, err := c.readDisks(time.Unix(0, 0).UTC(), &view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 1 || len(view.Disks) != 1 {
+		t.Fatalf("samples %d disks %d", len(samples), len(view.Disks))
+	}
+	const b = int64(4096)
+	d := samples[0]
+	if num(d.F["total"]) != 1000*b || num(d.F["used"]) != 600*b || num(d.F["free"]) != 350*b {
+		t.Fatalf("%+v", d.F)
+	}
+	near(t, d.F["used_percent"].(float64), 600.0/950.0*100)
+	if view.Disks[0].Path != "/" || view.Disks[0].Total != uint64(1000*b) || view.Disks[0].Used != uint64(600*b) {
+		t.Fatalf("view %+v", view.Disks[0])
+	}
+	if view.Disks[0].UsedPercent != d.F["used_percent"].(float64) {
+		t.Fatalf("snapshot disk percent %v sample %v", view.Disks[0].UsedPercent, d.F["used_percent"])
+	}
+	_, _, _, pct0 := diskUsage(FSStat{Blocks: 10, Bfree: 10, Bavail: 0, Bsize: 4096})
+	if pct0 != 0 {
+		t.Fatalf("zero denom %v", pct0)
+	}
+}
+
 func TestParsePIDStatComm(t *testing.T) {
 	// Field positions follow the kernel's /proc/<pid>/stat layout.
 	line := "7 (nginx (master)) S 1 7 7 0 -1 0 0 0 0 0 15 4 0 0 20 0 2 0 50 1 9 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
@@ -217,17 +307,22 @@ func TestMissingThermalIsNotAnError(t *testing.T) {
 	if err := os.MkdirAll(proc, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(proc, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for name, body := range map[string]string{
 		"stat":      "cpu  1 0 1 1 0 0 0 0 0 0\ncpu0 1 0 1 1 0 0 0 0 0 0\n",
 		"meminfo":   "MemTotal: 1024 kB\nMemAvailable: 512 kB\n",
 		"loadavg":   "0.00 0.00 0.00 1/1 1\n",
 		"uptime":    "10.00 0.00\n",
 		"diskstats": "",
-		"mounts":    "",
 	} {
 		if err := os.WriteFile(filepath.Join(proc, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(proc, "self", "mountinfo"), nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(proc, "net"), 0o755); err != nil {
 		t.Fatal(err)
@@ -235,8 +330,8 @@ func TestMissingThermalIsNotAnError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proc, "net", "dev"), []byte("  eth0: 1 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c := New(Roots{Proc: proc, Sys: filepath.Join(dir, "sys"), Passwd: filepath.Join(dir, "passwd")}, func(string) (uint64, uint64, error) {
-		return 0, 0, os.ErrNotExist
+	c := New(Roots{Proc: proc, Sys: filepath.Join(dir, "sys"), Passwd: filepath.Join(dir, "passwd")}, func(string) (FSStat, error) {
+		return FSStat{}, os.ErrNotExist
 	})
 	samples, view, err := c.SampleHost(time.Unix(0, 0).UTC())
 	if err != nil {

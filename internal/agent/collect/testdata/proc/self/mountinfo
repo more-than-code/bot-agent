@@ -1,0 +1,9 @@
+23 1 179:2 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw,noatime
+24 23 0:23 / /run rw,nosuid,nodev shared:2 - tmpfs tmpfs rw,nosuid,nodev
+25 23 179:3 / /home rw,relatime shared:3 - ext4 /dev/mmcblk0p3 rw,relatime
+26 23 0:45 / /var/lib/docker/overlay2/abc rw shared:4 - overlay overlay rw
+27 23 0:5 / /proc rw,nosuid,nodev,noexec shared:5 - proc proc rw,nosuid,nodev,noexec
+28 23 0:6 / /sys rw,nosuid,nodev,noexec shared:6 - sysfs sysfs rw,nosuid,nodev,noexec
+29 23 0:7 / /dev rw,nosuid shared:7 - devtmpfs devtmpfs rw,nosuid
+30 23 179:4 / /home/user/My\040Files rw,noatime shared:8 - ext4 /dev/mmcblk0p4 rw,noatime
+31 23 179:2 / / rw,relatime shared:1 - ext4 /dev/mmcblk0p2 rw,relatime

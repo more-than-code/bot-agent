@@ -213,25 +213,48 @@ type Mount struct {
 	FSType string
 }
 
-// ParseMounts reads /proc/mounts and drops pseudo filesystems.
-func ParseMounts(data string) ([]Mount, error) {
+// ParseMountInfo reads /proc/self/mountinfo.
+// A bind of a subdirectory has a root field other than "/", so it is not a
+// second disk. Each major:minor is reported once, at its shortest mount point.
+func ParseMountInfo(data string) ([]Mount, error) {
 	var out []Mount
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	sc := bufio.NewScanner(strings.NewReader(data))
 	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) < 3 {
+		root, path, fst, dev, ok := parseMountInfoLine(sc.Text())
+		if !ok || root != "/" || path == "" || fst == "" || pseudoFS[fst] {
 			continue
 		}
-		path := unescapeMount(f[1])
-		fst := f[2]
-		if pseudoFS[fst] || path == "" || seen[path] {
+		if i, dup := seen[dev]; dup {
+			if len(path) < len(out[i].Path) {
+				out[i] = Mount{Path: path, FSType: fst}
+			}
 			continue
 		}
-		seen[path] = true
+		seen[dev] = len(out)
 		out = append(out, Mount{Path: path, FSType: fst})
 	}
 	return out, nil
+}
+
+// parseMountInfoLine returns the root, mount point, fstype, and major:minor.
+// Optional fields sit between the mount options and the "-" separator.
+func parseMountInfoLine(line string) (root, path, fst, dev string, ok bool) {
+	f := strings.Fields(line)
+	if len(f) < 7 {
+		return "", "", "", "", false
+	}
+	sep := -1
+	for i := 6; i < len(f); i++ {
+		if f[i] == "-" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 || sep+1 >= len(f) {
+		return "", "", "", "", false
+	}
+	return unescapeMount(f[3]), unescapeMount(f[4]), f[sep+1], f[2], true
 }
 
 // pseudoFS are filesystems the contract excludes, plus other kernel mounts

@@ -17,9 +17,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/fakeserver"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
+
+// statFS reports blocks with Bfree equal to Bavail and a 1-byte block,
+// which keeps callers that do not assert reserved blocks on the old numbers.
+func statFS(blocks, free uint64) collect.StatFS {
+	return func(string) (collect.FSStat, error) {
+		return collect.FSStat{Blocks: blocks, Bfree: free, Bavail: free, Bsize: 1}, nil
+	}
+}
 
 func TestE2E(t *testing.T) {
 	clearAgentEnv(t)
@@ -50,12 +59,12 @@ func TestE2E(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS: func(path string) (uint64, uint64, error) {
+			StatFS: func(path string) (collect.FSStat, error) {
 				switch path {
 				case "/", "/home", "/home/user/My Files":
-					return 10000, 5000, nil
+					return collect.FSStat{Blocks: 10000, Bfree: 5000, Bavail: 5000, Bsize: 1}, nil
 				default:
-					return 0, 0, os.ErrNotExist
+					return collect.FSStat{}, os.ErrNotExist
 				}
 			},
 			EUID:          func() int { return 1000 },
@@ -175,7 +184,7 @@ func TestE2EReplay(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			Sleep: func(context.Context, time.Duration) error {
@@ -233,7 +242,7 @@ func TestE2ETaskReplay(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			Sleep:         func(context.Context, time.Duration) error { return nil },

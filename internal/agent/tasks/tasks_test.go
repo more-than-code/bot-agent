@@ -56,7 +56,7 @@ func TestSnapshotAndProbe(t *testing.T) {
 		Now: now,
 		Host: collect.HostView{
 			CPUPercent: &cpu, MemTotal: 10, MemUsed: 4, MemAvailable: 6, MemUsedPercent: 40,
-			Disks: []collect.DiskView{{Path: "/", Total: 100, Used: 40, UsedPercent: 40}},
+			Disks: []collect.DiskView{{Path: "/", Total: 1000 * 4096, Used: 600 * 4096, UsedPercent: 600.0 / 950.0 * 100}},
 			Load:  [3]float64{1, 0.5, 0.25}, Uptime: 3600,
 		},
 		Procs: procs,
@@ -75,6 +75,17 @@ func TestSnapshotAndProbe(t *testing.T) {
 	}
 	if err := protocol.ValidateSnapshot(raw); err != nil {
 		t.Fatal(err)
+	}
+	disks := res.Payload["disks"].([]any)
+	if len(disks) != 1 {
+		t.Fatalf("disks %d", len(disks))
+	}
+	d0 := disks[0].(map[string]any)
+	if d0["path"] != "/" || d0["total"] != uint64(1000*4096) || d0["used"] != uint64(600*4096) {
+		t.Fatalf("disk %+v", d0)
+	}
+	if d0["used_percent"] != 600.0/950.0*100 {
+		t.Fatalf("disk percent %v", d0["used_percent"])
 	}
 	top := res.Payload["top"].([]any)
 	if len(top) != 20 {

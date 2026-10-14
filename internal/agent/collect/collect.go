@@ -13,8 +13,17 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
-// StatFS returns total and available bytes for a mount path.
-type StatFS func(path string) (total, avail uint64, err error)
+// FSStat is one statfs sample. Blocks, Bfree, and Bavail are block counts.
+// Bsize is the filesystem block size in bytes.
+type FSStat struct {
+	Blocks uint64
+	Bfree  uint64
+	Bavail uint64
+	Bsize  uint64
+}
+
+// StatFS reads filesystem block counts for a mount path.
+type StatFS func(path string) (FSStat, error)
 
 // Roots are the filesystem trees a collector reads. Tests point them at fixtures.
 type Roots struct {
@@ -219,38 +228,47 @@ func (c *Collector) readMem(now time.Time, view *HostView) (*protocol.Sample, er
 }
 
 func (c *Collector) readDisks(now time.Time, view *HostView) ([]protocol.Sample, error) {
-	body, err := os.ReadFile(filepath.Join(c.roots.Proc, "mounts"))
+	body, err := os.ReadFile(filepath.Join(c.roots.Proc, "self", "mountinfo"))
 	if err != nil {
 		return nil, err
 	}
-	mounts, err := ParseMounts(string(body))
+	mounts, err := ParseMountInfo(string(body))
 	if err != nil {
 		return nil, err
 	}
 	var out []protocol.Sample
 	var soft []string
 	for _, m := range mounts {
-		total, avail, err := c.statfs(m.Path)
+		st, err := c.statfs(m.Path)
 		if err != nil {
 			soft = append(soft, m.Path)
 			continue
 		}
-		used := uint64(0)
-		if total > avail {
-			used = total - avail
-		}
-		pct := percent(used, total)
+		total, used, free, pct := diskUsage(st)
 		view.Disks = append(view.Disks, DiskView{Path: m.Path, Total: total, Used: used, UsedPercent: pct})
 		out = append(out, protocol.NewSample("disk", now, map[string]string{
 			"path": m.Path, "fstype": m.FSType,
 		}, map[string]any{
-			"total": total, "used": used, "free": avail, "used_percent": pct,
+			"total": total, "used": used, "free": free, "used_percent": pct,
 		}))
 	}
 	if len(out) == 0 && len(soft) > 0 {
 		return nil, errors.New("disk: statfs failed")
 	}
 	return out, nil
+}
+
+// diskUsage matches df and Telegraf. Reserved blocks (Bfree - Bavail) are
+// neither used nor free, and used_percent is used / (used + free).
+// host_snapshot copies DiskView, so it uses this same result.
+func diskUsage(st FSStat) (total, used, free uint64, pct float64) {
+	total = st.Blocks * st.Bsize
+	if st.Blocks > st.Bfree {
+		used = (st.Blocks - st.Bfree) * st.Bsize
+	}
+	free = st.Bavail * st.Bsize
+	pct = percent(used, used+free)
+	return
 }
 
 func (c *Collector) readDiskIO(now time.Time) ([]protocol.Sample, error) {

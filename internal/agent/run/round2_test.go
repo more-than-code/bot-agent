@@ -171,7 +171,7 @@ func TestTaskQueueBusy(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			OnTaskStart:   func() { started.Add(1) },

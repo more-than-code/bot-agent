@@ -1,9 +1,0 @@
-/dev/mmcblk0p2 / ext4 rw,noatime 0 0
-tmpfs /run tmpfs rw,nosuid,nodev 0 0
-/dev/mmcblk0p3 /home ext4 rw,relatime 0 0
-overlay /var/lib/docker/overlay2/abc overlay rw 0 0
-proc /proc proc rw,nosuid,nodev,noexec 0 0
-sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0
-devtmpfs /dev devtmpfs rw,nosuid 0 0
-/dev/mmcblk0p2 /home/user/My\040Files ext4 rw,noatime 0 0
-/dev/mmcblk0p2 / ext4 rw,relatime 0 0

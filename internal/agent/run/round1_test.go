@@ -51,7 +51,7 @@ func TestHealthConfigAndSSRF(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 10000, 5000, nil },
+			StatFS:        statFS(10000, 5000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			Pace:          pace,
@@ -343,7 +343,7 @@ func TestServicesAfterDiscoveryChange(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: 40 * time.Millisecond,
 			Sleep:         func(context.Context, time.Duration) error { return nil },
@@ -401,7 +401,7 @@ func TestTaskWaitsAndExpires(t *testing.T) {
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			OnTaskStart:   func() { started.Add(1) },
@@ -518,7 +518,7 @@ func startPaced(t *testing.T, metrics, process, health time.Duration) (*fakeserv
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 10000, 5000, nil },
+			StatFS:        statFS(10000, 5000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			Pace:          pace,
@@ -552,7 +552,7 @@ func startReplayAgent(t *testing.T, tune func(*Pace), setup func(*fakeserver.Ser
 	go func() {
 		errCh <- Run(ctx, Options{
 			EnvFile: envPath, ProcRoot: proc, SysRoot: sys, Passwd: passwd,
-			StatFS:        func(string) (uint64, uint64, error) { return 1000, 1000, nil },
+			StatFS:        statFS(1000, 1000),
 			EUID:          func() int { return 1000 },
 			DiscoverEvery: time.Hour,
 			Pace:          pace,
