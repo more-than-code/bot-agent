@@ -100,7 +100,7 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 		Capabilities: protocol.Capabilities(),
 		Services:     services,
 	}
-	w := &writer{c: c}
+	w := &writer{c: c, onSend: a.opt.OnSend}
 	if err := w.Send(ctx, hello); err != nil {
 		return err
 	}
@@ -176,6 +176,7 @@ func readLoop(ctx context.Context, c *websocket.Conn, events chan<- incoming, er
 
 func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, errCh <-chan error) error {
 	now := a.opt.Now()
+	a.lastServicesSent = now
 	nextHost := now
 	nextProc := now
 	nextDisc := now.Add(a.opt.DiscoverEvery)
@@ -183,16 +184,16 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 	var health []protocol.Sample
 	for {
 		wait := earliest(a.opt.Now(), nextHost, nextProc, nextDisc, nextPing)
-		timer := time.NewTimer(wait)
+		tick, stop := a.arm(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
+			stop()
 			return ctx.Err()
 		case err := <-errCh:
-			timer.Stop()
+			stop()
 			return err
 		case ev := <-events:
-			timer.Stop()
+			stop()
 			changed, err := a.onEvent(ctx, w, ev)
 			if err != nil {
 				return err
@@ -207,11 +208,11 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 				}
 			}
 		case s := <-a.healthCh:
-			timer.Stop()
+			stop()
 			if len(health) < 1000 {
 				health = append(health, s)
 			}
-		case <-timer.C:
+		case <-tick:
 			now = a.opt.Now()
 			if !now.Before(nextPing) {
 				if err := w.Send(ctx, protocol.Ping{V: protocol.Version, Type: "ping", TS: protocol.FormatTime(now)}); err != nil {
@@ -220,7 +221,7 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 				nextPing = now.Add(a.pingEvery)
 			}
 			if !now.Before(nextDisc) {
-				if err := a.maybeServices(ctx, w); err != nil {
+				if err := a.maybeServices(ctx, w, now); err != nil {
 					return err
 				}
 				nextDisc = now.Add(a.opt.DiscoverEvery)
@@ -240,6 +241,14 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 			}
 		}
 	}
+}
+
+func (a *agent) arm(d time.Duration) (<-chan time.Time, func()) {
+	if a.opt.After != nil {
+		return a.opt.After(d), func() {}
+	}
+	timer := time.NewTimer(d)
+	return timer.C, func() { timer.Stop() }
 }
 
 func earliest(now time.Time, times ...time.Time) time.Duration {
@@ -366,17 +375,21 @@ func (a *agent) discover() discover.Result {
 	return res
 }
 
-func (a *agent) maybeServices(ctx context.Context, w *writer) error {
+func (a *agent) maybeServices(ctx context.Context, w *writer, now time.Time) error {
 	res := a.discover()
 	canon := canonical(res.Services)
-	if canon == a.lastCanon {
+	changed := canon != a.lastCanon
+	if !changed && now.Sub(a.lastServicesSent) < a.opt.ServicesRefreshEvery {
 		return nil
 	}
-	a.lastCanon = canon
 	if err := w.Send(ctx, protocol.Services{V: protocol.Version, Type: "services", Services: res.Services}); err != nil {
 		return err
 	}
-	a.refilter(ctx)
+	a.lastCanon = canon
+	a.lastServicesSent = now
+	if changed {
+		a.refilter(ctx)
+	}
 	return nil
 }
 

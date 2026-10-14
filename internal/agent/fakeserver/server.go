@@ -37,6 +37,7 @@ type Server struct {
 	RedirectTo string
 
 	mu           sync.Mutex
+	frameWait    *sync.Cond
 	frames       []Frame
 	violations   []string
 	conns        int
@@ -94,6 +95,7 @@ func Start(t *testing.T) *Server {
 		sentKind:   map[string]string{},
 		ackMetrics: true,
 	}
+	s.frameWait = sync.NewCond(&s.mu)
 	s.http = &http.Server{Handler: s}
 	go func() { _ = s.http.Serve(ln) }()
 	t.Cleanup(func() {
@@ -188,6 +190,50 @@ func (s *Server) Frames() []Frame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Frame(nil), s.frames...)
+}
+
+// WaitType waits until typ has been read n times. The deadline fails the wait;
+// it is not a sleep used to decide that a frame was absent.
+func (s *Server) WaitType(typ string, n int, d time.Duration) bool {
+	if n <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deadline := time.Now().Add(d)
+	for countFrames(s.frames, typ) < n {
+		if !s.waitFrame(deadline) {
+			return countFrames(s.frames, typ) >= n
+		}
+	}
+	return true
+}
+
+func countFrames(fr []Frame, typ string) int {
+	n := 0
+	for _, f := range fr {
+		if f.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// waitFrame waits for a read or for the deadline. Caller holds s.mu.
+// Stop does not wait for the callback. A callback that then locks s.mu
+// only broadcasts; WaitType checks the count again.
+func (s *Server) waitFrame(deadline time.Time) bool {
+	if !time.Now().Before(deadline) {
+		return false
+	}
+	timer := time.AfterFunc(time.Until(deadline), func() {
+		s.mu.Lock()
+		s.frameWait.Broadcast()
+		s.mu.Unlock()
+	})
+	s.frameWait.Wait()
+	timer.Stop()
+	return time.Now().Before(deadline)
 }
 
 // Wait polls until pred is true or the timeout passes.
@@ -380,6 +426,7 @@ func (s *Server) read(ctx context.Context, c *websocket.Conn) (string, []byte, e
 	}
 	s.mu.Lock()
 	s.frames = append(s.frames, Frame{Type: env.Type, Raw: append(json.RawMessage(nil), data...)})
+	s.frameWait.Broadcast()
 	s.mu.Unlock()
 	return env.Type, data, nil
 }

@@ -43,7 +43,7 @@ Rewrites are atomic: temp file in the same directory, mode 0600, fsync, rename. 
 |---|---|---|
 | Host compute | cpu (`cpu-total`, `usage_idle`, …), mem, disk (`/`), diskio (whole disks), net (no `lo`), system (load1/5/15, uptime), temp (`cpu_thermal` where present) | Same names and units as `docs/api-contract.md`, so the overlap comparison is like for like. |
 | Processes | Top 20 by cpu and top 20 by RSS each interval, plus every process of a known service. Irix cpu (100 = one core). The `cmdline` is sent raw; the server shortens it for display. | procstat scan + topk |
-| Services | Discovery: listening TCP sockets → pid → systemd unit (via `/proc/<pid>/cgroup`) or process. Reported in `hello` and when they change. | `services/*.json` (hand-written) |
+| Services | Discovery: listening TCP sockets → pid → systemd unit (via `/proc/<pid>/cgroup`) or process. Reported in `hello`, when they change, and at least every 5 minutes while connected; see agent-protocol v1.2. | `services/*.json` (hand-written) |
 | Health | `probe_health` per configured check: `http://127.0.0.1:<port><path>` or a TCP connect. The port must be one the service is listening on (D12). No redirects; timeout ≤ 10 s; body not stored, only status, latency, and result. | `inputs.http_response` |
 | Live tasks | `host_snapshot`, `probe_health` | — |
 

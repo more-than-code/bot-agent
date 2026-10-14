@@ -148,7 +148,7 @@ type Hello struct {
 	Services     []Discovered `json:"services"`
 }
 
-// Services is sent when discovery changes.
+// Services is the discovered set. It is sent when the set changes and at least every 300s while connected.
 type Services struct {
 	V        int          `json:"v"`
 	Type     string       `json:"type"`

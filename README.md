@@ -114,3 +114,5 @@ printf '%s\n' '<token>' | bot-agent init --server '<wss-url>' --join-token-stdin
 ```
 
 The token is one trimmed line, 16–128 characters of `[A-Za-z0-9_-]`. `--join-token <tok>` is rejected. Optional `--env-file` selects the env file (default `/etc/bot-agent/env`). Nothing from the env file is printed.
+
+Discovered services are re-sent at least every 5 minutes while connected; see agent-protocol v1.2.

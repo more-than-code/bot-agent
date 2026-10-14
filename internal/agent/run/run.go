@@ -29,22 +29,28 @@ type Pace struct {
 }
 
 // Options configures a daemon. Zero values use the production defaults.
-// DiscoverEvery, Pace, OnTaskStart, Sleep, EUID, Now, and the roots exist so
-// tests can run without root, without /proc, and without waiting out the
-// contract clamps. They are not environment variables.
+// DiscoverEvery, ServicesRefreshEvery, Pace, OnTaskStart, Sleep, EUID, Now,
+// After, OnSend, and the roots exist so tests can run without root, without
+// /proc, and without waiting out the contract clamps. They are not
+// environment variables. After, when set, replaces the session loop's wall
+// timer; nil uses time.NewTimer. OnSend, when set, runs at the start of each
+// client Send; nil is production.
 type Options struct {
-	EnvFile       string
-	ProcRoot      string
-	SysRoot       string
-	Passwd        string
-	StatFS        collect.StatFS
-	EUID          func() int
-	Now           func() time.Time
-	Sleep         func(context.Context, time.Duration) error
-	DiscoverEvery time.Duration
-	Pace          *Pace
-	OnTaskStart   func()
-	Log           *log.Logger
+	EnvFile              string
+	ProcRoot             string
+	SysRoot              string
+	Passwd               string
+	StatFS               collect.StatFS
+	EUID                 func() int
+	Now                  func() time.Time
+	After                func(time.Duration) <-chan time.Time
+	OnSend               func(any) error
+	Sleep                func(context.Context, time.Duration) error
+	DiscoverEvery        time.Duration
+	ServicesRefreshEvery time.Duration
+	Pace                 *Pace
+	OnTaskStart          func()
+	Log                  *log.Logger
 }
 
 func (o Options) withDefaults() Options {
@@ -71,6 +77,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.DiscoverEvery <= 0 {
 		o.DiscoverEvery = 60 * time.Second
+	}
+	if o.ServicesRefreshEvery <= 0 {
+		o.ServicesRefreshEvery = 300 * time.Second
 	}
 	return o
 }
@@ -187,12 +196,13 @@ type agent struct {
 	offset   time.Duration
 	checks   []protocol.HealthCheck
 
-	metricsEvery time.Duration
-	procEvery    time.Duration
-	healthEvery  time.Duration
-	pingEvery    time.Duration
-	configured   []protocol.HealthCheck
-	lastCanon    string
+	metricsEvery     time.Duration
+	procEvery        time.Duration
+	healthEvery      time.Duration
+	pingEvery        time.Duration
+	configured       []protocol.HealthCheck
+	lastCanon        string
+	lastServicesSent time.Time
 
 	unmappedOnce atomic.Bool
 	healthCh     chan protocol.Sample
@@ -206,11 +216,17 @@ type agent struct {
 }
 
 type writer struct {
-	c  *websocket.Conn
-	mu sync.Mutex
+	c      *websocket.Conn
+	mu     sync.Mutex
+	onSend func(any) error
 }
 
 func (w *writer) Send(ctx context.Context, v any) error {
+	if w.onSend != nil {
+		if err := w.onSend(v); err != nil {
+			return err
+		}
+	}
 	b, err := protocol.Marshal(v)
 	if err != nil {
 		return err
