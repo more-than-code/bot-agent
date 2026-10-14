@@ -180,6 +180,15 @@ These take precedence over earlier sections. Permission matrix: spec §4.
 6. **Audit actions:** `host.share`, `host.share_update`, `host.unshare` (with `detail` naming the project and level).
 7. **Project deletion** cascades its shares. Services of a deleted sharing project on others' hosts move to the owner. Deleting the owning project revokes its hosts' credentials (unchanged), and their shares go too.
 
+
+## v1.1.1 host-level visibility (2026-10-14, Joe: "processes per host should be visible to all members")
+
+Supersedes v1.1 item 4 for processes and snapshot only.
+
+1. **`GET /v1/hosts/{id}/processes`** returns the full, unfiltered latest sample to every user with any relation to the host: owner-project members (any role) and members of any sharing project (any share level, any role). No `service_id` filtering. No relation: `not_found` (404), unchanged.
+2. **`POST /v1/hosts/{id}/snapshot`** is allowed for the same set of users.
+3. Unchanged: services list, service get, probe, health history and health-check edits follow v1.1 item 4 (a `metrics` share gets 403; a `deploy` share is limited to its own project's services). `service_id` on a process row may name a service the caller cannot open; clients must treat a 403/404 on that service as normal.
+
 ## v1.2 service names (2026-10-14, Joe: "service name is meaningless")
 
 1. **Service** gains `"display_name": string | null` (set by people; 1–64 printable characters, trimmed) and `"owner_user": string | null` (the account owning the listening socket, as reported by the agent).
