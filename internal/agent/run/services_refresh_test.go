@@ -542,7 +542,11 @@ func TestFailedServicesSendPreservesState(t *testing.T) {
 				ServicesRefreshEvery: 300 * time.Second,
 			},
 		}
-		before := canonical(a.discover(context.Background()).Services)
+		disc, complete := a.discover(context.Background())
+		if !complete {
+			t.Fatal("discovery")
+		}
+		before := canonical(disc.Services)
 		a.lastCanon = before
 		a.lastServicesSent = start
 		addExtraListener(t, proc)
@@ -561,7 +565,8 @@ func TestFailedServicesSendPreservesState(t *testing.T) {
 		if a.healthCancel != nil {
 			t.Fatal("refilter ran on a failed send")
 		}
-		if canonical(a.discover(context.Background()).Services) == before {
+		disc, complete = a.discover(context.Background())
+		if !complete || canonical(disc.Services) == before {
 			t.Fatal("discovered set did not change")
 		}
 	})

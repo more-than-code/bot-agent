@@ -164,6 +164,9 @@ type Hello struct {
 	Capabilities []string     `json:"capabilities"`
 	Programs     *Programs    `json:"programs,omitempty"`
 	Services     []Discovered `json:"services"`
+	// ServicesComplete is false when the first discovery did not finish.
+	// It is always sent. Older agents omit it, and the server reads that as true.
+	ServicesComplete bool `json:"services_complete"`
 }
 
 // Services is the discovered set. It is sent when the set changes and at least every 300s while connected.

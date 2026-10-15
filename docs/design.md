@@ -48,6 +48,8 @@ Rewrites are atomic: temp file in the same directory, mode 0600, fsync, rename. 
 | Health | `probe_health` per configured check: `http://127.0.0.1:<port><path>` or a TCP connect. The port must be one the service is listening on (D12). No redirects; timeout ≤ 10 s; body not stored, only status, latency, and result. | `inputs.http_response` |
 | Live tasks | `host_snapshot`, `probe_health` | — |
 
+A services report is the host's full set, so the agent sends one only from a complete discovery: the process scan succeeded and, when the program policy is enabled, the helper's owned-program lookup succeeded. If either fails, that cycle sends no `services` frame and the previous report stays. `hello` includes `services_complete`, which is false with `services` empty when the first discovery did not finish, so the server does not store that hello as the full set (agent-protocol v1.3.2).
+
 The user-scope systemd caveat from spec-v1 still applies: a system user cannot read another user's bus. Units are inferred from the cgroup path, which needs no bus.
 
 ## Phase 2: logs, deploy, run/stop

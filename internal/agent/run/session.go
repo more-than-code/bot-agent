@@ -87,10 +87,10 @@ func (a *agent) serverError(raw []byte) error {
 }
 
 func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
-	disc := a.discover(ctx)
-	services := disc.Services
-	if services == nil {
-		services = []protocol.Discovered{}
+	disc, complete := a.discover(ctx)
+	services := []protocol.Discovered{}
+	if complete {
+		services = disc.Services
 	}
 	programs, caps := a.helloPrograms()
 	hello := protocol.Hello{
@@ -98,9 +98,10 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 		HostID: a.cfg.HostID, CredentialID: a.cfg.CredentialID,
 		AgentVersion: protocol.AgentVersion,
 		OS:           runtime.GOOS, Arch: runtime.GOARCH,
-		Capabilities: caps,
-		Programs:     programs,
-		Services:     services,
+		Capabilities:     caps,
+		Programs:         programs,
+		Services:         services,
+		ServicesComplete: complete,
 	}
 	w := &writer{c: c, onSend: a.opt.OnSend}
 	if err := w.Send(ctx, hello); err != nil {
@@ -133,8 +134,21 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	a.offset = serverNow.Sub(a.opt.Now())
 	a.bo.Reset()
 	a.pingEvery = time.Duration(protocol.Heartbeat(okf.HeartbeatSec)) * time.Second
-	a.apply(okf.Config, disc.Services)
-	a.lastCanon = canonical(services)
+	filtered := services
+	if !complete {
+		a.mu.Lock()
+		filtered = append([]protocol.Discovered(nil), a.services...)
+		a.mu.Unlock()
+	}
+	a.apply(okf.Config, filtered)
+	if complete {
+		a.lastCanon = canonical(services)
+	} else {
+		// This connection has not delivered a set. The agent object survives
+		// reconnects, so drop the previous connection's baseline. Otherwise an
+		// unchanged complete pass is held until ServicesRefreshEvery.
+		a.lastCanon = ""
+	}
 
 	sess, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -358,8 +372,9 @@ func (a *agent) sendMetrics(ctx context.Context, w *writer, host, procs bool, he
 	return a.emitMetrics(ctx, w.SendRaw, samples, now)
 }
 
-func (a *agent) discover(ctx context.Context) discover.Result {
+func (a *agent) discover(ctx context.Context) (discover.Result, bool) {
 	res, err := discover.Scan(a.opt.ProcRoot, a.opt.Passwd)
+	complete := err == nil
 	if err != nil {
 		a.opt.Log.Printf("bot-agent: discovery failed")
 		res = discover.Result{}
@@ -369,6 +384,7 @@ func (a *agent) discover(ctx context.Context) discover.Result {
 		owned, err := a.ownedPrograms(hctx)
 		cancel()
 		if err != nil {
+			complete = false
 			if a.ownedOnce.CompareAndSwap(false, true) {
 				a.opt.Log.Printf("bot-agent: program discovery failed")
 			}
@@ -382,15 +398,23 @@ func (a *agent) discover(ctx context.Context) discover.Result {
 	if res.Services == nil {
 		res.Services = []protocol.Discovered{}
 	}
+	// An incomplete pass is not the host's set. Health filtering and
+	// serviceFor keep the previous one.
+	if !complete {
+		return res, false
+	}
 	a.mu.Lock()
 	a.disc = res
 	a.services = res.Services
 	a.mu.Unlock()
-	return res
+	return res, true
 }
 
 func (a *agent) maybeServices(ctx context.Context, w *writer, now time.Time) error {
-	res := a.discover(ctx)
+	res, complete := a.discover(ctx)
+	if !complete {
+		return nil
+	}
 	canon := canonical(res.Services)
 	changed := canon != a.lastCanon
 	if !changed && now.Sub(a.lastServicesSent) < a.opt.ServicesRefreshEvery {

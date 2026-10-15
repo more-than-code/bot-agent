@@ -117,6 +117,8 @@ The token is one trimmed line, 16–128 characters of `[A-Za-z0-9_-]`. `--join-t
 
 Discovered services are re-sent at least every 5 minutes while connected; see agent-protocol v1.2.
 
+A services report is the host's full set, so it is sent only from a complete discovery. If the process scan fails, or the program policy is enabled and the owned-program lookup fails, that cycle sends nothing and the previous report stays. `hello` carries `services_complete`. It is false, with `services` empty, when the first discovery did not finish, so the server does not treat that hello as the full set. See agent-protocol v1.3.2.
+
 ## Programs (agent-protocol v1.3.1)
 
 `bot-agent` stays an unprivileged user. `packaging/bot-agent.service` is unchanged: `NoNewPrivileges=yes`, empty `CapabilityBoundingSet=` and `AmbientCapabilities=`, `ProtectSystem=strict`, and `ProtectHome=yes`. That sandbox cannot see `/home` and cannot run a useful `sudo`. The agent therefore does no filesystem checks on a program directory. It dials `/run/bot-agent-runner.sock`. The root helper re-reads `/etc/bot-agent/runner.toml`, resolves the directory and the executable, and writes a transient system unit under `/run/systemd/system`.

@@ -458,7 +458,10 @@ func TestOwnedSocketsFailureStillReportsUnit(t *testing.T) {
 		},
 		policy: policy.Policy{Exists: true, Valid: true, Enabled: true},
 	}
-	res := a.discover(context.Background())
+	res, complete := a.discover(context.Background())
+	if !complete {
+		t.Fatal("sockets failure is not an incomplete discovery")
+	}
 	var web *protocol.Discovered
 	for i := range res.Services {
 		if res.Services[i].Name == "web" {
@@ -480,8 +483,12 @@ func TestProgramDiscoveryFailureLogsOnce(t *testing.T) {
 		},
 		policy: policy.Policy{Exists: true, Valid: true, Enabled: true},
 	}
-	a.discover(context.Background())
-	a.discover(context.Background())
+	if _, complete := a.discover(context.Background()); complete {
+		t.Fatal("helper failure reported complete")
+	}
+	if _, complete := a.discover(context.Background()); complete {
+		t.Fatal("helper failure reported complete")
+	}
 	if n := strings.Count(buf.String(), "bot-agent: program discovery failed"); n != 1 {
 		t.Fatalf("logs %d\n%s", n, buf.String())
 	}

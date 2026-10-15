@@ -132,6 +132,27 @@ func TestValidateHelloAndReject(t *testing.T) {
 	if err := ValidateAgent([]byte(owned)); err != nil {
 		t.Fatal(err)
 	}
+	for _, flag := range []string{"true", "false"} {
+		withFlag := strings.Replace(hello, `"services":[`, `"services_complete":`+flag+`,"services":[`, 1)
+		if err := ValidateAgent([]byte(withFlag)); err != nil {
+			t.Fatalf("services_complete %s: %v", flag, err)
+		}
+	}
+	encoded, err := Marshal(Hello{
+		V: 1, Type: "hello",
+		HostID: "11111111-1111-4111-8111-111111111111", CredentialID: "22222222-2222-4222-8222-222222222222",
+		AgentVersion: "0.1.0", OS: "linux", Arch: "arm64",
+		Capabilities: []string{"metrics", "probe"}, Services: []Discovered{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"services_complete":false`) {
+		t.Fatalf("false omitted: %s", encoded)
+	}
+	if err := ValidateAgent(encoded); err != nil {
+		t.Fatal(err)
+	}
 	snap := []byte(`{"sampled_at":"2026-10-13T12:00:00Z","cpu_percent":0,"mem":{"total":1,"used":1,"available":0,"used_percent":100},"disks":[],"load":[0,0,0],"temp_celsius":null,"uptime_sec":1,"top":[{"pid":1,"process_name":"init","user":"root","cmdline":"init","cpu_usage":0,"memory_rss":1}]}`)
 	if err := ValidateSnapshot(snap); err != nil {
 		t.Fatal(err)
