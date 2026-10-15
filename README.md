@@ -116,3 +116,43 @@ printf '%s\n' '<token>' | bot-agent init --server '<wss-url>' --join-token-stdin
 The token is one trimmed line, 16–128 characters of `[A-Za-z0-9_-]`. `--join-token <tok>` is rejected. Optional `--env-file` selects the env file (default `/etc/bot-agent/env`). Nothing from the env file is printed.
 
 Discovered services are re-sent at least every 5 minutes while connected; see agent-protocol v1.2.
+
+## Programs (agent-protocol v1.3.1)
+
+`bot-agent` stays an unprivileged user. `packaging/bot-agent.service` is unchanged: `NoNewPrivileges=yes`, empty `CapabilityBoundingSet=` and `AmbientCapabilities=`, `ProtectSystem=strict`, and `ProtectHome=yes`. That sandbox cannot see `/home` and cannot run a useful `sudo`. The agent therefore does no filesystem checks on a program directory. It dials `/run/bot-agent-runner.sock`. The root helper re-reads `/etc/bot-agent/runner.toml`, resolves the directory and the executable, and writes a transient system unit under `/run/systemd/system`.
+
+The helper is socket-activated. There is no sudoers line.
+
+- `bot-agent-runner.socket` listens on `/run/bot-agent-runner.sock` with `SocketUser=root`, `SocketGroup=bot-agent`, `SocketMode=0660`, and `Accept=yes`.
+- Each connection starts `bot-agent-runner@.service` as root. `ExecStart` is `/usr/local/libexec/bot-agent-runner serve-conn`. The process reads one newline-terminated request from the socket and writes one JSON response.
+- `serve-conn` checks `SO_PEERCRED` on that socket. The peer uid must be the `bot-agent` account. Anyone else is refused.
+
+A compromised API cannot widen what this host will run: the policy file is root-owned and is not writable by `bot-agent`. A compromised agent can ask only for what that policy already allows, and only by connecting to that socket. Polkit is not a substitute. It can limit unit names, not the command a unit runs. Shell mode (`/bin/sh -c`) is off unless `allow_shell` is true. Request env values are written to the root-only env file and are not logged. Keys that change which code runs (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, and the rest of the v1.6.1 list) are refused, including a hoisted `KEY=value` argument.
+
+`ProtectHome=read-only` on a program unit leaves other home directories readable. That follows from the policy model: the host owner chooses `run_as`, and that account can read whatever its own permissions already allow. An allowlisted interpreter such as `/usr/bin/node` runs the caller's arguments as `run_as`. The host owner chooses `exec_allow`. The helper does not try to decide which of those arguments are safe.
+
+The helper unit is hardened only as far as its job allows. It must write `/run/systemd/system` and `/run/bot-agent/env`, run `systemctl` and `journalctl`, and read `/home` and `/proc`. `packaging/bot-agent-runner@.service` sets `ProtectHome=read-only`, `PrivateTmp=yes`, `ProtectKernelModules=yes`, `RestrictAddressFamilies=AF_UNIX`, and `NoNewPrivileges=yes`, and the comments in that file say why a stricter sandbox is omitted.
+
+Install, as root:
+
+| Path | Owner | Mode |
+|---|---|---|
+| `/usr/local/libexec/bot-agent-runner` | `root:root` | `0755` |
+| `/etc/systemd/system/bot-agent-runner.socket` | `root:root` | `0644` |
+| `/etc/systemd/system/bot-agent-runner@.service` | `root:root` | `0644` |
+| `/etc/tmpfiles.d/bot-agent-runner.conf` | `root:root` | `0644` |
+| `/etc/bot-agent` | `root:bot-agent` | `0750` |
+| `/etc/bot-agent/env` | `bot-agent:bot-agent` | `0600` |
+| `/etc/bot-agent/runner.toml` | `root:root` | `0644` |
+
+`/etc/bot-agent` stays `0750` and group `bot-agent` so the agent can read the policy and cannot replace it. Copy `packaging/runner.toml.example` (it ships with `enabled = false`) and `packaging/tmpfiles.d/bot-agent-runner.conf`, install the two units, then:
+
+```bash
+systemd-tmpfiles --create /etc/tmpfiles.d/bot-agent-runner.conf
+systemctl daemon-reload
+systemctl enable --now bot-agent-runner.socket
+```
+
+`/run` is empty at boot. The tmpfiles snippet creates `/run/bot-agent` and `/run/bot-agent/env` as `0700` `root:root`. The helper unit lists `-/run/bot-agent` so a missing directory does not fail namespace setup, and the helper creates those directories itself when it can. The helper writes unit files as root `0644`, env files as root `0600`, and the validated start request as root `0600` at `/run/bot-agent/env/<unit>.json`. All of them disappear on reboot. A start whose `daemon-reload` fails, or whose unit does not become freshly active, stops that unit and removes the files. `max_programs` counts every unit file still on disk, including inactive ones. Restart reads the stored request and refuses it, stopping the unit, when the current policy would no longer allow that command. Program units also set `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, and `ProtectControlGroups=yes`, and they hide the docker, containerd, and podman sockets.
+
+Rollback: `systemctl disable --now bot-agent-runner.socket`, or set `enabled = false` and restart `bot-agent` (the agent reads the policy only at startup). Either one stops new program tasks. Units that are already running keep running until `systemctl stop 'deploybot-*'`. After `enabled = false` the agent stops reporting those units as owned services.

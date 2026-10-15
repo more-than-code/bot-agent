@@ -87,17 +87,19 @@ func (a *agent) serverError(raw []byte) error {
 }
 
 func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
-	disc := a.discover()
+	disc := a.discover(ctx)
 	services := disc.Services
 	if services == nil {
 		services = []protocol.Discovered{}
 	}
+	programs, caps := a.helloPrograms()
 	hello := protocol.Hello{
 		V: protocol.Version, Type: "hello",
 		HostID: a.cfg.HostID, CredentialID: a.cfg.CredentialID,
 		AgentVersion: protocol.AgentVersion,
 		OS:           runtime.GOOS, Arch: runtime.GOARCH,
-		Capabilities: protocol.Capabilities(),
+		Capabilities: caps,
+		Programs:     programs,
 		Services:     services,
 	}
 	w := &writer{c: c, onSend: a.opt.OnSend}
@@ -356,11 +358,23 @@ func (a *agent) sendMetrics(ctx context.Context, w *writer, host, procs bool, he
 	return a.emitMetrics(ctx, w.SendRaw, samples, now)
 }
 
-func (a *agent) discover() discover.Result {
+func (a *agent) discover(ctx context.Context) discover.Result {
 	res, err := discover.Scan(a.opt.ProcRoot, a.opt.Passwd)
 	if err != nil {
 		a.opt.Log.Printf("bot-agent: discovery failed")
 		res = discover.Result{}
+	}
+	if a.policy.Valid && a.policy.Enabled && a.opt.Helper != nil {
+		hctx, cancel := context.WithTimeout(ctx, discoverHelperTimeout)
+		owned, err := a.ownedPrograms(hctx)
+		cancel()
+		if err != nil {
+			if a.ownedOnce.CompareAndSwap(false, true) {
+				a.opt.Log.Printf("bot-agent: program discovery failed")
+			}
+		} else {
+			res = discover.ApplyOwned(res, owned)
+		}
 	}
 	if a.unmappedOnce.CompareAndSwap(false, true) {
 		a.opt.Log.Printf("bot-agent: unmapped listeners: %d", res.Unmapped)
@@ -376,7 +390,7 @@ func (a *agent) discover() discover.Result {
 }
 
 func (a *agent) maybeServices(ctx context.Context, w *writer, now time.Time) error {
-	res := a.discover()
+	res := a.discover(ctx)
 	canon := canonical(res.Services)
 	changed := canon != a.lastCanon
 	if !changed && now.Sub(a.lastServicesSent) < a.opt.ServicesRefreshEvery {

@@ -15,6 +15,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/config"
 	"github.com/more-than-code/bot-agent/internal/agent/conn"
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
+	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/spool"
 )
@@ -51,6 +52,15 @@ type Options struct {
 	Pace                 *Pace
 	OnTaskStart          func()
 	Log                  *log.Logger
+	// PolicyPath is the runner policy. Empty means /etc/bot-agent/runner.toml.
+	// PolicyUID overrides the owner check in tests; production leaves it nil.
+	// Helper, when set, replaces the socket dial. HelperPath is the socket
+	// path. Empty means /run/bot-agent-runner.sock.
+	PolicyPath string
+	GroupPath  string
+	HelperPath string
+	PolicyUID  func(os.FileInfo) (uint32, bool)
+	Helper     Helper
 }
 
 func (o Options) withDefaults() Options {
@@ -81,6 +91,15 @@ func (o Options) withDefaults() Options {
 	if o.ServicesRefreshEvery <= 0 {
 		o.ServicesRefreshEvery = 300 * time.Second
 	}
+	if o.GroupPath == "" {
+		o.GroupPath = policy.DefaultGroup
+	}
+	if o.HelperPath == "" {
+		o.HelperPath = defaultSocketPath
+	}
+	if o.Helper == nil {
+		o.Helper = socketHelper{path: o.HelperPath}
+	}
 	return o
 }
 
@@ -102,6 +121,15 @@ func Run(ctx context.Context, opt Options) error {
 	opt = opt.withDefaults()
 	if opt.EUID() == 0 {
 		return errors.New("refusing to run as root")
+	}
+	pol := policy.Load(policy.Files{
+		Policy: opt.PolicyPath, Passwd: opt.Passwd, Group: opt.GroupPath, UID: opt.PolicyUID,
+	})
+	if pol.Exists && !pol.Valid {
+		opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
+	}
+	for _, d := range pol.Dropped {
+		opt.Log.Printf("bot-agent: runner policy dropped run_as %s", quoteLog(d.Name))
 	}
 	path := opt.EnvFile
 	if path == "" {
@@ -132,10 +160,11 @@ func Run(ctx context.Context, opt Options) error {
 		return err
 	}
 	a := &agent{
-		opt:   opt,
-		cfg:   cfg,
-		host:  host,
-		spool: sp,
+		opt:    opt,
+		cfg:    cfg,
+		host:   host,
+		spool:  sp,
+		policy: pol,
 		col: collect.New(collect.Roots{
 			Proc: opt.ProcRoot, Sys: opt.SysRoot, Passwd: opt.Passwd,
 		}, opt.StatFS),
@@ -183,12 +212,13 @@ func hostname(cfg config.Config) (string, error) {
 }
 
 type agent struct {
-	opt   Options
-	cfg   config.Config
-	host  string
-	spool *spool.Spool
-	col   *collect.Collector
-	bo    conn.Backoff
+	opt    Options
+	cfg    config.Config
+	host   string
+	spool  *spool.Spool
+	col    *collect.Collector
+	policy policy.Policy
+	bo     conn.Backoff
 
 	mu       sync.Mutex
 	disc     discover.Result
@@ -205,6 +235,7 @@ type agent struct {
 	lastServicesSent time.Time
 
 	unmappedOnce atomic.Bool
+	ownedOnce    atomic.Bool
 	healthCh     chan protocol.Sample
 	healthCancel context.CancelFunc
 	pending      pendingTasks

@@ -36,7 +36,7 @@ func TestDecideOrder(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _ := Decide(tc.task, host, now, services)
+			code, _ := Decide(tc.task, host, now, services, Gate{})
 			if code != tc.want {
 				t.Fatalf("got %s", code)
 			}

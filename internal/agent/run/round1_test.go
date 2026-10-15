@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,7 +42,7 @@ func TestHealthConfigAndSSRF(t *testing.T) {
 	srv.Config.HealthChecks = []protocol.HealthCheck{
 		{ID: "ssrf", Service: "nginx", Protocol: "http", Port: live, Path: "@evil.example/", IntervalSec: 60, ExpectStatusMin: 200, ExpectStatusMax: 299},
 	}
-	var logBuf bytes.Buffer
+	var logBuf safeBuf
 	var slept atomic.Bool
 	pace := &Pace{}
 	pace.Metrics.Store(int64(40 * time.Millisecond))
@@ -59,17 +61,22 @@ func TestHealthConfigAndSSRF(t *testing.T) {
 				slept.Store(true)
 				return errors.New("stop")
 			},
-			Log: stdLog(&logBuf),
+			Log: log.New(&logBuf, "", 0),
 		})
 	}()
 	defer stopRun(t, cancel, errCh)
 	if !waitFrames(t, srv, &slept, 4*time.Second, func(fr []fakeserver.Frame) bool {
 		return countType(fr, "hello") >= 1
 	}) {
-		t.Fatalf("hello %v %s", frameTypes(srv.Frames()), redactLog(&logBuf, token, srv.Credential))
+		t.Fatalf("hello %v %s", frameTypes(srv.Frames()), redactLog(logBuf.copy(), token, srv.Credential))
+	}
+	// The drop is logged while handling hello_ok, which is after hello is sent.
+	dropDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(dropDeadline) && !strings.Contains(logBuf.String(), `drop health check id="ssrf"`) {
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !strings.Contains(logBuf.String(), `drop health check id="ssrf"`) {
-		t.Fatalf("ssrf check was not dropped: %s", redactLog(&logBuf, token, srv.Credential))
+		t.Fatalf("ssrf check was not dropped: %s", redactLog(logBuf.copy(), token, srv.Credential))
 	}
 	if err := srv.SendConfig(protocol.Config{
 		MetricsIntervalSec: 60,
@@ -92,11 +99,37 @@ func TestHealthConfigAndSSRF(t *testing.T) {
 		rej, _ := taskOutcomes(fr)
 		return rej["ssrf-live"] == "bad_spec" && healthPortString(fr, "fresh")
 	}) {
-		t.Fatalf("frames %v log %s violations %v", frameTypes(srv.Frames()), redactLog(&logBuf, token, srv.Credential), srv.Violations())
+		t.Fatalf("frames %v log %s violations %v", frameTypes(srv.Frames()), redactLog(logBuf.copy(), token, srv.Credential), srv.Violations())
 	}
 	if v := srv.Violations(); len(v) != 0 {
 		t.Fatalf("violations %v", v)
 	}
+}
+
+// safeBuf is a bytes.Buffer the agent goroutine and the test can share.
+type safeBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func (s *safeBuf) copy() *bytes.Buffer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out bytes.Buffer
+	out.Write(s.b.Bytes())
+	return &out
 }
 
 func TestHelloForbiddenStaysUp(t *testing.T) {

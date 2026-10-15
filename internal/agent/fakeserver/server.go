@@ -452,6 +452,10 @@ func (s *Server) checkResult(raw []byte) {
 		err = protocol.ValidateSnapshot(head.Payload)
 	case "probe_health":
 		err = protocol.ValidateProbeResult(head.Payload)
+	case "program_start", "program_stop", "program_restart", "program_status":
+		err = protocol.ValidateProgramStatus(head.Payload)
+	case "program_logs":
+		err = protocol.ValidateProgramLogs(head.Payload)
 	}
 	if err != nil {
 		s.addViolation("payload: " + err.Error())

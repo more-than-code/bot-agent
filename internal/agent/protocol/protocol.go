@@ -25,7 +25,8 @@ var NamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 var WholeDisk = regexp.MustCompile(`^(?:mmcblk\d+|nvme\d+n\d+|sd[a-z]+|vd[a-z]+)$`)
 
 // Capabilities is the phase-1 hello set. metrics covers host_snapshot;
-// probe covers probe_health. Phase-2 kinds are absent on purpose.
+// probe covers probe_health. "programs" is added by the daemon only when
+// the host policy is valid and enabled.
 func Capabilities() []string {
 	return []string{"metrics", "probe"}
 }
@@ -74,6 +75,22 @@ type Discovered struct {
 	ProcessName   *string `json:"process_name"`
 	PID           *int    `json:"pid"`
 	User          *string `json:"user"`
+	Owner         *Owner  `json:"owner,omitempty"`
+}
+
+// Owner marks a service started by the root helper. Old servers ignore it.
+type Owner struct {
+	Kind    string `json:"kind"`
+	Project string `json:"project"`
+	Entry   string `json:"entry"`
+}
+
+// Programs is the hello summary of the host policy. Paths are never included.
+type Programs struct {
+	Enabled    bool     `json:"enabled"`
+	RunAs      []string `json:"run_as"`
+	AllowShell bool     `json:"allow_shell"`
+	PolicyHash string   `json:"policy_hash"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.
@@ -145,6 +162,7 @@ type Hello struct {
 	OS           string       `json:"os"`
 	Arch         string       `json:"arch"`
 	Capabilities []string     `json:"capabilities"`
+	Programs     *Programs    `json:"programs,omitempty"`
 	Services     []Discovered `json:"services"`
 }
 

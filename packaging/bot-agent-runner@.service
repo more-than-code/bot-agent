@@ -1,0 +1,37 @@
+[Unit]
+Description=bot-agent runner connection
+# One accepted connection. The job has to write unit and env files, exec
+# systemctl and journalctl, and read /home and /proc. Hardening stops there:
+# - ProtectHome=yes would hide /home, so realpath and exec resolution could not run.
+#   read-only is as far as that allows. Other homes stay readable; run_as is the host owner's choice.
+# - ProtectSystem=strict is on, but only with the ReadWritePaths below. Without those
+#   paths the helper could not create /run/systemd/system or /run/bot-agent/env.
+# - /run/bot-agent is prefixed with '-' so a missing directory does not fail
+#   namespace setup. tmpfiles creates it 0700 root root. The helper creates it
+#   too when the path is writable.
+# - CapabilityBoundingSet is left unset. Dropping CAP_DAC_OVERRIDE would make a
+#   /home directory that is not world-traversable unreadable.
+# - PrivateNetwork=yes is omitted. systemctl and journalctl must reach the host's
+#   unix sockets, and a private network namespace is not something this tree can prove.
+# - SystemCallFilter is omitted. The helper is a Go program that execs systemctl
+#   and journalctl; a wrong filter fails closed on a host and cannot be checked here.
+# - ProtectProc=invisible is omitted so sockets can read another user's /proc/<pid>/fd.
+
+[Service]
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run/systemd/system -/run/bot-agent
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+StandardInput=socket
+StandardOutput=socket
+ExecStart=/usr/local/libexec/bot-agent-runner serve-conn
+RuntimeMaxSec=60

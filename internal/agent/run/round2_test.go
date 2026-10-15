@@ -48,7 +48,9 @@ func TestQuoteLogCapsRunes(t *testing.T) {
 func TestMetricsFramesStayUnderLimit(t *testing.T) {
 	const n = 1800
 	cmd := strings.Repeat("c", 1024)
-	now := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	// QueuedAt is compared with the wall clock. A fixed October 14 timestamp
+	// falls out of the 24h spool window on later days and the file is deleted.
+	now := time.Now().UTC()
 	samples := make([]protocol.Sample, n)
 	for i := range samples {
 		samples[i] = protocol.Sample{

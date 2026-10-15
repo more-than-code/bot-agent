@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
+	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/probe"
+	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
@@ -23,14 +25,33 @@ type ProbeSpec struct {
 	ExpectMax int
 }
 
+// Gate is the host side of program checks 5 and 7. A zero Gate denies programs.
+// Known is true only after the caller has counted running deploybot units.
+// When it is false, max_programs is not applied.
+type Gate struct {
+	Policy  policy.Policy
+	Running int
+	Active  map[string]bool
+	Known   bool
+}
+
 // Decide runs the contract checks in order. An empty code means the task may run.
-func Decide(task protocol.Task, hostID string, now time.Time, services []protocol.Discovered) (string, ProbeSpec) {
+func Decide(task protocol.Task, hostID string, now time.Time, services []protocol.Discovered, gate Gate) (string, ProbeSpec) {
 	if task.HostID != hostID {
 		return "wrong_host", ProbeSpec{}
 	}
 	exp, err := protocol.ParseTime(task.ExpiresAt)
 	if err != nil || !now.Before(exp) {
 		return "expired", ProbeSpec{}
+	}
+	if programKind(task.Kind) {
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		_, code := programs.Check(task.Kind, task.Spec, programs.Gate{
+			Policy: gate.Policy, Running: gate.Running, Active: gate.Active, CountKnown: gate.Known,
+		})
+		return code, ProbeSpec{}
 	}
 	if task.Kind != "host_snapshot" && task.Kind != "probe_health" {
 		return "forbidden", ProbeSpec{}
@@ -53,6 +74,15 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 		}
 	}
 	return "", spec
+}
+
+func programKind(kind string) bool {
+	switch kind {
+	case "program_start", "program_stop", "program_restart", "program_status", "program_logs":
+		return true
+	default:
+		return false
+	}
 }
 
 func findService(services []protocol.Discovered, name string) (protocol.Discovered, bool) {

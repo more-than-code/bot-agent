@@ -11,6 +11,7 @@ Nothing here is installed on a host. Host steps are Joe's.
 |---|---|---|
 | `cmd/render-telegraf`, `internal/render`, `services/*.json`, `nodes.json`, `telegraf/`, `sql/010_…` | Telegraf snippets and Services SQL for `cluster_metrics` | Kept unchanged **during the overlap period**. Retired after Telegraf is removed (umbrella design §9). |
 | `cmd/bot-agent` (new) | — | The agent daemon. |
+| `cmd/bot-agent-runner` | — | Root helper for program units. The unprivileged agent reaches it over `/run/bot-agent-runner.sock`. |
 | `internal/agent/...` (new) | — | `conn` (wss client, enroll/hello, heartbeat, backoff), `collect` (host metrics, processes), `discover` (ports, units, containers), `probe` (HTTP/TCP health), `spool` (on-disk ingest buffer), `tasks` (allowlist and dispatch), and from phase 2 `docker` (proxy client) and `owned` (local owned list). |
 | `cmd/bot-agent-docker-proxy` (new, phase 2) | — | The custom Docker socket proxy (umbrella D26). |
 
@@ -42,7 +43,7 @@ Rewrites are atomic: temp file in the same directory, mode 0600, fsync, rename. 
 | Area | What | Matches Telegraf today |
 |---|---|---|
 | Host compute | cpu (`cpu-total`, `usage_idle`, …), mem, disk (`/`), diskio (whole disks), net (no `lo`), system (load1/5/15, uptime), temp (`cpu_thermal` where present) | Same names and units as `docs/api-contract.md`, so the overlap comparison is like for like. |
-| Processes | Top 20 by cpu and top 20 by RSS each interval, plus every process of a known service. Irix cpu (100 = one core). The `cmdline` is sent raw; the server shortens it for display. | procstat scan + topk |
+| Processes | Top 20 by cpu and top 20 by RSS each interval, plus every process of a known service. Irix cpu (100 = one core). The agent truncates `cmdline` to 1024 characters and redacts secrets (agent-protocol §Redaction, `internal/agent/redact`) before sending; the server redacts again on ingest and shortens it for display. | procstat scan + topk |
 | Services | Discovery: listening TCP sockets → pid → systemd unit (via `/proc/<pid>/cgroup`) or process. Reported in `hello`, when they change, and at least every 5 minutes while connected; see agent-protocol v1.2. | `services/*.json` (hand-written) |
 | Health | `probe_health` per configured check: `http://127.0.0.1:<port><path>` or a TCP connect. The port must be one the service is listening on (D12). No redirects; timeout ≤ 10 s; body not stored, only status, latency, and result. | `inputs.http_response` |
 | Live tasks | `host_snapshot`, `probe_health` | — |
@@ -99,3 +100,11 @@ grok-bot-box has no systemd. It starts from a script that Joe reruns after every
 - Probe targets: rejects ports not exposed, other hosts, and redirects.
 - Phase 2: a stub Docker API asserting that only the allowed calls are made. The proxy rejects every forbidden create field. `logs`, `run`, and `stop` refuse names not on the owned list. Deploy adopts an existing name without changing it.
 - `go test ./...` keeps covering `internal/render` until it is retired.
+
+## Programs (v1.3)
+
+Wave 1 of `docs/spec-project-catalog.md`, amended by agent-protocol v1.3.1, is a root helper, not a capability on `bot-agent.service`. `cmd/bot-agent-runner` is installed at `/usr/local/libexec/bot-agent-runner` (`root:root`, `0755`). systemd accepts `/run/bot-agent-runner.sock` and starts one `serve-conn` process per connection. The agent dials that socket. The connect budget is 5 seconds. The rest of the call uses the task timeout (`timeout_sec`, clamped to 15–60 seconds); hello and discovery keep a 5 second limit. It does not resolve paths under `/home`. The helper re-validates the root-owned policy and the task, including realpath and exec resolution, writes `/run/systemd/system/deploybot-<project>-<entry>.service` (`root`, `0644`), `/run/bot-agent/env/<unit>.env` (`root`, `0600`), and the same request at `/run/bot-agent/env/<unit>.json` (`root`, `0600`), and reloads systemd. `packaging/tmpfiles.d/bot-agent-runner.conf` creates `/run/bot-agent` and `/run/bot-agent/env` at boot (`0700` `root:root`); the helper creates them too. A non-zero `systemctl restart`, a timestamp that does not move, or a failed `daemon-reload` removes that start's files and is `start_failed`. `max_programs` counts unit files, not only active units. Restart re-checks the stored request against the current policy and stops a unit that is no longer allowed. The helper refuses a unit file it did not create. Tests drive systemd, journalctl, and the socket through fakes. See `NOTES.md` for what still has to be confirmed on pi1.
+
+Threat model, from the catalog spec: a compromised API cannot change `/etc/bot-agent/runner.toml`; a compromised agent stays unprivileged and cannot exceed that file, because the helper checks every request again and the peer uid must be `bot-agent`. Polkit can constrain unit names and still let a transient unit run as root, which is why the helper is the privileged step. There is no shell unless `allow_shell` is true. Env values are not logged. `bot-agent.service` gains no capability. `ProtectHome=read-only` on a program unit leaves other homes readable, and an allowlisted interpreter runs the caller's arguments as `run_as`. Both follow from the host owner choosing `run_as` and `exec_allow`.
+
+Rollback is local. Set `enabled = false` and restart the agent, or `systemctl disable --now bot-agent-runner.socket`. New tasks stop. Units already started keep running until an administrator runs `systemctl stop 'deploybot-*'`. The agent reads the policy only at startup, so `enabled = false` does not take effect until that restart. After that it no longer reports those units as owned services, and it will not stop them itself.

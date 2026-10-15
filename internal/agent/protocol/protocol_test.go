@@ -114,6 +114,24 @@ func TestValidateHelloAndReject(t *testing.T) {
 	if err := ValidateAgent([]byte(strings.Replace(rej, "wrong_host", "nope", 1))); err == nil {
 		t.Fatal("bad code")
 	}
+	if err := ValidateAgent([]byte(strings.Replace(rej, "wrong_host", "policy_denied", 1))); err != nil {
+		t.Fatal(err)
+	}
+	withPrograms := strings.Replace(hello, `"capabilities":["metrics","probe"]`, `"capabilities":["metrics","probe","programs"],"programs":{"enabled":true,"run_as":["joe"],"allow_shell":false,"policy_hash":"`+strings.Repeat("ab", 32)+`"}`, 1)
+	if err := ValidateAgent([]byte(withPrograms)); err != nil {
+		t.Fatal(err)
+	}
+	disabled := strings.Replace(hello, `"capabilities":["metrics","probe"]`, `"capabilities":["metrics","probe"],"programs":{"enabled":false,"run_as":[],"allow_shell":false,"policy_hash":"`+strings.Repeat("ab", 32)+`"}`, 1)
+	if err := ValidateAgent([]byte(disabled)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAgent([]byte(strings.Replace(hello, `"capabilities":["metrics","probe"]`, `"capabilities":["metrics","probe","programs"]`, 1))); err == nil {
+		t.Fatal("programs capability without the object")
+	}
+	owned := strings.Replace(hello, `"services":[`, `"services":[{"name":"web","kind":"systemd","ports":[3031],"systemd_unit":"deploybot-tour-agent-web.service","systemd_scope":"system","container_name":null,"process_name":null,"pid":null,"user":"joe","owner":{"kind":"program","project":"tour-agent","entry":"web"}},`, 1)
+	if err := ValidateAgent([]byte(owned)); err != nil {
+		t.Fatal(err)
+	}
 	snap := []byte(`{"sampled_at":"2026-10-13T12:00:00Z","cpu_percent":0,"mem":{"total":1,"used":1,"available":0,"used_percent":100},"disks":[],"load":[0,0,0],"temp_celsius":null,"uptime_sec":1,"top":[{"pid":1,"process_name":"init","user":"root","cmdline":"init","cpu_usage":0,"memory_rss":1}]}`)
 	if err := ValidateSnapshot(snap); err != nil {
 		t.Fatal(err)

@@ -73,3 +73,39 @@ func TestCmdlineDropsInvalidUTF8(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestJournal(t *testing.T) {
+	long := strings.Repeat("a", JournalLineMax+100)
+	lines, cut := Journal([]string{"password=hunter2", long})
+	if !cut || len(lines) != 2 {
+		t.Fatalf("cut %v lines %d", cut, len(lines))
+	}
+	if lines[0] != "password=[REDACTED]" {
+		t.Fatalf("redact %q", lines[0])
+	}
+	if utf8.RuneCountInString(lines[1]) != JournalLineMax {
+		t.Fatalf("clip %d", utf8.RuneCountInString(lines[1]))
+	}
+	old := strings.Repeat("O", 1024)
+	newest := strings.Repeat("N", 1024)
+	var batch []string
+	batch = append(batch, "OLDEST")
+	for len(old)*len(batch) <= JournalBytes {
+		batch = append(batch, old)
+	}
+	batch = append(batch, newest)
+	got, cut := Journal(batch)
+	if !cut {
+		t.Fatal("expected drop")
+	}
+	total := 0
+	for _, line := range got {
+		total += len(line)
+		if line == "OLDEST" {
+			t.Fatal("kept oldest")
+		}
+	}
+	if total > JournalBytes || len(got) == 0 || got[len(got)-1] != newest {
+		t.Fatalf("total %d last %q", total, got[len(got)-1])
+	}
+}

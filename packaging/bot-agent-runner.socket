@@ -1,0 +1,14 @@
+[Unit]
+Description=bot-agent runner socket
+
+[Socket]
+ListenStream=/run/bot-agent-runner.sock
+SocketUser=root
+SocketGroup=bot-agent
+SocketMode=0660
+Accept=yes
+# Bound the number of concurrent root helper processes.
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target

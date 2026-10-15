@@ -4,9 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+)
+
+var (
+	projectSlugRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	entrySlugRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+	deploybotUnitRE = regexp.MustCompile(`^deploybot-[a-z0-9-]{1,64}-[a-z0-9-]{1,48}\.service$`)
+	policyHashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ValidateAgent reports why an agent→server frame violates the contract.
@@ -94,10 +102,37 @@ func checkHello(f Hello) error {
 	if f.HostID == "" || f.CredentialID == "" || f.AgentVersion == "" || f.OS == "" || f.Arch == "" {
 		return fmt.Errorf("hello fields")
 	}
-	if len(f.Capabilities) != 2 || f.Capabilities[0] != "metrics" || f.Capabilities[1] != "probe" {
-		return fmt.Errorf("capabilities %v", f.Capabilities)
+	if err := checkCaps(f); err != nil {
+		return err
+	}
+	if f.Programs != nil {
+		if f.Programs.RunAs == nil {
+			return fmt.Errorf("run_as")
+		}
+		if f.Programs.PolicyHash != "" && !policyHashRE.MatchString(f.Programs.PolicyHash) {
+			return fmt.Errorf("policy_hash")
+		}
+		if f.Programs.Enabled && f.Programs.PolicyHash == "" {
+			return fmt.Errorf("policy_hash")
+		}
 	}
 	return checkDiscovered(f.Services)
+}
+
+func checkCaps(f Hello) error {
+	caps := f.Capabilities
+	base := len(caps) == 2 && caps[0] == "metrics" && caps[1] == "probe"
+	with := len(caps) == 3 && caps[0] == "metrics" && caps[1] == "probe" && caps[2] == "programs"
+	if !base && !with {
+		return fmt.Errorf("capabilities %v", caps)
+	}
+	if with && (f.Programs == nil || !f.Programs.Enabled) {
+		return fmt.Errorf("programs capability")
+	}
+	if f.Programs != nil && f.Programs.Enabled && !with {
+		return fmt.Errorf("programs enabled")
+	}
+	return nil
 }
 
 func checkDiscovered(list []Discovered) error {
@@ -136,13 +171,39 @@ func checkDiscovered(list []Discovered) error {
 		default:
 			return fmt.Errorf("kind %q", d.Kind)
 		}
+		if err := checkOwner(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkOwner(d Discovered) error {
+	if d.Owner == nil {
+		return nil
+	}
+	if d.Owner.Kind != "program" {
+		return fmt.Errorf("owner kind")
+	}
+	if !projectSlugRE.MatchString(d.Owner.Project) || !entrySlugRE.MatchString(d.Owner.Entry) {
+		return fmt.Errorf("owner name")
+	}
+	if d.Name != d.Owner.Entry {
+		return fmt.Errorf("owner entry")
+	}
+	want := "deploybot-" + d.Owner.Project + "-" + d.Owner.Entry + ".service"
+	if d.Kind != "systemd" || d.SystemdUnit == nil || *d.SystemdUnit != want {
+		return fmt.Errorf("owner unit")
+	}
+	if d.SystemdScope == nil || *d.SystemdScope != "system" {
+		return fmt.Errorf("owner scope")
 	}
 	return nil
 }
 
 func rejectCode(c string) bool {
 	switch c {
-	case "wrong_host", "expired", "forbidden", "bad_spec", "unknown_service", "busy":
+	case "wrong_host", "expired", "forbidden", "bad_spec", "unknown_service", "busy", "policy_denied":
 		return true
 	default:
 		return false
@@ -272,6 +333,108 @@ func ValidateProbeResult(raw []byte) error {
 		return err
 	}
 	return wantNumber(m["latency_ms"])
+}
+
+// ValidateProgramStatus checks a succeeded program_start/stop/restart/status payload.
+func ValidateProgramStatus(raw []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	need := []string{"unit", "active_state", "sub_state", "main_pid", "started_at", "ports"}
+	if len(m) != len(need) {
+		return fmt.Errorf("status keys %d", len(m))
+	}
+	for _, k := range need {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("status missing %s", k)
+		}
+	}
+	if !deploybotUnitRE.MatchString(unquote(m["unit"])) {
+		return fmt.Errorf("unit")
+	}
+	if unquote(m["active_state"]) == "" || unquote(m["sub_state"]) == "" {
+		return fmt.Errorf("state")
+	}
+	if err := wantIntOrNull(m["main_pid"]); err != nil {
+		return fmt.Errorf("main_pid: %w", err)
+	}
+	if err := wantStringOrNull(m["started_at"]); err != nil {
+		return fmt.Errorf("started_at: %w", err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(m["started_at"]), []byte("null")) {
+		if _, err := ParseTime(unquote(m["started_at"])); err != nil {
+			return fmt.Errorf("started_at: %w", err)
+		}
+	}
+	var ports []int
+	if err := json.Unmarshal(m["ports"], &ports); err != nil {
+		return fmt.Errorf("ports")
+	}
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("port %d", p)
+		}
+	}
+	return nil
+}
+
+// ValidateProgramLogs checks a succeeded program_logs payload.
+func ValidateProgramLogs(raw []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	need := []string{"unit", "lines", "truncated"}
+	if len(m) != len(need) {
+		return fmt.Errorf("logs keys %d", len(m))
+	}
+	for _, k := range need {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("logs missing %s", k)
+		}
+	}
+	if !deploybotUnitRE.MatchString(unquote(m["unit"])) {
+		return fmt.Errorf("unit")
+	}
+	var lines []string
+	if err := json.Unmarshal(m["lines"], &lines); err != nil {
+		return fmt.Errorf("lines")
+	}
+	total := 0
+	for _, line := range lines {
+		if utf8.RuneCountInString(line) > 2048 {
+			return fmt.Errorf("line length")
+		}
+		total += len(line)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("log bytes")
+	}
+	return wantBool(m["truncated"])
+}
+
+func wantStringOrNull(raw json.RawMessage) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	return wantString(raw)
+}
+
+func wantIntOrNull(raw json.RawMessage) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	return wantInt(raw)
+}
+
+func wantBool(raw json.RawMessage) error {
+	switch string(bytes.TrimSpace(raw)) {
+	case "true", "false":
+		return nil
+	default:
+		return fmt.Errorf("not a bool")
+	}
 }
 
 func unquote(raw json.RawMessage) string {

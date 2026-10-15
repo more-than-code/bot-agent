@@ -3,10 +3,12 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/tasks"
 )
@@ -97,7 +99,41 @@ func (a *agent) classify(task protocol.Task) (string, tasks.ProbeSpec) {
 	services := append([]protocol.Discovered(nil), a.services...)
 	offset := a.offset
 	a.mu.Unlock()
-	return tasks.Decide(task, a.cfg.HostID, a.opt.Now().Add(offset), services)
+	now := a.now().Add(offset)
+	gate := tasks.Gate{Policy: a.policy}
+	if task.Kind == "program_start" || task.Kind == "program_restart" {
+		// Reject a bad task before asking the helper how many units are running.
+		if code, _ := tasks.Decide(task, a.cfg.HostID, now, services, gate); code != "" {
+			return code, tasks.ProbeSpec{}
+		}
+		gate.Running, gate.Active = a.runningCount()
+		gate.Known = true
+	}
+	return tasks.Decide(task, a.cfg.HostID, now, services, gate)
+}
+
+// runningCount asks the helper how many deploybot unit files exist.
+// Inactive files count. A unit already in the set does not take a new slot.
+// A failure fails closed: the count is larger than any policy max.
+// A disabled policy does not call the helper.
+func (a *agent) runningCount() (int, map[string]bool) {
+	if !a.policy.Valid || !a.policy.Enabled {
+		return 0, nil
+	}
+	if a.opt.Helper == nil {
+		return math.MaxInt, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), discoverHelperTimeout)
+	defer cancel()
+	units, err := a.listUnits(ctx)
+	if err != nil {
+		return math.MaxInt, nil
+	}
+	have := map[string]bool{}
+	for _, u := range units {
+		have[u.Unit] = true
+	}
+	return len(units), have
 }
 
 func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskReject, protocol.TaskResult, bool) {
@@ -108,6 +144,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 			V: protocol.Version, Type: "task_reject", TaskID: task.TaskID, ErrorCode: code,
 		}, protocol.TaskResult{}, false
 	}
+	if _, ok := programs.Verb(task.Kind); ok {
+		return protocol.TaskReject{}, a.runProgram(ctx, task), true
+	}
 	tmo := time.Duration(task.TimeoutSec) * time.Second
 	if tmo <= 0 {
 		tmo = 15 * time.Second
@@ -117,7 +156,7 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 	}
 	tctx, cancel := context.WithTimeout(ctx, tmo)
 	defer cancel()
-	now := a.opt.Now()
+	now := a.now()
 	_, view, _ := a.col.SampleHost(now)
 	_, procs, _ := a.col.SampleProcs(now, a.serviceFor)
 	res := tasks.Run(tctx, task, spec, tasks.Env{Now: now, Host: view, Procs: procs, Timeout: tmo})

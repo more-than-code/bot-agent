@@ -1,0 +1,11 @@
+# Host policy for bot-agent-runner.
+# Install as /etc/bot-agent/runner.toml, owner root:root, mode 0644.
+# Leave enabled false until the directories and accounts below are reviewed.
+# The agent reads this file only at startup. Restart bot-agent after a change.
+
+enabled = false
+run_as = ["joe"]
+dirs = ["/home/joe/workspace"]
+exec_allow = ["/usr/bin/node", "/usr/bin/npm", "/usr/bin/pnpm"]
+allow_shell = false
+max_programs = 20
