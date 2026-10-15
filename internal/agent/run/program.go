@@ -50,6 +50,8 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 		}
 		p.Enabled = a.policy.Enabled
 	}
+	p.Images = a.policy.ImagesEnabled()
+	p.Docker = a.dockerUp()
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

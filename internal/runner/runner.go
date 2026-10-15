@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
@@ -36,11 +37,19 @@ type Sys struct {
 	Policy     string
 	UID        func(os.FileInfo) (uint32, bool)
 	Logf       func(string, ...any)
+	// MachineID is the host-id file. Empty means /etc/machine-id.
+	// DockerSock is the Engine socket. Empty means /var/run/docker.sock.
+	// Neither is taken from a request. Tests set both.
+	MachineID  string
+	DockerSock string
 }
 
 // Handle runs one verb. in is the raw JSON object from stdin.
 // The result is one JSON object and never contains env values.
 func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
+	if images.IsVerb(verb) {
+		return handleImage(ctx, verb, in, sys)
+	}
 	if ctx.Err() != nil {
 		return refuse(sys, programs.ReasonIO)
 	}

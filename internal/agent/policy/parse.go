@@ -8,16 +8,22 @@ import (
 
 // parsed is a syntactically accepted file. run_as names are not filtered yet.
 type parsed struct {
-	enabled     bool
-	allowShell  bool
-	maxPrograms int
-	runAs       []string
-	dirs        []string
-	execAllow   []string
+	enabled       bool
+	allowShell    bool
+	allowPublic   bool
+	maxPrograms   int
+	maxContainers int
+	maxSet        bool
+	runAs         []string
+	dirs          []string
+	execAllow     []string
+	images        []string
+	projects      []string
 }
 
-// parseTOML accepts only the six v1.3 keys. Unknown keys, duplicates, and
-// wrong types return a fixed reason. Values are not included in the reason.
+// parseTOML accepts the v1.3 keys and the v1.4 image keys. Unknown keys,
+// duplicates, and wrong types return a fixed reason. Values are not
+// included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
 	if !utf8.Valid(data) || strings.Contains(string(data), "\x00") {
 		return parsed{}, "parse"
@@ -82,6 +88,31 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.execAllow = xs
+		case "images":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.images = xs
+		case "projects":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.projects = xs
+		case "max_containers":
+			n, ok := parseInt(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.maxContainers = n
+			out.maxSet = true
+		case "allow_public_ports":
+			v, ok := parseBool(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.allowPublic = v
 		default:
 			return parsed{}, "unknown_key"
 		}
@@ -100,7 +131,8 @@ func parseTOML(data []byte) (parsed, string) {
 
 func knownKey(k string) bool {
 	switch k {
-	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs":
+	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
+		"images", "projects", "max_containers", "allow_public_ports":
 		return true
 	default:
 		return false

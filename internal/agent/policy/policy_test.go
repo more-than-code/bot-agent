@@ -9,7 +9,7 @@ import (
 )
 
 func TestUnknownKeyIsInvalid(t *testing.T) {
-	body := []byte("enabled = true\nimages = [\"ghcr.io/joe/*\"]\n")
+	body := []byte("enabled = true\nnot_a_key = [\"ghcr.io/joe/*\"]\n")
 	p := loadBytes(t, body, 0o644, rootUID)
 	if p.Valid || p.Enabled || p.Reason != "unknown_key" {
 		t.Fatalf("valid=%v enabled=%v reason=%s", p.Valid, p.Enabled, p.Reason)
@@ -162,6 +162,50 @@ func TestParseRejectsWrongTypes(t *testing.T) {
 		if _, reason := parseTOML([]byte(body)); reason != "parse" {
 			t.Fatalf("%q reason %s", body, reason)
 		}
+	}
+}
+
+func TestImagePolicy(t *testing.T) {
+	const base = "enabled = true\nimages = [\"ghcr.io/joe-and-his-friends/*\"]\nprojects = [\"mohiguide\"]\n"
+	cases := []struct {
+		name    string
+		body    string
+		reason  string
+		enabled bool
+		max     int
+		public  bool
+		images  int
+		projs   int
+		on      bool
+	}{
+		{"defaults", base, "", true, 20, false, 1, 1, true},
+		{"explicit", base + "max_containers = 200\nallow_public_ports = true\n", "", true, 200, true, 1, 1, true},
+		{"floor", base + "max_containers = 1\n", "", true, 1, false, 1, 1, true},
+		{"zero", base + "max_containers = 0\n", "parse", false, 0, false, 0, 0, false},
+		{"high", base + "max_containers = 201\n", "parse", false, 0, false, 0, 0, false},
+		{"star", "enabled = true\nimages = [\"*\"]\nprojects = [\"mohiguide\"]\n", "parse", false, 0, false, 0, 0, false},
+		{"host star", "enabled = true\nimages = [\"*.io/a/*\"]\nprojects = [\"a\"]\n", "parse", false, 0, false, 0, 0, false},
+		{"upper", "enabled = true\nimages = [\"GHCR.IO/a/*\"]\nprojects = [\"a\"]\n", "parse", false, 0, false, 0, 0, false},
+		{"bad project", "enabled = true\nimages = [\"ghcr.io/a/*\"]\nprojects = [\"../x\"]\n", "parse", false, 0, false, 0, 0, false},
+		{"dup project", "enabled = true\nimages = [\"ghcr.io/a/*\"]\nprojects = [\"mohiguide\", \"mohiguide\"]\n", "parse", false, 0, false, 0, 0, false},
+		{"empty images", "enabled = true\nimages = []\nprojects = [\"mohiguide\"]\n", "", true, 20, false, 0, 1, false},
+		{"empty projects", "enabled = true\nimages = [\"ghcr.io/a/*\"]\nprojects = []\n", "", true, 20, false, 1, 0, false},
+		{"disabled", "enabled = false\nimages = [\"ghcr.io/a/*\"]\nprojects = [\"mohiguide\"]\n", "", false, 20, false, 1, 1, false},
+		{"bad bool", "allow_public_ports = yes\n", "parse", false, 0, false, 0, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := loadBytes(t, []byte(tc.body), 0o644, rootUID)
+			if p.Reason != tc.reason || p.Valid != (tc.reason == "") || p.Enabled != tc.enabled {
+				t.Fatalf("valid %v enabled %v reason %s", p.Valid, p.Enabled, p.Reason)
+			}
+			if p.MaxContainers != tc.max || p.AllowPublicPorts != tc.public {
+				t.Fatalf("max %d public %v", p.MaxContainers, p.AllowPublicPorts)
+			}
+			if len(p.Images) != tc.images || len(p.Projects) != tc.projs || p.ImagesEnabled() != tc.on {
+				t.Fatalf("images %v projects %v on %v", p.Images, p.Projects, p.ImagesEnabled())
+			}
+		})
 	}
 }
 

@@ -61,6 +61,9 @@ type Options struct {
 	HelperPath string
 	PolicyUID  func(os.FileInfo) (uint32, bool)
 	Helper     Helper
+	// MachineID is the file whose contents feed the container host label.
+	// Empty means /etc/machine-id. Tests set a fixture path.
+	MachineID string
 }
 
 func (o Options) withDefaults() Options {
@@ -234,16 +237,24 @@ type agent struct {
 	lastCanon        string
 	lastServicesSent time.Time
 
-	unmappedOnce atomic.Bool
-	ownedOnce    atomic.Bool
-	healthCh     chan protocol.Sample
-	healthCancel context.CancelFunc
-	pending      pendingTasks
-	inflight     inflight
-	taskSlots    chan struct{}
-	taskMu       sync.Mutex
-	taskRunning  int
-	taskWaiting  int
+	unmappedOnce  atomic.Bool
+	ownedOnce     atomic.Bool
+	containerOnce atomic.Bool
+	listCutOnce   atomic.Bool
+	dockerOK      bool
+	dockerKnown   bool
+	idOnce        sync.Once
+	idLabel       string
+	idMiss        bool
+	idLogOnce     atomic.Bool
+	healthCh      chan protocol.Sample
+	healthCancel  context.CancelFunc
+	pending       pendingTasks
+	inflight      inflight
+	taskSlots     chan struct{}
+	taskMu        sync.Mutex
+	taskRunning   int
+	taskWaiting   int
 }
 
 type writer struct {

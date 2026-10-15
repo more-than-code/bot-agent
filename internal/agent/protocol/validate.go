@@ -15,6 +15,7 @@ var (
 	entrySlugRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
 	deploybotUnitRE = regexp.MustCompile(`^deploybot-[a-z0-9-]{1,64}-[a-z0-9-]{1,48}\.service$`)
 	policyHashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	digestRE        = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 )
 
 // ValidateAgent reports why an agent→server frame violates the contract.
@@ -145,9 +146,6 @@ func checkDiscovered(list []Discovered) error {
 			return fmt.Errorf("duplicate name %q", d.Name)
 		}
 		seen[d.Name] = true
-		if d.ContainerName != nil {
-			return fmt.Errorf("container_name set")
-		}
 		if d.Ports == nil {
 			return fmt.Errorf("ports null")
 		}
@@ -157,7 +155,14 @@ func checkDiscovered(list []Discovered) error {
 			}
 		}
 		switch d.Kind {
+		case "container":
+			if err := checkContainer(d); err != nil {
+				return err
+			}
 		case "systemd":
+			if err := checkPlain(d); err != nil {
+				return err
+			}
 			if d.SystemdUnit == nil || *d.SystemdUnit == "" {
 				return fmt.Errorf("systemd unit")
 			}
@@ -165,6 +170,9 @@ func checkDiscovered(list []Discovered) error {
 				return fmt.Errorf("systemd scope")
 			}
 		case "process":
+			if err := checkPlain(d); err != nil {
+				return err
+			}
 			if d.SystemdUnit != nil || d.SystemdScope != nil {
 				return fmt.Errorf("process has unit")
 			}
@@ -178,13 +186,51 @@ func checkDiscovered(list []Discovered) error {
 	return nil
 }
 
+func checkPlain(d Discovered) error {
+	if d.ContainerName != nil {
+		return fmt.Errorf("container_name set")
+	}
+	if d.ImageDigest != nil {
+		return fmt.Errorf("image_digest set")
+	}
+	return nil
+}
+
+func checkContainer(d Discovered) error {
+	if d.ContainerName == nil || !containerNameOK(*d.ContainerName) {
+		return fmt.Errorf("container_name")
+	}
+	if d.SystemdUnit != nil || d.SystemdScope != nil || d.PID != nil || d.ProcessName != nil {
+		return fmt.Errorf("container process")
+	}
+	if d.ImageDigest != nil && !digestRE.MatchString(*d.ImageDigest) {
+		return fmt.Errorf("image_digest")
+	}
+	return nil
+}
+
+func containerNameOK(s string) bool {
+	if s == "" || len(s) > 255 || strings.ContainsAny(s, "/\r\n\x00") {
+		return false
+	}
+	return true
+}
+
 func checkOwner(d Discovered) error {
 	if d.Owner == nil {
 		return nil
 	}
-	if d.Owner.Kind != "program" {
+	switch d.Owner.Kind {
+	case "program":
+		return checkProgramOwner(d)
+	case "image":
+		return checkImageOwner(d)
+	default:
 		return fmt.Errorf("owner kind")
 	}
+}
+
+func checkProgramOwner(d Discovered) error {
 	if !projectSlugRE.MatchString(d.Owner.Project) || !entrySlugRE.MatchString(d.Owner.Entry) {
 		return fmt.Errorf("owner name")
 	}
@@ -199,6 +245,26 @@ func checkOwner(d Discovered) error {
 		return fmt.Errorf("owner scope")
 	}
 	return nil
+}
+
+func checkImageOwner(d Discovered) error {
+	if !projectSlugRE.MatchString(d.Owner.Project) || !validImageEntry(d.Owner.Entry) {
+		return fmt.Errorf("owner name")
+	}
+	if d.Kind != "container" {
+		return fmt.Errorf("owner kind")
+	}
+	if d.Name != d.Owner.Entry {
+		return fmt.Errorf("owner entry")
+	}
+	return nil
+}
+
+func validImageEntry(s string) bool {
+	if !entrySlugRE.MatchString(s) {
+		return false
+	}
+	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev")
 }
 
 func rejectCode(c string) bool {
@@ -412,6 +478,164 @@ func ValidateProgramLogs(raw []byte) error {
 		return fmt.Errorf("log bytes")
 	}
 	return wantBool(m["truncated"])
+}
+
+// ValidateImageDeploy checks a deploy or rollback payload.
+func ValidateImageDeploy(raw []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	need := []string{"outcome", "digest", "exit_code", "status", "lines"}
+	if len(m) != len(need) {
+		return fmt.Errorf("deploy keys %d", len(m))
+	}
+	for _, k := range need {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("deploy missing %s", k)
+		}
+	}
+	switch unquote(m["outcome"]) {
+	case "succeeded", "unchanged", "failed", "timeout", "rolled_back", "rollback_failed", "image_unavailable", "forbidden_spec", "conflict":
+	default:
+		return fmt.Errorf("outcome")
+	}
+	if err := wantDigestOrNull(m["digest"]); err != nil {
+		return fmt.Errorf("digest: %w", err)
+	}
+	if err := wantIntOrNull(m["exit_code"]); err != nil {
+		return fmt.Errorf("exit_code: %w", err)
+	}
+	if err := validateImageStatus(m["status"]); err != nil {
+		return err
+	}
+	return validateLogLines(m["lines"])
+}
+
+// ValidateImageStatus checks a start, stop, restart, status, or remove payload.
+func ValidateImageStatus(raw []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	if len(m) != 1 {
+		return fmt.Errorf("status keys %d", len(m))
+	}
+	rawStatus, ok := m["status"]
+	if !ok {
+		return fmt.Errorf("status missing")
+	}
+	return validateImageStatus(rawStatus)
+}
+
+// ValidateImageLogs checks an image_logs payload.
+func ValidateImageLogs(raw []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	need := []string{"container", "lines", "truncated"}
+	if len(m) != len(need) {
+		return fmt.Errorf("logs keys %d", len(m))
+	}
+	for _, k := range need {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("logs missing %s", k)
+		}
+	}
+	if err := wantString(m["container"]); err != nil {
+		return fmt.Errorf("container")
+	}
+	if len(unquote(m["container"])) > 255 {
+		return fmt.Errorf("container")
+	}
+	if err := validateLogLines(m["lines"]); err != nil {
+		return err
+	}
+	return wantBool(m["truncated"])
+}
+
+func validateImageStatus(raw json.RawMessage) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	need := []string{"container", "state", "exit_code", "restart_count", "started_at", "finished_at", "digest", "ports"}
+	if len(m) != len(need) {
+		return fmt.Errorf("image status keys %d", len(m))
+	}
+	for _, k := range need {
+		if _, ok := m[k]; !ok {
+			return fmt.Errorf("image status missing %s", k)
+		}
+	}
+	if err := wantStringOrNull(m["container"]); err != nil {
+		return fmt.Errorf("container: %w", err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(m["container"]), []byte("null")) && !containerNameOK(unquote(m["container"])) {
+		return fmt.Errorf("container")
+	}
+	switch unquote(m["state"]) {
+	case "running", "exited", "created", "paused", "restarting", "dead", "missing":
+	default:
+		return fmt.Errorf("state")
+	}
+	if err := wantIntOrNull(m["exit_code"]); err != nil {
+		return fmt.Errorf("exit_code: %w", err)
+	}
+	if err := wantInt(m["restart_count"]); err != nil {
+		return fmt.Errorf("restart_count: %w", err)
+	}
+	if err := wantStringOrNull(m["started_at"]); err != nil {
+		return fmt.Errorf("started_at: %w", err)
+	}
+	if err := wantStringOrNull(m["finished_at"]); err != nil {
+		return fmt.Errorf("finished_at: %w", err)
+	}
+	if err := wantDigestOrNull(m["digest"]); err != nil {
+		return fmt.Errorf("digest: %w", err)
+	}
+	var ports []int
+	if err := json.Unmarshal(m["ports"], &ports); err != nil {
+		return fmt.Errorf("ports")
+	}
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("port %d", p)
+		}
+	}
+	return nil
+}
+
+func validateLogLines(raw json.RawMessage) error {
+	var lines []string
+	if err := json.Unmarshal(raw, &lines); err != nil {
+		return fmt.Errorf("lines")
+	}
+	total := 0
+	for _, line := range lines {
+		if utf8.RuneCountInString(line) > 2048 {
+			return fmt.Errorf("line length")
+		}
+		total += len(line)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("log bytes")
+	}
+	return nil
+}
+
+func wantDigestOrNull(raw json.RawMessage) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	if err := wantString(raw); err != nil {
+		return err
+	}
+	if !digestRE.MatchString(unquote(raw)) {
+		return fmt.Errorf("digest")
+	}
+	return nil
 }
 
 func wantStringOrNull(raw json.RawMessage) error {

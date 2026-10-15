@@ -21,7 +21,7 @@ ProtectProc=default
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/var/lib/bot-agent /etc/bot-agent
-InaccessiblePaths=/run/docker.sock /var/run/docker.sock
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
 StateDirectory=bot-agent
 StateDirectoryMode=0700
 

@@ -3,11 +3,19 @@ package programs
 import (
 	"bytes"
 	"encoding/json"
+
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
-// MaxHelperOut is the largest helper stdout the agent will parse.
-// A larger buffer is not a complete JSON object.
+// MaxHelperOut is the largest helper stdout the agent will parse
+// for every verb except container_list. A larger buffer is not a
+// complete JSON object.
 const MaxHelperOut = 256 * 1024
+
+// MaxListOut is the container_list stdout cap. Two hundred rows with a
+// 255-byte name, the five deploybot labels, and sixteen published ports
+// do not fit in MaxHelperOut. Other verbs stay at MaxHelperOut.
+const MaxListOut = 512 * 1024
 
 // Status is the helper's view of one unit. Ports may be empty; the agent
 // fills them from the sockets verb.
@@ -39,7 +47,8 @@ type UnitInfo struct {
 // or env values into the task result.
 func FixedReason(reason string) string {
 	switch reason {
-	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO:
+	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
+		ReasonConflict, ReasonDocker, ReasonImage:
 		return reason
 	default:
 		return ReasonPolicy
@@ -47,12 +56,13 @@ func FixedReason(reason string) string {
 }
 
 // KnownVerb reports whether verb is one the helper implements.
+// Image verbs live in the images package so the two lists cannot drift.
 func KnownVerb(verb string) bool {
 	switch verb {
 	case "start", "stop", "restart", "status", "logs", "sockets", "list":
 		return true
 	default:
-		return false
+		return images.IsVerb(verb)
 	}
 }
 

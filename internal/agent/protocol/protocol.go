@@ -75,7 +75,11 @@ type Discovered struct {
 	ProcessName   *string `json:"process_name"`
 	PID           *int    `json:"pid"`
 	User          *string `json:"user"`
-	Owner         *Owner  `json:"owner,omitempty"`
+	// ImageDigest is set for an owned container and null for every other row.
+	// It is always sent so a container row can carry JSON null.
+	ImageDigest *string `json:"image_digest"`
+	// Owner is null when the row has no owner. Other containers send JSON null.
+	Owner *Owner `json:"owner"`
 }
 
 // Owner marks a service started by the root helper. Old servers ignore it.
@@ -85,12 +89,16 @@ type Owner struct {
 	Entry   string `json:"entry"`
 }
 
-// Programs is the hello summary of the host policy. Paths are never included.
+// Programs is the hello summary of the host policy. Paths, image patterns,
+// and project lists are never included. Images and Docker are sent whenever
+// the policy file exists, including when they are false.
 type Programs struct {
 	Enabled    bool     `json:"enabled"`
 	RunAs      []string `json:"run_as"`
 	AllowShell bool     `json:"allow_shell"`
 	PolicyHash string   `json:"policy_hash"`
+	Images     bool     `json:"images"`
+	Docker     bool     `json:"docker"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.

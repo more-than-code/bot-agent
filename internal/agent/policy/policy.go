@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
 const (
@@ -45,18 +47,28 @@ type Drop struct {
 // is false and RunAs, Dirs, and ExecAllow are empty. Hash is the hex SHA-256
 // of the file bytes when those bytes were read.
 type Policy struct {
-	Exists      bool
-	Valid       bool
-	Enabled     bool
-	AllowShell  bool
-	MaxPrograms int
-	RunAs       []string
-	Dirs        []string
-	ExecAllow   []string
-	Accounts    map[string]Account
-	Hash        string
-	Reason      string
-	Dropped     []Drop
+	Exists           bool
+	Valid            bool
+	Enabled          bool
+	AllowShell       bool
+	MaxPrograms      int
+	RunAs            []string
+	Dirs             []string
+	ExecAllow        []string
+	Images           []string
+	Projects         []string
+	MaxContainers    int
+	AllowPublicPorts bool
+	Accounts         map[string]Account
+	Hash             string
+	Reason           string
+	Dropped          []Drop
+}
+
+// ImagesEnabled is the hello flag: a valid enabled policy with at least one
+// image pattern and one project. An empty list is valid and leaves images off.
+func (p Policy) ImagesEnabled() bool {
+	return p.Valid && p.Enabled && len(p.Images) > 0 && len(p.Projects) > 0
 }
 
 // Files selects the policy and the account databases.
@@ -125,6 +137,10 @@ func Load(f Files) Policy {
 		out.Reason = reason
 		return out
 	}
+	if reason := validateImagePolicy(&parsed); reason != "" {
+		out.Reason = reason
+		return out
+	}
 	users := readAccounts(passwd, group)
 	kept, dropped := filterRunAs(parsed.runAs, users)
 	out.Valid = true
@@ -134,6 +150,10 @@ func Load(f Files) Policy {
 	out.RunAs = kept
 	out.Dirs = parsed.dirs
 	out.ExecAllow = parsed.execAllow
+	out.Images = parsed.images
+	out.Projects = parsed.projects
+	out.MaxContainers = parsed.maxContainers
+	out.AllowPublicPorts = parsed.allowPublic
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]
@@ -143,6 +163,35 @@ func Load(f Files) Policy {
 		out.RunAs = []string{}
 	}
 	return out
+}
+
+// validateImagePolicy checks patterns, project slugs, and max_containers.
+// A bad value invalidates the whole file. Absent max_containers is 20.
+func validateImagePolicy(p *parsed) string {
+	if p.images == nil {
+		p.images = []string{}
+	}
+	if p.projects == nil {
+		p.projects = []string{}
+	}
+	for _, pat := range p.images {
+		if !images.ValidPattern(pat) {
+			return "parse"
+		}
+	}
+	seen := map[string]bool{}
+	for _, proj := range p.projects {
+		if !images.ValidProject(proj) || seen[proj] {
+			return "parse"
+		}
+		seen[proj] = true
+	}
+	if !p.maxSet {
+		p.maxContainers = 20
+	} else if p.maxContainers < 1 || p.maxContainers > 200 {
+		return "parse"
+	}
+	return ""
 }
 
 func hashBytes(b []byte) string {

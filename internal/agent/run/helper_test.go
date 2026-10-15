@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
 
@@ -221,6 +222,47 @@ func (c *scriptConn) RemoteAddr() net.Addr             { return nil }
 func (c *scriptConn) SetDeadline(time.Time) error      { return nil }
 func (c *scriptConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *scriptConn) SetWriteDeadline(time.Time) error { return nil }
+
+func serveOnce(t *testing.T, payload []byte) socketHelper {
+	t.Helper()
+	path := shortSock(t)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 256)
+		_, _ = c.Read(buf)
+		_, _ = c.Write(payload)
+	}()
+	return socketHelper{path: path, dialTimeout: time.Second}
+}
+
+func TestContainerListStdoutCap(t *testing.T) {
+	overProgram := bytes.Repeat([]byte("x"), programs.MaxHelperOut+1)
+	h := serveOnce(t, overProgram)
+	raw, err := h.Call(context.Background(), "list", []byte(`{}`))
+	if err == nil || raw != nil {
+		t.Fatal("program list accepted an oversize body")
+	}
+	h = serveOnce(t, overProgram)
+	raw, err = h.Call(context.Background(), images.VerbList, []byte(`{}`))
+	if err != nil || len(raw) != len(overProgram) {
+		t.Fatalf("container_list err %v len %d", err, len(raw))
+	}
+	overList := bytes.Repeat([]byte("y"), programs.MaxListOut+1)
+	h = serveOnce(t, overList)
+	raw, err = h.Call(context.Background(), images.VerbList, []byte(`{}`))
+	if err == nil || raw != nil || strings.Contains(err.Error(), "y") {
+		t.Fatalf("err %v raw %d", err, len(raw))
+	}
+}
 
 func TestAcceptStdoutDropsOversize(t *testing.T) {
 	_, err := acceptStdout(programs.MaxHelperOut+1, []byte("SENTINEL-OUT"))

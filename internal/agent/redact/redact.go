@@ -34,10 +34,14 @@ func Cmdline(s string) string {
 // total was cut. journalctl prints the oldest of the window first, so lines
 // dropped from the front are the older ones.
 func Journal(lines []string) ([]string, bool) {
+	return journal(lines, Exact{})
+}
+
+func journal(lines []string, ex Exact) ([]string, bool) {
 	out := make([]string, 0, len(lines))
 	cut := false
 	for _, line := range lines {
-		s := apply(line)
+		s := ex.redact(line)
 		if utf8.RuneCountInString(s) > JournalLineMax {
 			s = clip(s, JournalLineMax)
 			cut = true

@@ -144,6 +144,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 			V: protocol.Version, Type: "task_reject", TaskID: task.TaskID, ErrorCode: code,
 		}, protocol.TaskResult{}, false
 	}
+	if tasks.ImageKind(task.Kind) {
+		return protocol.TaskReject{}, a.runImage(ctx, task), true
+	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true
 	}

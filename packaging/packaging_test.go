@@ -38,13 +38,15 @@ func TestRunnerSocketUnits(t *testing.T) {
 		"StandardInput=socket\n",
 		"StandardOutput=socket\n",
 		"ExecStart=/usr/local/libexec/bot-agent-runner serve-conn\n",
-		"RuntimeMaxSec=60\n",
+		"RuntimeMaxSec=900\n",
 		"ProtectHome=read-only\n",
 		"PrivateTmp=yes\n",
 		"ProtectKernelModules=yes\n",
 		"RestrictAddressFamilies=AF_UNIX\n",
+		"ProtectSystem=strict\n",
+		"PrivateDevices=yes\n",
 		"NoNewPrivileges=yes\n",
-		"ReadWritePaths=/run/systemd/system -/run/bot-agent\n",
+		"ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock\n",
 	} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("helper unit missing %q", line)
@@ -82,6 +84,9 @@ func TestServiceGainsNoCapability(t *testing.T) {
 	if strings.Contains(text, "CAP_") {
 		t.Fatal("service names a capability")
 	}
+	if !strings.Contains(text, "InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock\n") {
+		t.Fatal("docker sockets are not hidden with the ignore-if-missing prefix")
+	}
 }
 
 func TestExamplePolicyIsDisabled(t *testing.T) {
@@ -89,8 +94,8 @@ func TestExamplePolicyIsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(src), "images") {
-		t.Fatal("example has an images key")
+	if !strings.Contains(string(src), "container access equals root") {
+		t.Fatal("example does not warn that container access equals root")
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "runner.toml")
@@ -114,5 +119,8 @@ func TestExamplePolicyIsDisabled(t *testing.T) {
 	}
 	if len(pol.RunAs) != 1 || pol.RunAs[0] != "joe" || len(pol.Dirs) != 1 || len(pol.ExecAllow) != 3 {
 		t.Fatalf("%+v", pol)
+	}
+	if pol.ImagesEnabled() || len(pol.Images) != 0 || len(pol.Projects) != 0 || pol.AllowPublicPorts {
+		t.Fatalf("images %+v", pol)
 	}
 }

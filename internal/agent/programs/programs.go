@@ -22,6 +22,11 @@ const (
 	ReasonVerb     = "invalid_verb"
 	ReasonIO       = "io_error"
 	ReasonHelper   = "helper_unavailable"
+	// Image verbs (agent-protocol v1.4). FixedReason must keep these;
+	// collapsing them would hide a conflict or a registry refusal.
+	ReasonConflict = "conflict"
+	ReasonDocker   = "docker_unavailable"
+	ReasonImage    = "image_unavailable"
 
 	maxArgs    = 32
 	maxArgLen  = 4096

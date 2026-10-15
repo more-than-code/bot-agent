@@ -392,6 +392,23 @@ func (a *agent) discover(ctx context.Context) (discover.Result, bool) {
 			res = discover.ApplyOwned(res, owned)
 		}
 	}
+	if a.policy.ImagesEnabled() {
+		items, truncated, err := a.listContainers(ctx)
+		a.noteDocker(err == nil)
+		if err != nil {
+			complete = false
+			if a.containerOnce.CompareAndSwap(false, true) {
+				a.opt.Log.Printf("bot-agent: container discovery failed")
+			}
+		} else {
+			if truncated && a.listCutOnce.CompareAndSwap(false, true) {
+				a.opt.Log.Printf("bot-agent: container list truncated")
+			}
+			if complete {
+				res = discover.ApplyContainers(res, items, a.machineHost(), a.policy.Projects)
+			}
+		}
+	}
 	if a.unmappedOnce.CompareAndSwap(false, true) {
 		a.opt.Log.Printf("bot-agent: unmapped listeners: %d", res.Unmapped)
 	}

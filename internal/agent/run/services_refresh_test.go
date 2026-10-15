@@ -253,6 +253,21 @@ func (r *refreshRun) drops() int {
 // that is already n means this tick did not send. A short count waits until
 // the server's read path has recorded the frame. The deadline is the failure
 // bound, not proof that a frame was absent.
+// wantLog waits until the session loop has written line. fire returns when
+// the next timer is armed, which can happen before this tick's log write
+// is visible to the test.
+func (r *refreshRun) wantLog(t *testing.T, line string) {
+	t.Helper()
+	limit := time.Now().Add(5 * time.Second)
+	for time.Now().Before(limit) {
+		if strings.Contains(r.log.String(), line) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("log %s", redactLog(&r.log, r.token, r.srv.Credential))
+}
+
 func (r *refreshRun) wantServices(t *testing.T, n int) {
 	t.Helper()
 	got := r.services()

@@ -146,9 +146,7 @@ func TestScanFailureSkipsFrameThenSendsFullSet(t *testing.T) {
 	breakScan(t, proc)
 	r.fire(t, 60*time.Second)
 	r.wantServices(t, 0)
-	if !strings.Contains(r.log.String(), "bot-agent: discovery failed") {
-		t.Fatalf("log %s", redactLog(&r.log, r.token))
-	}
+	r.wantLog(t, "bot-agent: discovery failed")
 
 	restoreScan(t, proc)
 	addExtraListener(t, proc)

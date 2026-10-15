@@ -9,3 +9,11 @@ dirs = ["/home/joe/workspace"]
 exec_allow = ["/usr/bin/node", "/usr/bin/npm", "/usr/bin/pnpm"]
 allow_shell = false
 max_programs = 20
+
+# Image containers. Uncommenting these gives the helper the Docker socket's
+# power: container access equals root on the host. Leave them commented until
+# the patterns and project slugs are reviewed. images = [] turns containers off.
+# images = ["ghcr.io/joe-and-his-friends/*"]
+# projects = ["mohiguide"]
+# max_containers = 20
+# allow_public_ports = false

@@ -1,4 +1,4 @@
-// Package tasks applies the five phase-1 checks and runs the ones that pass.
+// Package tasks applies the phase-1 checks and the v1.4 image checks, and runs the ones that pass.
 package tasks
 
 import (
@@ -51,6 +51,13 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 		_, code := programs.Check(task.Kind, task.Spec, programs.Gate{
 			Policy: gate.Policy, Running: gate.Running, Active: gate.Active, CountKnown: gate.Known,
 		})
+		return code, ProbeSpec{}
+	}
+	if ImageKind(task.Kind) {
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		_, code := ParseImage(task, gate.Policy)
 		return code, ProbeSpec{}
 	}
 	if task.Kind != "host_snapshot" && task.Kind != "probe_health" {

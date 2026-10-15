@@ -464,7 +464,7 @@ func TestPolicyGatesAtHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	unknown := filepath.Join(h.base, "unknown.toml")
-	if err := os.WriteFile(unknown, []byte("enabled = true\nimages = []\n"), 0o644); err != nil {
+	if err := os.WriteFile(unknown, []byte("enabled = true\nnot_a_key = []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sys := h.sys()

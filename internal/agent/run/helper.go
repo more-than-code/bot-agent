@@ -9,6 +9,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
 
@@ -78,7 +79,7 @@ func (s socketHelper) Call(ctx context.Context, verb string, body []byte) ([]byt
 		}
 		return nil, errHelper
 	}
-	var stdout capBuf
+	stdout := capBuf{limit: stdoutLimit(verb)}
 	if _, err := io.Copy(&stdout, conn); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -88,7 +89,7 @@ func (s socketHelper) Call(ctx context.Context, verb string, body []byte) ([]byt
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	out, err := acceptStdout(stdout.n, stdout.b)
+	out, err := acceptLimited(stdout.n, stdout.b, stdout.limit)
 	if err != nil {
 		return nil, errHelper
 	}
@@ -105,17 +106,25 @@ func marshalFrame(verb string, body []byte) ([]byte, error) {
 	}{Verb: verb, Request: json.RawMessage(body)})
 }
 
-// capBuf keeps at most MaxHelperOut+1 bytes and counts the rest.
+func stdoutLimit(verb string) int {
+	if verb == images.VerbList {
+		return programs.MaxListOut
+	}
+	return programs.MaxHelperOut
+}
+
+// capBuf keeps at most limit+1 bytes and counts the rest.
 // A count past the cap is a transport failure, not a truncated JSON object.
 type capBuf struct {
-	b []byte
-	n int
+	b     []byte
+	n     int
+	limit int
 }
 
 func (c *capBuf) Write(p []byte) (int, error) {
 	c.n += len(p)
-	if len(c.b) <= programs.MaxHelperOut {
-		room := programs.MaxHelperOut + 1 - len(c.b)
+	if c.limit > 0 && len(c.b) <= c.limit {
+		room := c.limit + 1 - len(c.b)
 		if room > len(p) {
 			room = len(p)
 		}
@@ -127,7 +136,11 @@ func (c *capBuf) Write(p []byte) (int, error) {
 }
 
 func acceptStdout(n int, buf []byte) ([]byte, error) {
-	if n == 0 || n > programs.MaxHelperOut {
+	return acceptLimited(n, buf, programs.MaxHelperOut)
+}
+
+func acceptLimited(n int, buf []byte, limit int) ([]byte, error) {
+	if n == 0 || n > limit {
 		return nil, errHelper
 	}
 	out := bytes.TrimSpace(buf)

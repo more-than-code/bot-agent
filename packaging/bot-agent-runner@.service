@@ -9,6 +9,10 @@ Description=bot-agent runner connection
 # - /run/bot-agent is prefixed with '-' so a missing directory does not fail
 #   namespace setup. tmpfiles creates it 0700 root root. The helper creates it
 #   too when the path is writable.
+# - /var/run/docker.sock is the Engine socket. RestrictAddressFamilies=AF_UNIX
+#   still allows it. It is not under /dev, so PrivateDevices does not hide it.
+#   ProtectSystem=strict would, which is why the path is listed. /var/run is
+#   a symlink to /run on Debian; confirm the namespace if connect fails.
 # - CapabilityBoundingSet is left unset. Dropping CAP_DAC_OVERRIDE would make a
 #   /home directory that is not world-traversable unreadable.
 # - PrivateNetwork=yes is omitted. systemctl and journalctl must reach the host's
@@ -23,7 +27,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/run/systemd/system -/run/bot-agent
+ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
@@ -34,4 +38,4 @@ LockPersonality=yes
 StandardInput=socket
 StandardOutput=socket
 ExecStart=/usr/local/libexec/bot-agent-runner serve-conn
-RuntimeMaxSec=60
+RuntimeMaxSec=900

@@ -11,9 +11,9 @@ Nothing here is installed on a host. Host steps are Joe's.
 |---|---|---|
 | `cmd/render-telegraf`, `internal/render`, `services/*.json`, `nodes.json`, `telegraf/`, `sql/010_…` | Telegraf snippets and Services SQL for `cluster_metrics` | Kept unchanged **during the overlap period**. Retired after Telegraf is removed (umbrella design §9). |
 | `cmd/bot-agent` (new) | — | The agent daemon. |
-| `cmd/bot-agent-runner` | — | Root helper for program units. The unprivileged agent reaches it over `/run/bot-agent-runner.sock`. |
+| `cmd/bot-agent-runner` | — | Root helper for program units and v1.4 image verbs. The unprivileged agent reaches it over `/run/bot-agent-runner.sock`. |
 | `internal/agent/...` (new) | — | `conn` (wss client, enroll/hello, heartbeat, backoff), `collect` (host metrics, processes), `discover` (ports, units, containers), `probe` (HTTP/TCP health), `spool` (on-disk ingest buffer), `tasks` (allowlist and dispatch), and from phase 2 `docker` (proxy client) and `owned` (local owned list). |
-| `cmd/bot-agent-docker-proxy` (new, phase 2) | — | The custom Docker socket proxy (umbrella D26). |
+| `cmd/bot-agent-docker-proxy` (new, phase 2) | — | Sketch only. Superseded by v1.4: the helper opens the Engine socket. |
 
 The new code does not import `internal/render`, and the renderer does not import the agent. Neither imports `reference/deploybot-service-agent`.
 
@@ -48,11 +48,13 @@ Rewrites are atomic: temp file in the same directory, mode 0600, fsync, rename. 
 | Health | `probe_health` per configured check: `http://127.0.0.1:<port><path>` or a TCP connect. The port must be one the service is listening on (D12). No redirects; timeout ≤ 10 s; body not stored, only status, latency, and result. | `inputs.http_response` |
 | Live tasks | `host_snapshot`, `probe_health` | — |
 
-A services report is the host's full set, so the agent sends one only from a complete discovery: the process scan succeeded and, when the program policy is enabled, the helper's owned-program lookup succeeded. If either fails, that cycle sends no `services` frame and the previous report stays. `hello` includes `services_complete`, which is false with `services` empty when the first discovery did not finish, so the server does not store that hello as the full set (agent-protocol v1.3.2).
+A services report is the host's full set, so the agent sends one only from a complete discovery: the process scan succeeded and, when the program policy is enabled, the helper's owned-program lookup succeeded and, when images are enabled, `container_list` succeeded. If any of those fail, that cycle sends no `services` frame and the previous report stays. `hello` includes `services_complete`, which is false with `services` empty when the first discovery did not finish, so the server does not store that hello as the full set (agent-protocol v1.3.2).
 
 The user-scope systemd caveat from spec-v1 still applies: a system user cannot read another user's bus. Units are inferred from the cgroup path, which needs no bus.
 
 ## Phase 2: logs, deploy, run/stop
+
+The Docker socket proxy below is superseded by agent-protocol v1.4: `bot-agent-runner` opens `/var/run/docker.sock` itself. See Images.
 
 - **Docker socket proxy:** a separate unit, the only process that opens the engine socket (raw socket access is root-equivalent). It listens on `/run/bot-agent/docker.sock` (mode 0600, owner `bot-agent`). Allowed calls:
   - `GET /containers/json`, `GET /containers/{id}/json`, `GET /containers/{id}/logs`;
@@ -78,6 +80,8 @@ The user-scope systemd caveat from spec-v1 still applies: a system user cannot r
 4. The service is known; for logs/run/stop it is also owned.
 5. `spec` keys are from that kind's closed set.
 
+Image tasks add four checks after the host, expiry, kind, and closed-key checks, in this order: the policy is valid and images are enabled (`policy_denied`); `project` is in `projects` (`policy_denied`); ImageSpec and entry field rules (`bad_spec`); the image matches an `images` pattern (`policy_denied`). A non-null `service` is `bad_spec` before the policy check. The frame's `timeout_sec` is the deadline for the whole image sequence, clamped to at most 4020 seconds. Zero or negative uses 15 seconds. Program tasks keep the 15–60 second cap.
+
 ## State on disk
 
 | Path | Mode | Contents |
@@ -89,7 +93,7 @@ The user-scope systemd caveat from spec-v1 still applies: a system user cannot r
 
 ## systemd unit (sketch; Joe installs)
 
-The v1 hardening carries over ([v1 §10](../../docs/design-bot-agent-deploy.v1.md)): `User=bot-agent`, no supplementary groups, `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/bot-agent /etc/bot-agent`, empty `CapabilityBoundingSet=`, `InaccessiblePaths=/run/docker.sock /var/run/docker.sock`, and `EnvironmentFile=/etc/bot-agent/env` (no leading `-`). Phase 1 additionally needs read access to `/proc` (for other users' processes: `ProtectProc=default`, not `invisible`) and to `/sys/class/thermal`. Unit `bot-agent.service`, binary `/usr/local/bin/bot-agent` (accepted). The legacy `bot_agent.service` and `/usr/local/bin/bot_agent` are removed by Joe on pi2, pi3, and pi4 after the new agent is up (umbrella D24). The agent's installer never touches them.
+The v1 hardening carries over ([v1 §10](../../docs/design-bot-agent-deploy.v1.md)): `User=bot-agent`, no supplementary groups, `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/bot-agent /etc/bot-agent`, empty `CapabilityBoundingSet=`, `InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock` (the leading `-` lets a host without Docker start), and `EnvironmentFile=/etc/bot-agent/env` (no leading `-`). Phase 1 additionally needs read access to `/proc` (for other users' processes: `ProtectProc=default`, not `invisible`) and to `/sys/class/thermal`. Unit `bot-agent.service`, binary `/usr/local/bin/bot-agent` (accepted). The legacy `bot_agent.service` and `/usr/local/bin/bot_agent` are removed by Joe on pi2, pi3, and pi4 after the new agent is up (umbrella D24). The agent's installer never touches them.
 
 bot-agent replaces Telegraf completely (umbrella D23). After a host's overlap ends, Joe removes Telegraf there.
 
@@ -110,3 +114,27 @@ Wave 1 of `docs/spec-project-catalog.md`, amended by agent-protocol v1.3.1, is a
 Threat model, from the catalog spec: a compromised API cannot change `/etc/bot-agent/runner.toml`; a compromised agent stays unprivileged and cannot exceed that file, because the helper checks every request again and the peer uid must be `bot-agent`. Polkit can constrain unit names and still let a transient unit run as root, which is why the helper is the privileged step. There is no shell unless `allow_shell` is true. Env values are not logged. `bot-agent.service` gains no capability. `ProtectHome=read-only` on a program unit leaves other homes readable, and an allowlisted interpreter runs the caller's arguments as `run_as`. Both follow from the host owner choosing `run_as` and `exec_allow`.
 
 Rollback is local. Set `enabled = false` and restart the agent, or `systemctl disable --now bot-agent-runner.socket`. New tasks stop. Units already started keep running until an administrator runs `systemctl stop 'deploybot-*'`. The agent reads the policy only at startup, so `enabled = false` does not take effect until that restart. After that it no longer reports those units as owned services, and it will not stop them itself.
+
+## Images (agent-protocol v1.4)
+
+`internal/agent/images` is the shared vocabulary. `internal/runner` owns the Engine client and the verbs. The agent does not import `internal/runner`. It calls the ten image verbs through the existing helper client in `internal/agent/run`.
+
+Agent task kinds are `image_deploy`, `image_rollback`, `image_remove`, `image_start`, `image_stop`, `image_restart`, `image_status`, and `image_logs`. Specs use the v1.4 closed key sets. `hello.programs.images` follows `ImagesEnabled` (valid, enabled, both lists non-empty). `hello.programs.docker` is the first `container_list` of the process: success latches true, failure latches false. The agent calls `container_list` only when images are enabled, including when the scan or the program lookup already failed, and it merges containers only when that cycle is still complete.
+
+Service deploy is `image_pull`, then `container_status`. Running this digest with this `spec_hash` and `force` false is `unchanged`. Otherwise `container_deploy`, then a health wait: the entry's configured `http` or `tcp` checks on `127.0.0.1` when the port is one of the spec's host ports, or else `running` with `restart_count` 0 for `healthy_after_sec`, polled every 2 seconds. Unhealthy calls `container_rollback` and finishes `rolled_back` or `rollback_failed`. A `container_status` error during that wait, including `docker_unavailable`, is `failed` and does not roll back. A job pulls, removes a container that is present, deploys, and polls every 2 seconds until `exited` or the spec `timeout_sec` (10..3600). Exit 0 is `succeeded`; any other exit is `failed` with `exit_code`; the deadline stops the container and the outcome is `timeout`. Cancelling the task context is `failed` and does not stop the container. An image task spec may be as large as the 1 MiB agent frame. A helper body over 64 KiB is outcome `failed`. Rollback runs the service sequence and pulls `<name>@<digest>`. The other kinds are one verb each. `task_result.status` is `succeeded` only for `succeeded` and `unchanged`; otherwise it is `failed` and `error_code` is the outcome. Helper refusals `{"error":...}` and transport refusals `{"ok":false,"reason":...}` both map: `image_unavailable` and `conflict` stay, `policy_denied` and `bad_spec` become `forbidden_spec`, and `docker_unavailable` or a transport error becomes `failed`.
+
+Discovery names an owned container (four labels, host label, project in `projects`) exactly by its entry, with `owner.kind` `image`. A non-owned row that collides is renamed. An owned row that already has the name keeps it, and the extra container is omitted rather than suffixed. The host label is `images.HostID` of `/etc/machine-id` when that file is readable under the agent sandbox. If it is not, any non-empty host label is accepted and the agent logs that once, without the path. The `-prev` slot is not a second discovered service; its host ports are still dropped from the unmapped list, and a lone `-prev` container is the owned service. Every other container is `kind` `container`, named by the container name without one leading `/`, with `image_digest` null and `"owner":null`. `image_digest` is present on every discovered row. Published host ports are not also reported as unmapped listeners. `container_list` returns at most 200 containers, deploybot-labelled rows first, with `truncated` set when it cut. A truncated list is still a complete discovery, and the agent logs that once.
+
+Env values and `registry_auth.token` live only for the task. They are not logged. The spec bytes are zeroed when the task returns, and the pending result has no env object. Exact-value redaction (`internal/agent/redact`) removes each value of at least 6 bytes, in raw, base64 standard and URL (padded and raw), and both JSON-escaped forms, before the v1.0.1 regex, from that task's result strings and log lines. Deploy and rollback tails send the same values on `container_logs` `redact`. The helper applies them to each raw line before the regex and the 2048-character cut, and does not log or return the list. `image_logs` sends no `redact`. This is best-effort. It is not a secrecy boundary (spec §3.4 and §12.9): the agent sees the values, and a container can print them in another encoding or send them over the network.
+
+The helper talks to Docker Engine `/v1.47` on `/var/run/docker.sock` with a small client of fixed methods. URL path segments are escaped. Containers are addressed by the id from the helper's own name lookup. Query strings are built from typed values. Response bodies are size-capped. Tests use a fake Engine on a unix socket. There is no Docker SDK and no real Docker in the unit tests.
+
+`bot-agent-runner@.service` sets `RuntimeMaxSec=900` and adds `/var/run/docker.sock` to `ReadWritePaths`. The other hardening stays: `ProtectSystem=strict`, `PrivateDevices=yes`, `RestrictAddressFamilies=AF_UNIX`. The socket is `AF_UNIX` and is not under `/dev`. `bot-agent.service` sets `InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock`.
+
+Threat model, from spec §3: one root process opens the socket; nothing from a request reaches Docker as raw HTTP; projects and labels scope mutations; env values and registry tokens are not returned; the policy ceiling is the image patterns, the project list, project volumes, the project bridge, and public ports only when `allow_public_ports` is set.
+
+`runner.toml` keys, all invalid when the value is the wrong shape: `images` (patterns), `projects` (slugs), `max_containers` (1..200, default 20), `allow_public_ports` (default false). `ImagesEnabled` is true only when the policy is valid and enabled and both lists are non-empty. The example file leaves the four keys commented out and says that container access equals root.
+
+Verbs: `image_pull`, `container_deploy`, `container_rollback`, `container_remove`, `container_start`, `container_stop`, `container_restart`, `container_status`, `container_logs`, `container_list`. Mutating entry verbs hold `flock` on `/run/bot-agent/image-<project>-<entry>.lock` for the whole verb. `container_status` and `container_logs` do not take that lock and do not create the file. At most 512 of those files are created. A further new name is `policy_denied` and does not dial. The file is not removed on unlock. `container_deploy` also holds `/run/bot-agent/image-count.lock` across the container count and the create, so the host cap covers every entry. Program verbs keep the helper-wide lock. Pull and list do not take the entry lock. Rollback reads the previous container's image from the helper's own list and refuses it unless that image is `repo@sha256:<64 hex>` and the repo is still in `images`.
+
+Rollback for containers: `images = []`, or an empty `projects` list, makes the helper refuse image verbs. Containers already created keep running. Removing `/var/run/docker.sock` from `ReadWritePaths` is the other switch.

@@ -3,6 +3,8 @@ package programs
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
 func TestEncodeRefusalIsBool(t *testing.T) {
@@ -24,5 +26,28 @@ func TestEncodeRefusalIsBool(t *testing.T) {
 	st, reason, err := DecodeStatus(raw)
 	if err != nil || reason != ReasonPolicy || st.Unit != "" {
 		t.Fatalf("decode %q %s %v", reason, st.Unit, err)
+	}
+}
+
+func TestImageVerbsStayDistinct(t *testing.T) {
+	for _, verb := range []string{
+		images.VerbPull, images.VerbDeploy, images.VerbRollback, images.VerbRemove,
+		images.VerbStart, images.VerbStop, images.VerbRestart, images.VerbStatus,
+		images.VerbLogs, images.VerbList,
+	} {
+		if !KnownVerb(verb) {
+			t.Fatalf("image verb %s missing from the helper registry", verb)
+		}
+	}
+	if KnownVerb("image_deploy") {
+		t.Fatal("task kind was registered as a helper verb")
+	}
+	for _, reason := range []string{ReasonConflict, ReasonDocker, ReasonImage} {
+		if FixedReason(reason) != reason {
+			t.Fatalf("collapsed %s", reason)
+		}
+	}
+	if FixedReason("token=secret") != ReasonPolicy {
+		t.Fatal("unknown reason escaped")
 	}
 }
