@@ -893,7 +893,9 @@ func imageTask(kind string, spec []byte, timeout int) protocol.Task {
 	return protocol.Task{
 		V: protocol.Version, Type: "task", TaskID: "task-1",
 		HostID: agentHost, Kind: kind,
-		ExpiresAt:  protocol.FormatTime(time.Date(2026, 10, 16, 12, 5, 0, 0, time.UTC)),
+		// Relative to the wall clock: a fixed date expired on 2026-10-16 12:05 UTC
+		// for tests that use time.Now. Tests with a fixed fake clock are earlier still.
+		ExpiresAt:  protocol.FormatTime(time.Now().Add(time.Hour).UTC()),
 		TimeoutSec: timeout, Spec: spec,
 	}
 }
