@@ -21,7 +21,8 @@ ProtectProc=default
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadWritePaths=/var/lib/bot-agent /etc/bot-agent
-InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+# Hide the root-only file store. The leading '-' lets a host without Docker or that directory start.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/var/lib/bot-agent-runner
 StateDirectory=bot-agent
 StateDirectoryMode=0700
 

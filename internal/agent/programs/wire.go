@@ -55,6 +55,22 @@ func FixedReason(reason string) string {
 	}
 }
 
+// FrameLimit is the request-body cap for one verb.
+// Image verbs are 2 MiB. Every other verb stays at MaxFrame.
+func FrameLimit(verb string) int {
+	if images.IsVerb(verb) {
+		return images.MaxFrame
+	}
+	return MaxFrame
+}
+
+// SocketLimit is the largest newline-terminated helper frame.
+// The verb is not known until the frame is parsed, so the read allows
+// an image body plus the wrapper.
+func SocketLimit() int {
+	return images.MaxFrame + images.SocketSlack
+}
+
 // KnownVerb reports whether verb is one the helper implements.
 // Image verbs live in the images package so the two lists cannot drift.
 func KnownVerb(verb string) bool {

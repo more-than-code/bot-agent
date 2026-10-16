@@ -9,12 +9,13 @@ import (
 
 const (
 	// LabelPrefix is the only label namespace a projection may return.
-	LabelPrefix   = "dev.deploybot."
-	LabelOwner    = "dev.deploybot.owner"
-	LabelHost     = "dev.deploybot.host"
-	LabelProject  = "dev.deploybot.project"
-	LabelEntry    = "dev.deploybot.entry"
-	LabelSpecHash = "dev.deploybot.spec_hash"
+	LabelPrefix    = "dev.deploybot."
+	LabelOwner     = "dev.deploybot.owner"
+	LabelHost      = "dev.deploybot.host"
+	LabelProject   = "dev.deploybot.project"
+	LabelEntry     = "dev.deploybot.entry"
+	LabelSpecHash  = "dev.deploybot.spec_hash"
+	LabelFilesHash = "dev.deploybot.files_hash"
 	// OwnerValue is the only owner the helper writes. It is not taken from the request.
 	OwnerValue = "bot-agent"
 )
@@ -78,6 +79,15 @@ func PrevName(project, entry string) (string, bool) {
 		return "", false
 	}
 	return base + "-prev", true
+}
+
+// NewSlot is the transient directory <project>-<entry>.new.
+func NewSlot(project, entry string) (string, bool) {
+	base, ok := ContainerName(project, entry)
+	if !ok {
+		return "", false
+	}
+	return base + ".new", true
 }
 
 // VolumeName is <project>-<name>.

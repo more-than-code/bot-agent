@@ -99,6 +99,8 @@ type Programs struct {
 	PolicyHash string   `json:"policy_hash"`
 	Images     bool     `json:"images"`
 	Docker     bool     `json:"docker"`
+	// Files is true when this agent and its helper implement v1.5 managed files.
+	Files bool `json:"files"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.

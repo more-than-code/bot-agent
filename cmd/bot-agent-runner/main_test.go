@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/runner"
 )
@@ -89,15 +91,99 @@ func TestServeConnOneRequestAndOversize(t *testing.T) {
 		t.Fatal(out.String())
 	}
 	*calls = nil
-	big := bytes.Repeat([]byte("b"), programs.MaxFrame+1)
-	var out2 bytes.Buffer
-	code = run(0, []string{"serve-conn"}, bytes.NewReader(append(big, '\n')), &out2, sys, peer)
-	if code != 0 || !strings.Contains(out2.String(), programs.ReasonBadSpec) {
-		t.Fatalf("exit %d %s", code, out2.String())
+	// A program request just over 64 KiB. The bytes are a valid list body,
+	// so a missing size check would return ok. The frame is far under the
+	// 2 MiB socket cap.
+	prog := paddedObject(programs.MaxFrame + 1)
+	var outProg bytes.Buffer
+	code = run(0, []string{"serve-conn"}, bytes.NewReader(verbFrame("list", prog)), &outProg, sys, peer)
+	if code != 0 || !strings.Contains(outProg.String(), `"reason":"`+programs.ReasonBadSpec+`"`) || strings.Contains(outProg.String(), `"ok":true`) {
+		t.Fatalf("program oversize exit %d %s", code, outProg.String())
 	}
 	if len(*calls) != 0 {
-		t.Fatal("oversize connection called systemctl")
+		t.Fatal("oversize program called systemctl")
 	}
+
+	// An image request just over 2 MiB. The wrapper fits in the socket slack,
+	// so the socket cap is not what refuses it. Images are off: without the
+	// size check the answer would be policy_denied.
+	img := paddedObject(images.MaxFrame + 1)
+	frame := verbFrame("container_list", img)
+	if len(frame) >= programs.SocketLimit() || len(img) != images.MaxFrame+1 {
+		t.Fatalf("frame %d request %d socket %d", len(frame), len(img), programs.SocketLimit())
+	}
+	var outImg bytes.Buffer
+	code = run(0, []string{"serve-conn"}, bytes.NewReader(frame), &outImg, sys, peer)
+	if code != 0 || !strings.Contains(outImg.String(), `"error":"`+programs.ReasonBadSpec+`"`) || strings.Contains(outImg.String(), programs.ReasonPolicy) {
+		t.Fatalf("image oversize exit %d %s", code, outImg.String())
+	}
+
+	// An image request at 1.5 MiB is inside the image cap. container_list
+	// against an empty engine is the acceptance. The full 1.5 MiB deploy is
+	// TestDeployAcceptsOneAndAHalfMiB.
+	sys.DockerSock = emptyDocker(t)
+	if err := os.WriteFile(sys.Policy, []byte("enabled = true\nimages = [\"ghcr.io/example/*\"]\nprojects = [\"mohiguide\"]\nmax_containers = 20\nallow_public_ports = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mid := paddedObject(3 * 1024 * 1024 / 2)
+	if len(mid) <= programs.MaxFrame || len(mid) >= images.MaxFrame {
+		t.Fatalf("1.5 MiB size %d", len(mid))
+	}
+	var outMid bytes.Buffer
+	code = run(0, []string{"serve-conn"}, bytes.NewReader(verbFrame("container_list", mid)), &outMid, sys, peer)
+	if code != 0 || strings.Contains(outMid.String(), `"error"`) || !strings.Contains(outMid.String(), `"items"`) {
+		t.Fatalf("1.5 MiB exit %d %s", code, outMid.String())
+	}
+}
+
+func paddedObject(n int) []byte {
+	// Spaces sit inside the object so they are part of the raw JSON value.
+	// A decoder still accepts it as an empty object.
+	if n < 2 {
+		panic("n")
+	}
+	b := bytes.Repeat([]byte(" "), n)
+	b[0] = '{'
+	b[n-1] = '}'
+	return b
+}
+
+func verbFrame(verb string, request []byte) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(`{"verb":"`)
+	buf.WriteString(verb)
+	buf.WriteString(`","request":`)
+	buf.Write(request)
+	buf.WriteByte('}')
+	buf.WriteByte('\n')
+	return buf.Bytes()
+}
+
+func emptyDocker(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ba-dock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(dir, "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1.47/containers/json" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() {
+		srv.Close()
+		os.RemoveAll(dir)
+	})
+	return sock
 }
 
 func TestServeConnCancelStopsSystemctl(t *testing.T) {

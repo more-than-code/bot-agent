@@ -35,11 +35,12 @@ func run(euid int, args []string, in io.Reader, out io.Writer, sys runner.Sys, p
 	if len(args) != 1 || !programs.KnownVerb(args[0]) {
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonVerb))
 	}
-	body, err := io.ReadAll(io.LimitReader(in, programs.MaxFrame+1))
+	limit := programs.FrameLimit(args[0])
+	body, err := io.ReadAll(io.LimitReader(in, int64(limit)+1))
 	if err != nil {
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonIO))
 	}
-	if len(body) > programs.MaxFrame {
+	if len(body) > limit {
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonBadSpec))
 	}
 	return writeOut(out, runner.Handle(context.Background(), args[0], body, sys))
@@ -98,7 +99,7 @@ func readFrame(in io.Reader) ([]byte, bool, error) {
 		if b == '\n' {
 			return buf.Bytes(), false, nil
 		}
-		if buf.Len() >= programs.MaxFrame {
+		if buf.Len() >= programs.SocketLimit() {
 			return nil, true, nil
 		}
 		buf.WriteByte(b)

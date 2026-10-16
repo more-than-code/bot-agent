@@ -52,6 +52,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	}
 	p.Images = a.policy.ImagesEnabled()
 	p.Docker = a.dockerUp()
+	p.Files = true
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}
@@ -307,7 +308,7 @@ func (a *agent) ownedPrograms(ctx context.Context) ([]discover.Owned, error) {
 }
 
 func (a *agent) call(ctx context.Context, verb string, body []byte) ([]byte, error) {
-	if a.opt.Helper == nil || !programs.KnownVerb(verb) || len(body) > programs.MaxFrame {
+	if a.opt.Helper == nil || !programs.KnownVerb(verb) || len(body) > programs.FrameLimit(verb) {
 		return nil, errHelper
 	}
 	return a.opt.Helper.Call(ctx, verb, body)

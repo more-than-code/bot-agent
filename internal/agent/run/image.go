@@ -65,11 +65,18 @@ func imageTimeout(sec int) time.Duration {
 
 func redactValues(req tasks.ImageReq) []string {
 	var out []string
+	total := 0
 	for _, v := range req.SecretValues() {
-		if len(v) < images.MinRedactBytes || len(v) > images.MaxRedactBytes || strings.IndexByte(v, 0) >= 0 {
+		n := len(v)
+		if n < images.MinRedactBytes || n > images.MaxRedactBytes || strings.IndexByte(v, 0) >= 0 {
 			continue
 		}
+		// Stop at the helper's cap. The local exact set still covers the rest.
+		if len(out) >= images.MaxRedactCount || total+n > images.MaxRedactTotal {
+			break
+		}
 		out = append(out, v)
+		total += n
 	}
 	return out
 }
@@ -97,14 +104,14 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 }
 
 func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, values []string) protocol.TaskResult {
-	st, hash, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+	st, hash, filesHash, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
 	if code != "" {
 		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
-	if !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash {
+	if !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files)) {
 		return a.deployResult(task, "unchanged", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
 	if code, err = a.deployContainer(ctx, req, digest); err != nil {
@@ -134,7 +141,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if rerr != nil || rcode != "" {
 		return a.deployResult(task, "rollback_failed", digest, nil, last, lines, ex)
 	}
-	if st, _, code, err = a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
+	if st, _, _, code, err = a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
 		last = st
 	}
 	return a.deployResult(task, "rolled_back", digest, nil, last, lines, ex)
@@ -144,7 +151,7 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 	tail := func() []string {
 		return a.tailImage(ctx, req.Project, req.Entry, ex, values)
 	}
-	st, _, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+	st, _, _, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 	}
@@ -171,7 +178,7 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 		jobDeadline = deadline
 	}
 	for {
-		st, _, code, err = a.imageStatus(ctx, req.Project, req.Entry)
+		st, _, _, code, err = a.imageStatus(ctx, req.Project, req.Entry)
 		if err != nil {
 			return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 		}
@@ -224,7 +231,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 		if a.expired(ctx, deadline) {
 			return healthStop{last: last}
 		}
-		st, _, code, err := a.imageStatus(ctx, project, entry)
+		st, _, _, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
 			return healthStop{err: err, last: last}
 		}
@@ -259,7 +266,7 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 		if a.expired(ctx, deadline) {
 			return healthStop{last: last}
 		}
-		st, _, code, err := a.imageStatus(ctx, project, entry)
+		st, _, _, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
 			return healthStop{err: err, last: last}
 		}
@@ -393,22 +400,23 @@ func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest 
 	body := images.Encode(images.DeployRequest{
 		Project: req.Project, Entry: req.Entry, Spec: *req.Spec,
 		Env: env, Digest: digest, SpecHash: req.SpecHash,
+		Files: images.AsMount(req.Files),
 	})
 	var id images.IDResponse
 	return a.callImage(ctx, images.VerbDeploy, body, &id)
 }
 
-func (a *agent) imageStatus(ctx context.Context, project, entry string) (images.ImageStatus, string, string, error) {
+func (a *agent) imageStatus(ctx context.Context, project, entry string) (images.ImageStatus, string, string, string, error) {
 	body := images.Encode(images.EntryRequest{Project: project, Entry: entry})
 	var resp images.StatusResult
 	code, err := a.callImage(ctx, images.VerbStatus, body, &resp)
 	if err != nil || code != "" {
-		return images.ImageStatus{}, "", code, err
+		return images.ImageStatus{}, "", "", code, err
 	}
 	if !knownState(resp.Status.State) {
-		return resp.Status, resp.SpecHash, "", errHelper
+		return resp.Status, resp.SpecHash, resp.FilesHash, "", errHelper
 	}
-	return resp.Status, resp.SpecHash, "", nil
+	return resp.Status, resp.SpecHash, resp.FilesHash, "", nil
 }
 
 func (a *agent) removeContainer(ctx context.Context, project, entry string) (string, error) {
@@ -450,7 +458,7 @@ func (a *agent) tailImage(ctx context.Context, project, entry string, ex redact.
 }
 
 func (a *agent) callImage(ctx context.Context, verb string, body []byte, dest any) (string, error) {
-	if len(body) > programs.MaxFrame {
+	if len(body) > programs.FrameLimit(verb) {
 		zeroBytes(body)
 		return "", errHelper
 	}
@@ -709,6 +717,12 @@ func scrubTask(spec []byte, req *tasks.ImageReq) {
 	if req != nil && req.Auth != nil {
 		req.Auth.Token = ""
 		req.Auth = nil
+	}
+	if req != nil {
+		for i := range req.Files {
+			req.Files[i].Content = ""
+		}
+		req.Files = nil
 	}
 	zeroBytes(spec)
 }

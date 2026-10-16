@@ -28,6 +28,10 @@ PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock
+# StateDirectory creates /var/lib/bot-agent-runner, which ProtectSystem=strict would otherwise hide. The helper mkdirat's files/ under it.
+StateDirectory=bot-agent-runner
+# 0700 so only root can traverse the managed-file store.
+StateDirectoryMode=0700
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

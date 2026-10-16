@@ -11,6 +11,17 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
 
+func TestProgramVerb70KiB(t *testing.T) {
+	h := newHarness(t, true, false, 20)
+	raw := Handle(context.Background(), "start", bytesRepeat(70*1024), h.sys())
+	if refusalReason(t, raw) != programs.ReasonBadSpec {
+		t.Fatalf("%s", raw)
+	}
+	if _, err := os.Stat(unitFile(h.root, "deploybot-demo-web.service")); !os.IsNotExist(err) {
+		t.Fatal("70 KiB start wrote a unit")
+	}
+}
+
 func TestHandleRejectsOversizeFrame(t *testing.T) {
 	h := newHarness(t, true, false, 20)
 	raw := Handle(context.Background(), "start", bytesRepeat(programs.MaxFrame+1), h.sys())

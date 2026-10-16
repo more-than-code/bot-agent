@@ -201,7 +201,7 @@ func TestDeployTailRedactsSpaceAndURL(t *testing.T) {
 	}
 }
 
-func TestWideSpecIsTransportFailure(t *testing.T) {
+func TestWideImageSpecIsDeployed(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(`{"project":"acme","entry":"web","spec":{"kind":"service","image":"ghcr.io/acme/web:1","healthy_after_sec":5},"env":{`)
 	val := strings.Repeat("a", 4096)
@@ -213,15 +213,15 @@ func TestWideSpecIsTransportFailure(t *testing.T) {
 	}
 	b.WriteString(`},"registry_auth":null,"force":false,"spec_hash":"` + imgHash + `"}`)
 	spec := []byte(b.String())
-	if len(spec) <= programs.MaxFrame {
+	if len(spec) <= programs.MaxFrame || len(spec) > images.MaxFrame {
 		t.Fatalf("spec %d", len(spec))
 	}
 	a, h, _, seq := imageRun(t)
 	seq.pre = missingStatus()
 	seq.post = runningStatus(0)
 	res := mustImage(t, a, "image_deploy", spec, 120)
-	assertDeploy(t, res, "failed", "failed")
-	if seq.deployed || h.saw(images.VerbDeploy) || h.saw(images.VerbRollback) {
+	assertDeploy(t, res, "succeeded", "succeeded")
+	if !seq.deployed || !h.saw(images.VerbDeploy) {
 		t.Fatalf("calls %v deployed %v", h.Calls(), seq.deployed)
 	}
 }

@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	// MaxFrame is the helper stdin cap from agent-protocol v1.3.
+	// MaxFrame is the program-verb request cap from agent-protocol v1.3.
+	// Image verbs use images.MaxFrame (2 MiB). FrameLimit picks one.
 	MaxFrame = 64 * 1024
 
 	ReasonPolicy   = "policy_denied"

@@ -62,7 +62,7 @@ type createBody struct {
 	NetworkingConfig networkConfigBody   `json:"NetworkingConfig"`
 }
 
-func buildCreate(project, entry, digest, specHash, host string, spec images.ImageSpec, env map[string]string, patterns []string, allowPublic bool) ([]byte, string) {
+func buildCreate(project, entry, digest, specHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool) ([]byte, string) {
 	ref, err := images.Parse(spec.Image)
 	if err != nil {
 		return nil, programs.ReasonBadSpec
@@ -84,7 +84,7 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 	}
 	body := createBody{
 		Image:  pinned.Name + "@" + digest,
-		Labels: containerLabels(project, entry, specHash, host),
+		Labels: containerLabels(project, entry, specHash, host, images.FilesHash(files)),
 		HostConfig: hostConfigBody{
 			RestartPolicy: restartBody{Name: restart},
 			NetworkMode:   net,
@@ -143,6 +143,19 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 			Type: "volume", Source: src, Target: v.Target, ReadOnly: v.ReadOnly,
 		})
 	}
+	// An existing slot may contain other valid 0444 files from a previous
+	// generation. Only the files listed in this request are mounted.
+	for _, f := range files {
+		src, ok := images.MountSource(project, entry, f.Name)
+		if !ok {
+			return nil, programs.ReasonBadSpec
+		}
+		// ReadOnly is fixed. mountBody has no BindOptions field, so the
+		// JSON has none. Source is the production store path, not a test root.
+		body.HostConfig.Mounts = append(body.HostConfig.Mounts, mountBody{
+			Type: "bind", Source: src, Target: f.Target, ReadOnly: true,
+		})
+	}
 	if spec.MemoryMB != nil {
 		mem := int64(*spec.MemoryMB) * 1024 * 1024
 		body.HostConfig.Memory = mem
@@ -155,12 +168,16 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 	return raw, ""
 }
 
-func containerLabels(project, entry, specHash, host string) map[string]string {
-	return map[string]string{
+func containerLabels(project, entry, specHash, host, filesHash string) map[string]string {
+	labels := map[string]string{
 		images.LabelOwner:    images.OwnerValue,
 		images.LabelHost:     host,
 		images.LabelProject:  project,
 		images.LabelEntry:    entry,
 		images.LabelSpecHash: specHash,
 	}
+	if filesHash != "" {
+		labels[images.LabelFilesHash] = filesHash
+	}
+	return labels
 }

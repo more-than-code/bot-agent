@@ -74,8 +74,10 @@ func JournalTask(lines []string, ex Exact) ([]string, bool) {
 	return journal(lines, ex)
 }
 
-// Payload redacts string values and leaves object keys alone. Numbers stay
-// integers when they were integers.
+// Payload redacts free text and leaves object keys alone. outcome, digest,
+// exit_code, and every status field are copied through, so the exact set and
+// the v1.0.1 regex do not run on them. Numbers stay integers when they were
+// integers.
 func (e Exact) Payload(v map[string]any) map[string]any {
 	b, err := protocol.Marshal(v)
 	if err != nil {
@@ -87,7 +89,7 @@ func (e Exact) Payload(v map[string]any) map[string]any {
 	if err := dec.Decode(&raw); err != nil {
 		return map[string]any{}
 	}
-	walked := e.walk(raw)
+	walked := e.walkAt(raw, false)
 	m, ok := walked.(map[string]any)
 	if !ok {
 		return map[string]any{}
@@ -105,18 +107,34 @@ func (e Exact) redact(s string) string {
 	return apply(s)
 }
 
-func (e Exact) walk(v any) any {
+// passThrough keys are structured task_result fields. status is the whole
+// object; the nested names are listed so a status field that is not wrapped
+// in status, such as image_logs container, is also left as returned.
+func passThrough(k string) bool {
+	switch k {
+	case "outcome", "digest", "exit_code", "status",
+		"container", "state", "restart_count", "started_at", "finished_at", "ports":
+		return true
+	default:
+		return false
+	}
+}
+
+func (e Exact) walkAt(v any, keep bool) any {
 	switch t := v.(type) {
 	case string:
+		if keep {
+			return t
+		}
 		return e.Text(t)
 	case map[string]any:
 		for k, val := range t {
-			t[k] = e.walk(val)
+			t[k] = e.walkAt(val, keep || passThrough(k))
 		}
 		return t
 	case []any:
 		for i, val := range t {
-			t[i] = e.walk(val)
+			t[i] = e.walkAt(val, keep)
 		}
 		return t
 	case json.Number:

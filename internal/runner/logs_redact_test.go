@@ -51,11 +51,17 @@ func TestLogsRedactRejectedBeforeDocker(t *testing.T) {
 		{strings.Repeat("a", 4097)},
 		{"sec\x00ret"},
 	}
-	many := make([]string, 65)
+	many := make([]string, images.MaxRedactCount+1)
 	for i := range many {
 		many[i] = strings.Repeat("d", 6) + itoa(i)
 	}
 	cases = append(cases, many)
+	// 129 values of 4096 bytes is over the 512 KiB total. 128 would fit exactly.
+	bulk := make([]string, 129)
+	for i := range bulk {
+		bulk[i] = strings.Repeat("e", images.MaxRedactBytes)
+	}
+	cases = append(cases, bulk)
 	for _, redact := range cases {
 		raw := e.call(images.VerbLogs, mustJSON(t, images.LogsRequest{
 			Project: "mohiguide", Entry: "web", Lines: 5, Redact: redact,

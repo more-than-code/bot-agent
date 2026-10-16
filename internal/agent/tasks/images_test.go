@@ -53,6 +53,9 @@ func TestImageCheckOrder(t *testing.T) {
 		{"rollback null digest", on, task(host, "image_rollback", nil, live, nullDigestSpec()), "bad_spec"},
 		{"auth controls", on, task(host, "image_deploy", nil, live, authToken("abc\ndef")), "bad_spec"},
 		{"oversize", on, task(host, "image_deploy", nil, live, oversizeSpec()), "bad_spec"},
+		{"secret key missing", on, task(host, "image_deploy", nil, live, withSecretKeys(good, `["NOPE"]`)), "bad_spec"},
+		{"secret key on rollback", on, task(host, "image_rollback", nil, live, withSecretKeys(rollbackSpec(imgDigest), `["DB_URL"]`)), ""},
+		{"secret keys empty", on, task(host, "image_deploy", nil, live, withSecretKeys(good, `[]`)), ""},
 		{"over helper frame off", off, task(host, "image_deploy", nil, live, wideSpec()), "policy_denied"},
 		{"over helper frame", on, task(host, "image_deploy", nil, live, wideSpec()), ""},
 	}
@@ -96,6 +99,10 @@ func rollbackSpec(digest string) []byte {
 	return append(body, []byte(`,"digest":"`+digest+`"}`)...)
 }
 
+func withSecretKeys(spec []byte, keys string) []byte {
+	return []byte(strings.TrimSuffix(string(spec), "}") + `,"secret_keys":` + keys + `}`)
+}
+
 func withDigest(spec []byte) []byte {
 	return []byte(strings.TrimSuffix(string(spec), "}") + `,"digest":"` + imgDigest + `"}`)
 }
@@ -125,4 +132,54 @@ func wideSpec() []byte {
 	}
 	b.WriteString(`},"registry_auth":null,"force":false,"spec_hash":"` + imgHash + `"}`)
 	return []byte(b.String())
+}
+
+func TestSecretValuesFollowsKeys(t *testing.T) {
+	host := "11111111-1111-4111-8111-111111111111"
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	live := protocol.FormatTime(now.Add(time.Minute))
+	pol := policy.Policy{
+		Valid: true, Enabled: true,
+		Images: []string{"ghcr.io/acme/*"}, Projects: []string{"acme"},
+	}
+	const (
+		plain = "mohiguide"
+		key   = "s3cret-value-1"
+		token = "registry-token-1"
+		file  = "file-secret-value"
+	)
+	body := `{"project":"acme","entry":"web","spec":{"kind":"service","image":"ghcr.io/acme/web:1","healthy_after_sec":5,"files":[{"file":"k","target":"/etc/k"}]},"env":{"DB_NAME":"` + plain + `","API_KEY":"` + key + `"},"registry_auth":{"host":"ghcr.io","username":"bot","token":"` + token + `"},"force":false,"spec_hash":"` + imgHash + `","files":[{"name":"k","target":"/etc/k","content":"` + file + `","secret":true}]}`
+	parse := func(spec []byte) ImageReq {
+		t.Helper()
+		req, code := ParseImage(task(host, "image_deploy", nil, live, spec), pol)
+		if code != "" {
+			t.Fatalf("parse %s", code)
+		}
+		return req
+	}
+	has := func(vals []string, want string) bool {
+		for _, v := range vals {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	}
+	absent := parse([]byte(body))
+	if !has(absent.SecretValues(), plain) || !has(absent.SecretValues(), key) || !has(absent.SecretValues(), token) || !has(absent.SecretValues(), file) {
+		t.Fatalf("absent %q", absent.SecretValues())
+	}
+	listed := parse(withSecretKeys([]byte(body), `["API_KEY"]`))
+	got := listed.SecretValues()
+	if has(got, plain) || !has(got, key) || !has(got, token) || !has(got, file) {
+		t.Fatalf("listed %q", got)
+	}
+	empty := parse(withSecretKeys([]byte(body), `[]`))
+	got = empty.SecretValues()
+	if has(got, plain) || has(got, key) || !has(got, token) || !has(got, file) {
+		t.Fatalf("empty %q", got)
+	}
+	if _, code := ParseImage(task(host, "image_deploy", nil, live, withSecretKeys([]byte(body), `["NOPE"]`)), pol); code != "bad_spec" {
+		t.Fatalf("missing key %s", code)
+	}
 }

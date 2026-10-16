@@ -42,6 +42,18 @@ type Sys struct {
 	// Neither is taken from a request. Tests set both.
 	MachineID  string
 	DockerSock string
+	// fileStore is the managed-file root for tests. Empty selects
+	// /var/lib/bot-agent-runner/files when euid is 0, and skips the store
+	// otherwise. Never read from a request or runner.toml.
+	fileStore string
+	// fileOwner, when set, is the uid/gid the store check expects.
+	// Nil means 0:0. Tests that cannot chown to root set the current ids.
+	fileOwner *fileIDs
+	// fileCheck, when set, is the uid/gid a file in a slot must have.
+	// Nil uses the same ids as the directory. Production leaves it nil.
+	// A test sets a pair this process cannot chown to, so the per-file
+	// check can fail while the store and the slot still match.
+	fileCheck *fileIDs
 }
 
 // Handle runs one verb. in is the raw JSON object from stdin.

@@ -47,6 +47,8 @@ func TestRunnerSocketUnits(t *testing.T) {
 		"PrivateDevices=yes\n",
 		"NoNewPrivileges=yes\n",
 		"ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock\n",
+		"StateDirectory=bot-agent-runner\n",
+		"StateDirectoryMode=0700\n",
 	} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("helper unit missing %q", line)
@@ -84,8 +86,8 @@ func TestServiceGainsNoCapability(t *testing.T) {
 	if strings.Contains(text, "CAP_") {
 		t.Fatal("service names a capability")
 	}
-	if !strings.Contains(text, "InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock\n") {
-		t.Fatal("docker sockets are not hidden with the ignore-if-missing prefix")
+	if !strings.Contains(text, "InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/var/lib/bot-agent-runner\n") {
+		t.Fatal("docker sockets and the managed-file store are not hidden")
 	}
 }
 

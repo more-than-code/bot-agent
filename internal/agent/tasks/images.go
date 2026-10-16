@@ -9,6 +9,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
+	"github.com/more-than-code/bot-agent/internal/agent/redact"
 )
 
 // ImageReq is a validated image task. Env values and Auth.Token are secrets.
@@ -23,17 +24,35 @@ type ImageReq struct {
 	SpecHash string
 	Digest   string
 	Lines    int
+	// Files is the resolved top-level list. Content is a secret when Secret is set.
+	Files []images.TaskFile
+	// SecretKeys is non-nil when the request included secret_keys, including
+	// an empty list. Nil, which is also how JSON null decodes, means the key
+	// was absent and every env value joins the set, as in v1.4.
+	SecretKeys []string
 }
 
-// SecretValues is every env value and the registry token. The redaction set
-// is built from this and lives only for the task.
+// SecretValues is the exact set for this task. With SecretKeys set, only
+// those env values join; otherwise every env value does. The registry token
+// and the secret-file items always join. The set lives only for the task.
 func (r ImageReq) SecretValues() []string {
 	vals := make([]string, 0, len(r.Env)+1)
-	for _, v := range r.Env {
-		vals = append(vals, v)
+	if r.SecretKeys == nil {
+		for _, v := range r.Env {
+			vals = append(vals, v)
+		}
+	} else {
+		for _, k := range r.SecretKeys {
+			vals = append(vals, r.Env[k])
+		}
 	}
 	if r.Auth != nil {
 		vals = append(vals, r.Auth.Token)
+	}
+	for _, f := range r.Files {
+		if f.Secret {
+			vals = append(vals, redact.FileSecrets(f.Content)...)
+		}
 	}
 	return vals
 }
@@ -86,6 +105,8 @@ type deployBody struct {
 	RegistryAuth *images.RegistryAuth `json:"registry_auth"`
 	Force        bool                 `json:"force"`
 	SpecHash     *string              `json:"spec_hash"`
+	Files        []images.TaskFile    `json:"files"`
+	SecretKeys   []string             `json:"secret_keys"`
 }
 
 type rollbackBody struct {
@@ -118,6 +139,7 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	req := ImageReq{
 		Project: *body.Project, Entry: *body.Entry, Spec: body.Spec,
 		Env: body.Env, Auth: body.RegistryAuth, Force: body.Force, SpecHash: *body.SpecHash,
+		Files: body.Files, SecretKeys: body.SecretKeys,
 	}
 	if digest != nil {
 		req.Digest = *digest
@@ -213,6 +235,16 @@ func deployFields(req ImageReq) string {
 	if field := images.ResolvedEnv(req.Env); field != "" {
 		return "bad_spec"
 	}
+	if req.SecretKeys != nil {
+		for _, k := range req.SecretKeys {
+			if _, ok := req.Env[k]; !ok {
+				return "bad_spec"
+			}
+		}
+	}
+	if images.CheckResolved(req.Spec.Files, images.AsMount(req.Files)) != "" {
+		return "bad_spec"
+	}
 	return ""
 }
 
@@ -270,5 +302,9 @@ func scrubImage(req *ImageReq) {
 		req.Auth.Token = ""
 		req.Auth = nil
 	}
+	for i := range req.Files {
+		req.Files[i].Content = ""
+	}
+	req.Files = nil
 	req.Spec = nil
 }

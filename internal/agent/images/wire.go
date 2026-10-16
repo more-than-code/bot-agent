@@ -62,7 +62,18 @@ type DeployRequest struct {
 	Env      map[string]string `json:"env"`
 	Digest   string            `json:"digest"`
 	SpecHash string            `json:"spec_hash"`
+	// Files is empty for a v1.4 deploy. The key is omitted then, so a
+	// no-file request stays the same shape.
+	Files []MountFile `json:"files,omitempty"`
 }
+
+// MaxFrame is the image-verb request cap (agent-protocol v1.5).
+// Program verbs stay at programs.MaxFrame.
+const MaxFrame = 2 * 1024 * 1024
+
+// SocketSlack is the {"verb","request"} wrapper and the trailing newline.
+// The socket reader does not know the verb until the frame is parsed.
+const SocketSlack = 128
 
 // IDResponse is container_deploy and container_rollback.
 type IDResponse struct {
@@ -75,11 +86,12 @@ type EntryRequest struct {
 	Entry   string `json:"entry"`
 }
 
-// Redact limits for container_logs (v1.4.2). The list is optional.
+// Redact limits for container_logs (v1.5). The list is optional.
 const (
-	MaxRedactCount = 64
+	MaxRedactCount = 2048
 	MinRedactBytes = 6
 	MaxRedactBytes = 4096
+	MaxRedactTotal = 512 * 1024
 )
 
 // LogsRequest is container_logs. Lines is 1..2000.
@@ -92,14 +104,19 @@ type LogsRequest struct {
 	Redact  []string `json:"redact,omitempty"`
 }
 
-// ValidRedact reports whether redact is absent or within the v1.4.2 limits.
-// Each value is 6..4096 bytes and contains no NUL.
+// ValidRedact reports whether redact is absent or within the v1.5 limits.
+// Each value is 6..4096 bytes, the list is at most 2048 values and 512 KiB, and no value contains a NUL.
 func ValidRedact(values []string) bool {
 	if len(values) > MaxRedactCount {
 		return false
 	}
+	total := 0
 	for _, v := range values {
 		if len(v) < MinRedactBytes || len(v) > MaxRedactBytes || strings.IndexByte(v, 0) >= 0 {
+			return false
+		}
+		total += len(v)
+		if total > MaxRedactTotal {
 			return false
 		}
 	}
@@ -123,10 +140,13 @@ type ActionResult struct {
 	Status ImageStatus `json:"status"`
 }
 
-// StatusResult is container_status. SpecHash is empty when the container is missing.
+// StatusResult is container_status. SpecHash and FilesHash are empty when
+// the container is missing or has no such label. FilesHash is not omitempty:
+// the contract sends "" when there are no files.
 type StatusResult struct {
-	Status   ImageStatus `json:"status"`
-	SpecHash string      `json:"spec_hash"`
+	Status    ImageStatus `json:"status"`
+	SpecHash  string      `json:"spec_hash"`
+	FilesHash string      `json:"files_hash"`
 }
 
 // LogsResponse is container_logs.

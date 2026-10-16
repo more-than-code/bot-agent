@@ -25,7 +25,7 @@ func handleImage(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	if ctx.Err() != nil {
 		return imgErr(sys, programs.ReasonDocker)
 	}
-	if len(in) > programs.MaxFrame {
+	if len(in) > images.MaxFrame {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
 	pol := policy.Load(policy.Files{
@@ -309,7 +309,7 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	if !images.ValidEntry(req.Entry) || !images.ValidDigest(req.Digest) || !images.ValidSpecHash(req.SpecHash) {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
-	if req.Spec.Validate() != "" || images.ResolvedEnv(req.Env) != "" {
+	if req.Spec.Validate() != "" || images.ResolvedEnv(req.Env) != "" || images.CheckResolved(req.Spec.Files, req.Files) != "" {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
 	if code := precheckDeploy(req, pol); code != "" {
@@ -324,7 +324,7 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	}
 	defer unlock()
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, host, req.Spec, req.Env, pol.Images, pol.AllowPublicPorts)
+		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, host, req.Spec, req.Env, req.Files, pol.Images, pol.AllowPublicPorts)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -363,15 +363,61 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 	if !fits(n, prev.found, max) {
 		return imgErr(sys, programs.ReasonPolicy)
 	}
-	if err := stopRemove(ctx, eng, prev); err != nil {
-		return imgErr(sys, engReason(err))
-	}
-	prevName, ok := images.PrevName(req.Project, req.Entry)
+	curName, prevName, newName, ok := slotNames(req.Project, req.Entry)
 	if !ok {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
+	st, code := openEntryStore(sys, len(req.Files) > 0)
+	if code != "" {
+		return imgErr(sys, code)
+	}
+	defer closeStore(st)
+	// Label check already ran. A bad slot stops here, before any delete
+	// and before any container is stopped. Leftover cleanup is only of
+	// slots that passed that check.
+	if st != nil {
+		if err := st.preflight(curName, prevName, newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if err := st.removeIfSafe(newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if !cur.found {
+			if err := st.removeIfSafe(curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
+		if !prev.found {
+			if err := st.removeIfSafe(prevName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
+		if len(req.Files) > 0 {
+			if err := st.writeSlot(newName, req.Files); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
+	}
+	if err := stopRemove(ctx, eng, prev); err != nil {
+		return imgErr(sys, engReason(err))
+	}
+	if st != nil {
+		if err := st.removeIfSafe(prevName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+	}
 	if err := park(ctx, eng, cur, prevName); err != nil {
 		return imgErr(sys, engReason(err))
+	}
+	if st != nil {
+		if err := st.rename(curName, prevName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if len(req.Files) > 0 {
+			if err := st.rename(newName, curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
 	}
 	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
 		return imgErr(sys, code)
@@ -391,8 +437,40 @@ func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployReques
 	if !fits(n, cur.found, max) {
 		return imgErr(sys, programs.ReasonPolicy)
 	}
+	curName, _, newName, ok := slotNames(req.Project, req.Entry)
+	if !ok {
+		return imgErr(sys, programs.ReasonBadSpec)
+	}
+	st, code := openEntryStore(sys, len(req.Files) > 0)
+	if code != "" {
+		return imgErr(sys, code)
+	}
+	defer closeStore(st)
+	if st != nil {
+		if err := st.preflight(curName, newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if err := st.removeIfSafe(newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if !cur.found {
+			if err := st.removeIfSafe(curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
+	}
 	if err := stopRemove(ctx, eng, cur); err != nil {
 		return imgErr(sys, engReason(err))
+	}
+	if st != nil {
+		if err := st.removeIfSafe(curName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if len(req.Files) > 0 {
+			if err := st.writeSlot(curName, req.Files); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
 	}
 	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
 		return imgErr(sys, code)
@@ -405,6 +483,13 @@ func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployReques
 		return imgErr(sys, code)
 	}
 	return out
+}
+
+func slotNames(project, entry string) (cur, prev, fresh string, ok bool) {
+	cur, ok1 := images.ContainerName(project, entry)
+	prev, ok2 := images.PrevName(project, entry)
+	fresh, ok3 := images.NewSlot(project, entry)
+	return cur, prev, fresh, ok1 && ok2 && ok3
 }
 
 func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
@@ -423,17 +508,69 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 		if code := allowPinned(prev.image, pol.Images); code != "" {
 			return imgErr(sys, code)
 		}
-		if err := stopRemove(ctx, eng, cur); err != nil {
-			return imgErr(sys, engReason(err))
-		}
-		name, ok := images.ContainerName(req.Project, req.Entry)
+		curName, prevName, _, ok := slotNames(req.Project, req.Entry)
 		if !ok {
 			return imgErr(sys, programs.ReasonBadSpec)
 		}
-		if err := eng.Rename(ctx, prev.id, name); err != nil {
+		st, code := openEntryStore(sys, false)
+		if code != "" {
+			return imgErr(sys, code)
+		}
+		defer closeStore(st)
+		// A bad slot refuses the rollback before the current container is removed.
+		if st != nil {
+			if err := st.preflight(curName, prevName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
+		// Remove the current container before its slot. A failed remove
+		// leaves that container on the slot it was started with.
+		if err := stopRemove(ctx, eng, cur); err != nil {
+			return imgErr(sys, engReason(err))
+		}
+		// The current slot is removed only once this call has removed the
+		// container, or when there was no container and the slot is an
+		// orphan. stopRemove has done one of those two.
+		var moved bool
+		if st != nil {
+			if err := st.removeIfSafe(curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+			var err error
+			moved, err = st.renameMoved(prevName, curName)
+			if err != nil {
+				if moved {
+					_ = st.rename(curName, prevName)
+				}
+				return imgErr(sys, storeCode(err))
+			}
+		}
+		if err := eng.Rename(ctx, prev.id, curName); err != nil {
+			// The -prev container is still -prev. Put its slot back
+			// beside it. The current container is already gone, and so
+			// is its slot.
+			if moved {
+				if rerr := st.rename(curName, prevName); rerr != nil {
+					return imgErr(sys, storeCode(rerr))
+				}
+			}
 			return imgErr(sys, engReason(err))
 		}
 		if err := eng.Start(ctx, prev.id); err != nil {
+			// Both names are the current name, and the container did not
+			// start. Put the container back on -prev first, then the slot,
+			// so a failed start ends like a failed container rename. Moving
+			// only the slot would leave the container on the current name.
+			// If the container rename back fails, the slot stays where it
+			// is: both are still the current name.
+			if rerr := eng.Rename(ctx, prev.id, prevName); rerr != nil {
+				return imgErr(sys, engReason(rerr))
+			}
+			if moved {
+				if rerr := st.rename(curName, prevName); rerr != nil {
+					return imgErr(sys, storeCode(rerr))
+				}
+			}
 			return imgErr(sys, engReason(err))
 		}
 		return images.Encode(images.IDResponse{ContainerID: prev.id})
@@ -450,11 +587,35 @@ func doRemove(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 		if code != "" {
 			return imgErr(sys, code)
 		}
+		curName, _, _, ok := slotNames(req.Project, req.Entry)
+		if !ok {
+			return imgErr(sys, programs.ReasonBadSpec)
+		}
+		st, code := openEntryStore(sys, false)
+		if code != "" {
+			return imgErr(sys, code)
+		}
+		defer closeStore(st)
+		if st != nil {
+			if err := st.preflight(curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
+		}
 		if !cur.found {
+			if st != nil {
+				if err := st.removeIfSafe(curName); err != nil {
+					return imgErr(sys, storeCode(err))
+				}
+			}
 			return encodeAction(missingStatus())
 		}
 		if err := stopRemove(ctx, eng, cur); err != nil {
 			return imgErr(sys, engReason(err))
+		}
+		if st != nil {
+			if err := st.removeIfSafe(curName); err != nil {
+				return imgErr(sys, storeCode(err))
+			}
 		}
 		return encodeAction(missingStatus())
 	})
@@ -510,13 +671,13 @@ func doStatusCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []b
 			return imgErr(sys, code)
 		}
 		if !cur.found {
-			return images.Encode(images.StatusResult{Status: missingStatus(), SpecHash: ""})
+			return images.Encode(images.StatusResult{Status: missingStatus(), SpecHash: "", FilesHash: ""})
 		}
-		st, hash, code := inspectStatus(ctx, eng, cur.id)
+		st, hash, filesHash, code := inspectStatus(ctx, eng, cur.id)
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash})
+		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: filesHash})
 	})
 }
 
@@ -577,7 +738,7 @@ func mutateOne(ctx context.Context, in []byte, pol policy.Policy, sys Sys, op sl
 		if !cur.found {
 			return encodeAction(missingStatus())
 		}
-		st, _, code := inspectStatus(ctx, eng, cur.id)
+		st, _, _, code := inspectStatus(ctx, eng, cur.id)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -760,15 +921,15 @@ func createStart(ctx context.Context, eng engine, project, entry string, body []
 	return images.Encode(images.IDResponse{ContainerID: id}), ""
 }
 
-func inspectStatus(ctx context.Context, eng engine, id string) (images.ImageStatus, string, string) {
+func inspectStatus(ctx context.Context, eng engine, id string) (images.ImageStatus, string, string, string) {
 	in, err := eng.Inspect(ctx, id)
 	if errors.Is(err, errNotFound) {
-		return missingStatus(), "", ""
+		return missingStatus(), "", "", ""
 	}
 	if err != nil {
-		return images.ImageStatus{}, "", engReason(err)
+		return images.ImageStatus{}, "", "", engReason(err)
 	}
-	return projectInspect(in), specHashOf(in.Labels), ""
+	return projectInspect(in), specHashOf(in.Labels), filesHashOf(in.Labels), ""
 }
 
 func encodeAction(st images.ImageStatus) []byte {
@@ -882,9 +1043,17 @@ func specHashOf(labels map[string]string) string {
 	return h
 }
 
+func filesHashOf(labels map[string]string) string {
+	h := labels[images.LabelFilesHash]
+	if !images.ValidSpecHash(h) {
+		return ""
+	}
+	return h
+}
+
 func keepLabels(in map[string]string) map[string]string {
 	out := map[string]string{}
-	for _, k := range []string{images.LabelOwner, images.LabelHost, images.LabelProject, images.LabelEntry, images.LabelSpecHash} {
+	for _, k := range []string{images.LabelOwner, images.LabelHost, images.LabelProject, images.LabelEntry, images.LabelSpecHash, images.LabelFilesHash} {
 		v, ok := in[k]
 		if !ok || strings.ContainsAny(v, "\r\n\x00") {
 			continue

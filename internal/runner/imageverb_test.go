@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -36,6 +37,11 @@ const (
 		"max_containers = 20\n" +
 		"allow_public_ports = false\n"
 )
+
+type slotSnap struct {
+	op    string
+	files map[string]string
+}
 
 type engCall struct {
 	Method string
@@ -83,12 +89,18 @@ type fakeDocker struct {
 	logRelease   chan struct{}
 	omitDigest   bool
 	badDigest    bool
-	pullID       string
-	logBody      []byte
-	volumeRace   string
-	block        chan struct{}
-	entered      chan struct{}
-	once         sync.Once
+	renameFail   bool
+	startFail    bool
+	// slotDir, when set, is read at create and at start. The snapshot is
+	// the file contents in that directory at the moment the call arrives.
+	slotDir    string
+	slotSeen   []slotSnap
+	pullID     string
+	logBody    []byte
+	volumeRace string
+	block      chan struct{}
+	entered    chan struct{}
+	once       sync.Once
 }
 
 func startFake(t *testing.T) (*fakeDocker, string) {
@@ -294,6 +306,7 @@ func (f *fakeDocker) serveList(w http.ResponseWriter) {
 }
 
 func (f *fakeDocker) serveCreate(w http.ResponseWriter, r *http.Request, body []byte) {
+	f.snapSlot("create")
 	name := r.URL.Query().Get("name")
 	if _, ok := f.ctrs[name]; ok {
 		http.Error(w, "exists", http.StatusConflict)
@@ -330,8 +343,13 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 		}
 		f.writeInspect(w, c)
 	case op == "start" && r.Method == http.MethodPost:
+		f.snapSlot("start")
 		if c == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if f.startFail {
+			http.Error(w, "start failed", http.StatusInternalServerError)
 			return
 		}
 		if c.state == "running" {
@@ -350,6 +368,10 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 	case op == "rename" && r.Method == http.MethodPost:
 		if c == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if f.renameFail {
+			http.Error(w, "rename failed", http.StatusInternalServerError)
 			return
 		}
 		next := r.URL.Query().Get("name")
@@ -629,6 +651,39 @@ func jobDeploy() images.DeployRequest {
 			Kind: "job", Image: "ghcr.io/joe-and-his-friends/mo-job:1", Command: []string{"run"},
 		},
 	}
+}
+
+// snapSlot records the slot directory. The caller holds f.mu.
+func (f *fakeDocker) snapSlot(op string) {
+	if f.slotDir == "" {
+		return
+	}
+	snap := slotSnap{op: op, files: map[string]string{}}
+	entries, err := os.ReadDir(f.slotDir)
+	if err == nil {
+		for _, e := range entries {
+			b, rerr := os.ReadFile(filepath.Join(f.slotDir, e.Name()))
+			if rerr != nil {
+				continue
+			}
+			snap.files[e.Name()] = string(b)
+		}
+	}
+	f.slotSeen = append(f.slotSeen, snap)
+}
+
+func (f *fakeDocker) slotSnaps() []slotSnap {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]slotSnap, len(f.slotSeen))
+	for i, s := range f.slotSeen {
+		cp := slotSnap{op: s.op, files: map[string]string{}}
+		for k, v := range s.files {
+			cp.files[k] = v
+		}
+		out[i] = cp
+	}
+	return out
 }
 
 func (f *fakeDocker) body(method, pathSuffix string) []byte {
@@ -1945,12 +2000,10 @@ func TestCountLockSerialisesDeploys(t *testing.T) {
 func TestOversizedJSONDeploy(t *testing.T) {
 	e := newImgEnv(t, imagePolicy)
 	req := jobDeploy()
-	req.Env = map[string]string{}
-	for i := 0; i < 40; i++ {
-		req.Env["V"+itoa(i)] = strings.Repeat("b", 4096)
-	}
 	body := mustJSON(t, req)
-	if len(body) <= programs.MaxFrame {
+	// Trailing space is still one JSON value. The size check has to be what refuses it.
+	body = append(body, bytes.Repeat([]byte(" "), images.MaxFrame)...)
+	if len(body) <= images.MaxFrame {
 		t.Fatalf("fixture %d", len(body))
 	}
 	if imgCode(t, e.call(images.VerbDeploy, body)) != programs.ReasonBadSpec || len(e.fake.Calls()) != 0 {

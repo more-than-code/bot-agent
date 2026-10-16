@@ -42,11 +42,12 @@ type socketHelper struct {
 }
 
 func (s socketHelper) Call(ctx context.Context, verb string, body []byte) ([]byte, error) {
-	if !programs.KnownVerb(verb) || len(body) > programs.MaxFrame {
+	limit := programs.FrameLimit(verb)
+	if !programs.KnownVerb(verb) || len(body) > limit {
 		return nil, errHelper
 	}
 	frame, err := marshalFrame(verb, body)
-	if err != nil || len(frame) > programs.MaxFrame {
+	if err != nil || len(frame) > limit+images.SocketSlack {
 		return nil, errHelper
 	}
 	timeout := s.dialTimeout

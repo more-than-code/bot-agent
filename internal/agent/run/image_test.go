@@ -693,10 +693,10 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeRunner(t, true, false), PolicyUID: rootUID,
 		Helper: off,
 	})
-	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker {
+	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker || !hello.Programs.Files {
 		t.Fatalf("%+v", hello.Programs)
 	}
-	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) {
+	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) || !strings.Contains(string(raw), `"files":true`) {
 		t.Fatalf("%s", raw)
 	}
 
@@ -727,8 +727,11 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeImageRunner(t), PolicyUID: rootUID,
 		Helper: on, MachineID: idPath,
 	})
-	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.ServicesComplete {
+	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.Programs.Files || !hello.ServicesComplete {
 		t.Fatalf("programs %+v complete %v", hello.Programs, hello.ServicesComplete)
+	}
+	if !strings.Contains(string(raw), `"files":true`) {
+		t.Fatalf("%s", raw)
 	}
 	if strings.Contains(string(raw), "SENTINEL") || strings.Contains(string(raw), "ghcr.io/acme/*") || strings.Contains(string(raw), "port-3031") || strings.Contains(string(raw), "port-6379") {
 		t.Fatalf("%s", raw)
@@ -798,8 +801,10 @@ type imageSeq struct {
 	deployBody []byte
 	pre        images.ImageStatus
 	preHash    string
+	preFiles   string
 	post       images.ImageStatus
 	postHash   string
+	postFiles  string
 	deployed   bool
 	rollback   string
 	stopErr    bool
@@ -829,7 +834,7 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 		}
 		return images.Encode(images.PullResponse{Digest: imgDigest, ImageID: "sha256:image"}), nil
 	case images.VerbStatus:
-		st, hash := s.pre, s.preHash
+		st, hash, files := s.pre, s.preHash, s.preFiles
 		if s.deployed {
 			if s.waitErr {
 				return nil, errors.New("status")
@@ -837,9 +842,9 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 			if s.waitCode != "" {
 				return refuse("error", s.waitCode), nil
 			}
-			st, hash = s.post, s.postHash
+			st, hash, files = s.post, s.postHash, s.postFiles
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash}), nil
+		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: files}), nil
 	case images.VerbDeploy:
 		s.deployed = true
 		s.deployBody = cp

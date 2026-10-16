@@ -28,6 +28,7 @@ type ImageSpec struct {
 	EnvSets         []string          `json:"env_sets"`
 	SecretEnv       map[string]string `json:"secret_env"`
 	Volumes         []Volume          `json:"volumes"`
+	Files           []SpecFile        `json:"files,omitempty"`
 	Restart         string            `json:"restart"`
 	User            string            `json:"user"`
 	HealthyAfterSec int               `json:"healthy_after_sec"`
@@ -71,6 +72,9 @@ func (s *ImageSpec) Validate() string {
 		return field
 	}
 	if field := checkVolumes(s.Volumes); field != "" {
+		return field
+	}
+	if field := checkSpecFiles(s.Files, s.Volumes); field != "" {
 		return field
 	}
 	if !ValidUser(s.User) {
