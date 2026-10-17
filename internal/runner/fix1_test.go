@@ -88,7 +88,7 @@ func TestMismatchedMarkersAreForeign(t *testing.T) {
 			t.Fatalf("%s rewrote %s", verb, got)
 		}
 	}
-	if h.ctl.called("restart") || h.ctl.called("stop") {
+	if h.ctl.called("restart") || h.ctl.called("stop") || h.ctl.called("enable") || h.ctl.called("disable") {
 		t.Fatalf("calls %v", h.ctl.calls)
 	}
 }

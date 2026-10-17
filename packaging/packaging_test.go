@@ -46,7 +46,7 @@ func TestRunnerSocketUnits(t *testing.T) {
 		"ProtectSystem=strict\n",
 		"PrivateDevices=yes\n",
 		"NoNewPrivileges=yes\n",
-		"ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock\n",
+		"ReadWritePaths=/etc/systemd/system /run/systemd/system -/run/bot-agent -/var/run/docker.sock\n",
 		"StateDirectory=bot-agent-runner\n",
 		"StateDirectoryMode=0700\n",
 	} {

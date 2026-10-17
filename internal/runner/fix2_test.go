@@ -14,7 +14,18 @@ func TestStartReloadFailureRemovesFiles(t *testing.T) {
 	h := newHarness(t, true, false, 20)
 	h.ctl.reloadErr = true
 	unit := "deploybot-demo-web.service"
-	raw := Handle(context.Background(), "start", h.start(t, "demo", "web", h.app, "/usr/bin/pnpm", false, nil), h.sys())
+	// The cleanup stop needs a loaded unit in the fake.
+	h.ctl.state[unit] = "active"
+	// Only the first reload fails; a failed cleanup reload is io_error (v1.5.1 rule 3).
+	sys := h.sys()
+	sys.Systemctl = func(ctx context.Context, args []string) (string, error) {
+		out, err := h.ctl.systemctl(ctx, args)
+		if len(args) > 0 && args[0] == "daemon-reload" && err != nil {
+			h.ctl.reloadErr = false
+		}
+		return out, err
+	}
+	raw := Handle(context.Background(), "start", h.start(t, "demo", "web", h.app, "/usr/bin/pnpm", false, nil), sys)
 	if programs.StatusFresh(raw) || refusalReason(t, raw) != "" {
 		t.Fatalf("%s", raw)
 	}

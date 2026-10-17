@@ -24,8 +24,8 @@ import (
 const maxJournalRead = 1 << 20
 
 // Sys is the helper's effect surface. Root is the filesystem prefix for
-// /run; an empty root or "/" is the real host. Unit text still cites the
-// production EnvironmentFile path.
+// /etc, /var/lib, and /run; an empty root or "/" is the real host. Unit text
+// still cites the production EnvironmentFile path.
 type Sys struct {
 	Systemctl  func(context.Context, []string) (string, error)
 	Journalctl func(context.Context, []string) (string, error)
@@ -159,6 +159,16 @@ func doList(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
 	}
 	out := make([]programs.UnitInfo, 0, len(units))
 	for _, u := range units {
+		// systemd loads /etc first. An owned /run unit behind a foreign
+		// /etc file still counts for max_programs, but list must not
+		// report it, and must not ask systemd about it.
+		hide, err := hiddenByForeignEtc(sys.Root, u)
+		if err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
+		if hide {
+			continue
+		}
 		st, err := isActive(ctx, sys, u.Unit)
 		if err != nil {
 			return refuse(sys, programs.ReasonIO)
@@ -198,118 +208,156 @@ func countUnits(sys Sys) (int, map[string]bool, bool) {
 }
 
 func doStart(ctx context.Context, res programs.Resolved, sys Sys) []byte {
-	if !safeToken(res.RunAs) || badGroup(res.Group) || !noBreak(res.Home) || !noBreak(res.Dir) || !noBreak(res.Exec) {
-		return refuse(sys, programs.ReasonPolicy)
+	if code := fieldBreaks(res); code != "" {
+		return refuse(sys, code)
 	}
-	for k, v := range res.Env {
-		if !noBreak(k) || !noBreak(v) {
-			return refuse(sys, programs.ReasonBadSpec)
-		}
-	}
-	for _, arg := range res.Args {
-		if !noBreak(arg) {
-			return refuse(sys, programs.ReasonBadSpec)
-		}
-	}
-	path := unitFile(sys.Root, res.Unit)
-	missing, err := fileMissing(path)
+	loc, err := locateUnit(sys.Root, res)
 	if err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
-	if !missing && !createdByUs(sys.Root, res) {
+	if loc.linkRefused() {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if err := guardMutable(sys.Root, res.Unit, loc); err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if loc.blocked() {
 		return refuse(sys, programs.ReasonNotOwned)
 	}
-	if err := atomicWrite(path, []byte(renderUnit(res)), 0o644); err != nil {
+	if present, err := dropInPresent(sys.Root, res.Unit); err != nil || present {
 		return refuse(sys, programs.ReasonIO)
 	}
-	if err := atomicWrite(envFile(sys.Root, res.Unit), []byte(renderEnv(res.Env)), 0o600); err != nil {
-		_ = os.Remove(path)
+	if err := writeProgramFiles(sys.Root, res, loc); err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
-	spec, err := recordSpec(res)
-	if err != nil {
-		_ = os.Remove(path)
-		_ = os.Remove(envFile(sys.Root, res.Unit))
-		return refuse(sys, programs.ReasonIO)
-	}
-	if err := atomicWrite(specFile(sys.Root, res.Unit), spec, 0o600); err != nil {
-		_ = os.Remove(path)
-		_ = os.Remove(envFile(sys.Root, res.Unit))
-		return refuse(sys, programs.ReasonIO)
-	}
-	if err := daemonReload(ctx, sys); err != nil {
-		discardUnit(sys, res.Unit)
+	before, restartErr, step := reloadEnableRestart(ctx, sys, res.Unit)
+	if step != "" {
+		if err := discardUnit(sys, res.Unit, loc.runOurs); err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
 		return programs.EncodeStart(failedStatus(res.Unit), false)
-	}
-	before, _ := readMono(ctx, sys, res.Unit)
-	var restartErr error
-	if sys.Systemctl == nil {
-		restartErr = errors.New("systemctl")
-	} else {
-		_, restartErr = sys.Systemctl(ctx, []string{"restart", res.Unit})
 	}
 	out, drop := finishActivation(ctx, sys, res.Unit, before, restartErr)
 	if drop {
-		discardUnit(sys, res.Unit)
+		if err := discardUnit(sys, res.Unit, loc.runOurs); err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
+		return out
+	}
+	if loc.runOurs {
+		if err := removeLegacy(sys.Root, res.Unit); err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
 	}
 	return out
 }
 
 func doStop(ctx context.Context, res programs.Resolved, sys Sys) []byte {
-	path := unitFile(sys.Root, res.Unit)
-	missing, err := fileMissing(path)
+	loc, err := locateUnit(sys.Root, res)
 	if err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
-	if missing {
-		return programs.EncodeStatus(inactive(res.Unit))
+	// Only the unit file systemd would load blocks disable. An env or spec
+	// symlink is not unlinked; stop still removes the other files, reloads,
+	// and returns io_error.
+	if loc.linkRefused() {
+		return refuse(sys, programs.ReasonIO)
 	}
-	if !createdByUs(sys.Root, res) {
+	if loc.blocked() {
 		return refuse(sys, programs.ReasonNotOwned)
 	}
+	if !loc.owned() {
+		return stopLeftover(res, sys)
+	}
 	if sys.Systemctl == nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if _, err := sys.Systemctl(ctx, []string{"disable", res.Unit}); err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
 	if _, err := sys.Systemctl(ctx, []string{"stop", res.Unit}); err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return refuse(sys, programs.ReasonIO)
-	}
-	if err := os.Remove(envFile(sys.Root, res.Unit)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return refuse(sys, programs.ReasonIO)
-	}
-	if err := os.Remove(specFile(sys.Root, res.Unit)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return refuse(sys, programs.ReasonIO)
-	}
+	// Keep going after one path fails. A foreign /run file is not in this
+	// list. Reload anyway, then io_error if something we tried to remove
+	// is still there.
+	paths := ownedStopPaths(sys.Root, res.Unit, loc.runOurs)
+	_ = removeRegulars(paths)
 	if err := daemonReload(ctx, sys); err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if filesLeft(paths) {
 		return refuse(sys, programs.ReasonIO)
 	}
 	return programs.EncodeStatus(inactive(res.Unit))
 }
 
 func doRestart(ctx context.Context, res programs.Resolved, sys Sys) []byte {
-	if !createdByUs(sys.Root, res) {
+	loc, err := locateUnit(sys.Root, res)
+	if err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if loc.linkRefused() {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if err := guardMutable(sys.Root, res.Unit, loc); err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if !loc.owned() || loc.blocked() {
 		return refuse(sys, programs.ReasonNotOwned)
 	}
-	if code := recheckSpec(sys, res.Unit); code != "" {
-		discardUnit(sys, res.Unit)
+	// The restart request names the unit only. recheckSpec resolves the stored
+	// start spec; fieldBreaks runs on that Resolved before any write.
+	checked, code := recheckSpec(sys, res.Unit)
+	if code != "" {
+		// Policy denial stays policy_denied even when cleanup itself fails.
+		_ = discardUnit(sys, res.Unit, loc.runOurs)
 		return refuse(sys, programs.ReasonPolicy)
 	}
-	before, _ := readMono(ctx, sys, res.Unit)
-	var restartErr error
-	if sys.Systemctl == nil {
-		restartErr = errors.New("systemctl")
-	} else {
-		_, restartErr = sys.Systemctl(ctx, []string{"restart", res.Unit})
+	if code = fieldBreaks(checked); code != "" {
+		return refuse(sys, code)
+	}
+	if present, err := dropInPresent(sys.Root, res.Unit); err != nil || present {
+		return refuse(sys, programs.ReasonIO)
+	}
+	// An /etc unit stays as it was written. Both branches still reload.
+	wrote := false
+	if !loc.etcOurs {
+		if err := writeProgramFiles(sys.Root, checked, loc); err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
+		wrote = true
+	}
+	before, restartErr, step := reloadEnableRestart(ctx, sys, res.Unit)
+	if step != "" {
+		// Enable has not succeeded, so /run is still the running copy.
+		// Reload failure: systemd never loaded the new /etc unit, so removing
+		// those files is enough. Enable failure: the reload already did, so
+		// reload again after the files are gone. No disable or stop.
+		if wrote {
+			if err := removePersistent(sys.Root, res.Unit); err != nil {
+				return refuse(sys, programs.ReasonIO)
+			}
+			if step == "enable" {
+				if err := daemonReload(ctx, sys); err != nil {
+					return refuse(sys, programs.ReasonIO)
+				}
+			}
+		}
+		return programs.EncodeStart(failedStatus(res.Unit), false)
 	}
 	out, _ := finishActivation(ctx, sys, res.Unit, before, restartErr)
+	if loc.runOurs {
+		if err := removeLegacy(sys.Root, res.Unit); err != nil {
+			return refuse(sys, programs.ReasonIO)
+		}
+	}
 	return out
 }
 
 func doStatus(ctx context.Context, res programs.Resolved, sys Sys) []byte {
-	if !createdByUs(sys.Root, res) {
-		return refuse(sys, programs.ReasonNotOwned)
+	if raw := ownedOrRefuse(sys, res); raw != nil {
+		return raw
 	}
 	st, err := show(ctx, sys, res.Unit)
 	if err != nil {
@@ -319,8 +367,8 @@ func doStatus(ctx context.Context, res programs.Resolved, sys Sys) []byte {
 }
 
 func doLogs(ctx context.Context, res programs.Resolved, sys Sys) []byte {
-	if !createdByUs(sys.Root, res) {
-		return refuse(sys, programs.ReasonNotOwned)
+	if raw := ownedOrRefuse(sys, res); raw != nil {
+		return raw
 	}
 	if sys.Journalctl == nil {
 		return refuse(sys, programs.ReasonIO)
@@ -339,8 +387,8 @@ func doLogs(ctx context.Context, res programs.Resolved, sys Sys) []byte {
 }
 
 func doSockets(res programs.Resolved, sys Sys) []byte {
-	if !createdByUs(sys.Root, res) {
-		return refuse(sys, programs.ReasonNotOwned)
+	if raw := ownedOrRefuse(sys, res); raw != nil {
+		return raw
 	}
 	proc, sysfs := sys.Proc, sys.Sysfs
 	if proc == "" {
@@ -366,6 +414,75 @@ func daemonReload(ctx context.Context, sys Sys) error {
 	}
 	_, err := sys.Systemctl(ctx, []string{"daemon-reload"})
 	return err
+}
+
+// reloadEnableRestart is the systemctl order for start and for every restart:
+// daemon-reload, enable, then restart. A non-empty step means that call
+// failed and restart was not run.
+func reloadEnableRestart(ctx context.Context, sys Sys, unit string) (before uint64, restartErr error, step string) {
+	if err := daemonReload(ctx, sys); err != nil {
+		return 0, nil, "reload"
+	}
+	if sys.Systemctl == nil {
+		return 0, nil, "enable"
+	}
+	if _, err := sys.Systemctl(ctx, []string{"enable", unit}); err != nil {
+		return 0, err, "enable"
+	}
+	before, _ = readMono(ctx, sys, unit)
+	_, restartErr = sys.Systemctl(ctx, []string{"restart", unit})
+	return before, restartErr, ""
+}
+
+// writeProgramFiles writes env, then spec, then the unit. The unit is last
+// so a failure cannot replace an already-enabled unit file. A first start
+// (loc.etcOurs false) removes the env and spec this call managed to write.
+// An owned /etc unit is left in place, including a new env or spec that
+// landed before the failure. The caller replies io_error and does not
+// call systemctl.
+func writeProgramFiles(root string, res programs.Resolved, loc unitLoc) error {
+	preserve := loc.etcOurs
+	envPath := envFile(root, res.Unit)
+	specPath := specFile(root, res.Unit)
+	unitPath := unitFile(root, res.Unit)
+	if err := atomicWrite(envPath, []byte(renderEnv(res.Env)), 0o600); err != nil {
+		return err
+	}
+	spec, err := recordSpec(res)
+	if err != nil {
+		if !preserve {
+			_ = removeRegular(envPath)
+		}
+		return err
+	}
+	if err := atomicWrite(specPath, spec, 0o600); err != nil {
+		if !preserve {
+			_ = removeRegular(envPath)
+		}
+		return err
+	}
+	if err := atomicWrite(unitPath, []byte(renderUnit(res)), 0o644); err != nil {
+		if !preserve {
+			_ = removeRegular(envPath)
+			_ = removeRegular(specPath)
+		}
+		return err
+	}
+	return nil
+}
+
+func ownedOrRefuse(sys Sys, res programs.Resolved) []byte {
+	loc, err := locateUnit(sys.Root, res)
+	if err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if loc.linkRefused() {
+		return refuse(sys, programs.ReasonIO)
+	}
+	if !loc.owned() || loc.blocked() {
+		return refuse(sys, programs.ReasonNotOwned)
+	}
+	return nil
 }
 
 func isActive(ctx context.Context, sys Sys, unit string) (string, error) {
@@ -410,35 +527,130 @@ func failedStatus(unit string) programs.Status {
 	return programs.Status{Unit: unit, ActiveState: "failed", SubState: "failed", Ports: []int{}}
 }
 
-// recheckSpec runs the stored start request through the current policy.
-// A missing or now-disallowed spec is policy_denied.
-func recheckSpec(sys Sys, unit string) string {
-	raw, err := os.ReadFile(specFile(sys.Root, unit))
-	if err != nil || len(raw) > programs.MaxFrame {
+// fieldBreaks rejects CR, LF, and NUL in the fields a unit file would quote
+// as one line. Dir, Exec, and Home also reject `\`, which systemd treats as
+// a line continuation. Identity and paths are policy_denied. Args and env
+// are bad_spec, and a backslash there is left alone. Restart must call this
+// on the re-resolved spec, not on the restart request.
+func fieldBreaks(res programs.Resolved) string {
+	if !safeToken(res.RunAs) || badGroup(res.Group) || pathBreaks(res.Home) || pathBreaks(res.Dir) || pathBreaks(res.Exec) {
 		return programs.ReasonPolicy
+	}
+	for k, v := range res.Env {
+		if !noBreak(k) || !noBreak(v) {
+			return programs.ReasonBadSpec
+		}
+	}
+	for _, arg := range res.Args {
+		if !noBreak(arg) {
+			return programs.ReasonBadSpec
+		}
+	}
+	return ""
+}
+
+// recheckSpec runs the stored start request through the current policy.
+// A missing or now-disallowed spec is policy_denied. The Resolved is what
+// an upgrade restart writes; the restart request itself has no command line.
+func recheckSpec(sys Sys, unit string) (programs.Resolved, string) {
+	raw, err := readSpec(sys.Root, unit)
+	if err != nil || len(raw) > programs.MaxFrame {
+		return programs.Resolved{}, programs.ReasonPolicy
 	}
 	pol := policy.Load(policy.Files{
 		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
 	})
 	checked, code := programs.Check("program_start", raw, programs.Gate{Policy: pol, Files: true})
 	if code != "" || checked.Unit != unit {
-		return programs.ReasonPolicy
+		return programs.Resolved{}, programs.ReasonPolicy
 	}
-	return ""
+	return checked, ""
 }
 
-// discardUnit stops a unit this call created and removes its files.
-// Stop uses its own short context so a cancelled request still reaps the unit.
-func discardUnit(sys Sys, unit string) {
-	if sys.Systemctl != nil {
+// discardUnit disables and stops a unit this call is abandoning, removes the
+// persistent files and an owned /run copy, then daemon-reload. Reload runs
+// after the unit file is gone. A foreign /run file is left in place.
+// Disable, stop, removal, and the reload are all attempted. The first error
+// comes back so a failed start does not claim start_failed when the unit
+// file is still loaded or still on disk. The short context lets a cancelled
+// request still reap the unit.
+func discardUnit(sys Sys, unit string, runOurs bool) error {
+	var first error
+	note := func(err error) {
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	if sys.Systemctl == nil {
+		note(errors.New("systemctl"))
+	} else {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = sys.Systemctl(stopCtx, []string{"stop", unit})
-		_, _ = sys.Systemctl(stopCtx, []string{"daemon-reload"})
+		_, err := sys.Systemctl(stopCtx, []string{"disable", unit})
+		note(err)
+		_, err = sys.Systemctl(stopCtx, []string{"stop", unit})
+		note(err)
 		cancel()
 	}
-	_ = os.Remove(unitFile(sys.Root, unit))
-	_ = os.Remove(envFile(sys.Root, unit))
-	_ = os.Remove(specFile(sys.Root, unit))
+	note(removePersistent(sys.Root, unit))
+	if runOurs {
+		note(removeLegacy(sys.Root, unit))
+	}
+	if sys.Systemctl != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := sys.Systemctl(stopCtx, []string{"daemon-reload"})
+		note(err)
+		cancel()
+	}
+	return first
+}
+
+// stopLeftover removes a spec whose stored project and entry match, and the
+// regular env next to it, when the unit file is already gone. No systemctl.
+// An env with no matching spec is not owned and is left in place.
+func stopLeftover(res programs.Resolved, sys Sys) []byte {
+	pairs := [][2]string{
+		{specFile(sys.Root, res.Unit), envFile(sys.Root, res.Unit)},
+		{legacySpecFile(sys.Root, res.Unit), legacyEnvFile(sys.Root, res.Unit)},
+	}
+	matched := false
+	left := false
+	for _, pair := range pairs {
+		if !specOwned(pair[0], res) {
+			continue
+		}
+		matched = true
+		if err := removeRegular(pair[0]); err != nil {
+			left = true
+		}
+		if regularFile(pair[1]) {
+			if err := removeRegular(pair[1]); err != nil {
+				left = true
+			}
+		}
+		if filesLeft([]string{pair[0]}) {
+			left = true
+		}
+		if regularFile(pair[1]) {
+			left = true
+		}
+	}
+	if matched && left {
+		return refuse(sys, programs.ReasonIO)
+	}
+	return programs.EncodeStatus(inactive(res.Unit))
+}
+
+// hiddenByForeignEtc is an owned unit systemd will not run because /etc
+// holds some other file of the same name.
+func hiddenByForeignEtc(root string, u ownedUnit) (bool, error) {
+	loc, err := locateUnit(root, programs.Resolved{Unit: u.Unit, Project: u.Project, Entry: u.Entry})
+	if err != nil {
+		return false, err
+	}
+	if loc.etcLink || (loc.etcSeen && !loc.etcOurs) {
+		return true, nil
+	}
+	return false, nil
 }
 
 func readMono(ctx context.Context, sys Sys, unit string) (uint64, bool) {
@@ -546,4 +758,8 @@ func safeToken(s string) bool {
 
 func noBreak(s string) bool {
 	return !strings.ContainsAny(s, "\n\r\x00")
+}
+
+func pathBreaks(s string) bool {
+	return !noBreak(s) || strings.Contains(s, `\`)
 }

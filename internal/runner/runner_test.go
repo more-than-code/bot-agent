@@ -44,8 +44,11 @@ func TestHelperRefusesForeignUnit(t *testing.T) {
 		if err != nil || string(got) != foreign {
 			t.Fatalf("%s touched the foreign unit: %s", verb, got)
 		}
+		if len(h.ctl.calls) != 0 {
+			t.Fatalf("%s calls %v", verb, h.ctl.calls)
+		}
 	}
-	if h.ctl.called("stop") || h.ctl.called("restart") {
+	if h.ctl.called("stop") || h.ctl.called("restart") || h.ctl.called("enable") || h.ctl.called("disable") {
 		t.Fatalf("systemd was called: %v", h.ctl.calls)
 	}
 }
@@ -83,7 +86,7 @@ func TestUnitFileGoldenAndModes(t *testing.T) {
 		wantExec + "\n" +
 		"Environment=\"HOME=/home/joe\"\n" +
 		`Environment="PATH=` + real + `/node_modules/.bin:/usr/local/bin:/usr/bin:/bin"` + "\n" +
-		"EnvironmentFile=/run/bot-agent/env/deploybot-demo-web.service.env\n" +
+		"EnvironmentFile=/var/lib/bot-agent-runner/programs/deploybot-demo-web.service.env\n" +
 		"Restart=on-failure\n" +
 		"NoNewPrivileges=yes\n" +
 		"PrivateTmp=yes\n" +
@@ -96,7 +99,10 @@ func TestUnitFileGoldenAndModes(t *testing.T) {
 		"ProtectControlGroups=yes\n" +
 		"InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd/containerd.sock -/run/podman/podman.sock\n" +
 		"RestrictSUIDSGID=yes\n" +
-		"LockPersonality=yes\n"
+		"LockPersonality=yes\n" +
+		"\n" +
+		"[Install]\n" +
+		"WantedBy=multi-user.target\n"
 	if string(got) != want {
 		t.Fatalf("unit\n%s\nwant\n%s", got, want)
 	}
@@ -112,7 +118,7 @@ func TestUnitFileGoldenAndModes(t *testing.T) {
 	}
 	assertMode(t, unit, 0o644)
 	assertMode(t, envPath, 0o600)
-	if !h.ctl.called("daemon-reload") || !h.ctl.called("restart") {
+	if !h.ctl.called("daemon-reload") || !h.ctl.called("enable") || !h.ctl.called("restart") {
 		t.Fatalf("calls %v", h.ctl.calls)
 	}
 	if !programs.StatusFresh(raw) {
@@ -154,17 +160,39 @@ func TestStopRemovesFilesAndMissingSucceeds(t *testing.T) {
 
 func TestStopFailureLeavesFiles(t *testing.T) {
 	h := newHarness(t, true, false, 20)
+	unit := "deploybot-demo-web.service"
 	raw := Handle(context.Background(), "start", h.start(t, "demo", "web", h.app, "/usr/bin/pnpm", false, nil), h.sys())
 	if refusalReason(t, raw) != "" {
 		t.Fatal(string(raw))
 	}
+	envBefore, err := os.ReadFile(envFile(h.root, unit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	specBefore, err := os.ReadFile(specFile(h.root, unit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ctl.calls = nil
 	h.ctl.stopErr = true
 	raw = Handle(context.Background(), "stop", h.ref(t, "demo", "web"), h.sys())
 	if refusalReason(t, raw) != programs.ReasonIO {
 		t.Fatal(string(raw))
 	}
-	if _, err := os.Stat(unitFile(h.root, "deploybot-demo-web.service")); err != nil {
+	if _, err := os.Stat(unitFile(h.root, unit)); err != nil {
 		t.Fatal("stop failure removed the unit")
+	}
+	envGot, err := os.ReadFile(envFile(h.root, unit))
+	if err != nil || string(envGot) != string(envBefore) {
+		t.Fatal("env changed")
+	}
+	specGot, err := os.ReadFile(specFile(h.root, unit))
+	if err != nil || string(specGot) != string(specBefore) {
+		t.Fatal("spec changed")
+	}
+	want := [][]string{{"disable", unit}, {"stop", unit}}
+	if got := systemctlVerbs(h.ctl); !callsEqual(got, want) {
+		t.Fatalf("calls %v", got)
 	}
 }
 
@@ -195,7 +223,7 @@ func TestConcurrentStartsRespectMaxPrograms(t *testing.T) {
 	}
 }
 
-func TestRestartDoesNotRewrite(t *testing.T) {
+func TestRestartOfEtcUnitDoesNotRewrite(t *testing.T) {
 	h := newHarness(t, true, false, 1)
 	unit := "deploybot-demo-api.service"
 	path := unitFile(h.root, unit)
@@ -206,6 +234,10 @@ func TestRestartDoesNotRewrite(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	plantSpec(t, h, "demo", "api")
 	h.ctl.state[unit] = "active"
 	raw := Handle(context.Background(), "restart", h.ref(t, "demo", "api"), h.sys())
@@ -214,7 +246,15 @@ func TestRestartDoesNotRewrite(t *testing.T) {
 	}
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != body {
-		t.Fatalf("rewritten: %s", got)
+		t.Fatalf("restart rewrote the unit:\n%s", got)
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.ModTime().Equal(old) {
+		t.Fatalf("mtime changed: %v", fi.ModTime())
+	}
+	want := [][]string{{"daemon-reload"}, {"enable", unit}, {"restart", unit}}
+	if gotCalls := systemctlVerbs(h.ctl); !callsEqual(gotCalls, want) {
+		t.Fatalf("restart calls %v", gotCalls)
 	}
 	raw = Handle(context.Background(), "start", h.start(t, "demo", "web", h.app, "/usr/bin/pnpm", false, nil), h.sys())
 	if refusalReason(t, raw) != programs.ReasonPolicy {
@@ -656,9 +696,19 @@ func mustStatus(t *testing.T, raw []byte) programs.Status {
 
 func assertMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
-	fi, err := os.Stat(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("%s is a symlink", path)
+	}
+	if want == 0o700 {
+		if !fi.IsDir() {
+			t.Fatalf("%s is not a directory", path)
+		}
+	} else if !fi.Mode().IsRegular() {
+		t.Fatalf("%s is not a regular file", path)
 	}
 	if fi.Mode().Perm() != want {
 		t.Fatalf("%s mode %o want %o", path, fi.Mode().Perm(), want)
@@ -703,6 +753,8 @@ type fakeCtl struct {
 	calls      [][]string
 	stopErr    bool
 	restartErr bool
+	enableErr  bool
+	disableErr bool
 	reloadErr  bool
 	noBump     bool
 	reloadWait time.Duration
@@ -730,8 +782,27 @@ func (f *fakeCtl) systemctl(_ context.Context, args []string) (string, error) {
 			return "", fmt.Errorf("reload")
 		}
 		return "", nil
+	case "enable":
+		if len(args) != 2 || args[1] == "" {
+			return "", fmt.Errorf("argv")
+		}
+		if f.enableErr {
+			return "", fmt.Errorf("enable")
+		}
+		return "", nil
+	case "disable":
+		if len(args) != 2 || args[1] == "" {
+			return "", fmt.Errorf("argv")
+		}
+		if f.disableErr {
+			return "", fmt.Errorf("disable")
+		}
+		return "", nil
 	case "restart":
 		if f.restartErr {
+			if !f.noBump {
+				f.mono[args[1]]++
+			}
 			return "", fmt.Errorf("restart")
 		}
 		f.state[args[1]] = "active"

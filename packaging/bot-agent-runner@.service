@@ -6,6 +6,7 @@ Description=bot-agent runner connection
 #   read-only is as far as that allows. Other homes stay readable; run_as is the host owner's choice.
 # - ProtectSystem=strict is on, but only with the ReadWritePaths below. Without those
 #   paths the helper could not create /run/systemd/system or /run/bot-agent/env.
+# - /etc/systemd/system holds installed program units, including the enable symlink.
 # - /run/bot-agent is prefixed with '-' so a missing directory does not fail
 #   namespace setup. tmpfiles creates it 0700 root root. The helper creates it
 #   too when the path is writable.
@@ -27,7 +28,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/run/systemd/system -/run/bot-agent -/var/run/docker.sock
+ReadWritePaths=/etc/systemd/system /run/systemd/system -/run/bot-agent -/var/run/docker.sock
 # StateDirectory creates /var/lib/bot-agent-runner, which ProtectSystem=strict would otherwise hide. The helper mkdirat's files/ under it.
 StateDirectory=bot-agent-runner
 # 0700 so only root can traverse the managed-file store.
