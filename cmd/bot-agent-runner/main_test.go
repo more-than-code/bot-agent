@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -310,4 +311,208 @@ func enabledSys(t *testing.T) (runner.Sys, *[][]string) {
 		},
 	}
 	return sys, &calls
+}
+
+func TestRefusalStderrLine(t *testing.T) {
+	const marker = "REQMARKER9secret"
+	peer := func() (int, bool) { return 900, true }
+
+	t.Run("image", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		body := []byte(`{"project":"mohiguide","entry":"web","note":"` + marker + `"}`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"container_deploy"}, bytes.NewReader(body), &out, sys, nil)
+			if code != 0 || !strings.Contains(out.String(), `"error":"policy_denied"`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: refuse container_deploy policy_denied\n" {
+			t.Fatalf("stderr %q", got)
+		}
+		if strings.Contains(got, marker) || strings.Contains(got, "mohiguide") || strings.Contains(out.String(), "refuse") {
+			t.Fatalf("leaked stderr %q stdout %s", got, out.String())
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("serve-conn", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		body := []byte(`{"project":"mohiguide","entry":"web","note":"` + marker + `"}`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"serve-conn"}, bytes.NewReader(verbFrame("container_deploy", body)), &out, sys, peer)
+			if code != 0 || !strings.Contains(out.String(), `"error":"policy_denied"`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: refuse container_deploy policy_denied\n" {
+			t.Fatalf("stderr %q", got)
+		}
+		if strings.Contains(got, marker) || strings.Contains(got, "mohiguide") {
+			t.Fatalf("request on stderr %q", got)
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("program", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		body := []byte(`{"note":"` + marker + `"}`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"start"}, bytes.NewReader(body), &out, sys, nil)
+			if code != 0 || !strings.Contains(out.String(), `"reason":"bad_spec"`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: refuse start bad_spec\n" {
+			t.Fatalf("stderr %q", got)
+		}
+		if strings.Contains(got, marker) || strings.Contains(out.String(), marker) {
+			t.Fatalf("marker stderr %q stdout %s", got, out.String())
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("argv hidden", func(t *testing.T) {
+		sys, _ := enabledSys(t)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(1000, []string{"/tmp/" + marker}, strings.NewReader(`{}`), &out, sys, nil)
+			if code != 0 || !strings.Contains(out.String(), `"reason":"policy_denied"`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: refuse - policy_denied\n" {
+			t.Fatalf("stderr %q", got)
+		}
+		if strings.Contains(got, marker) || strings.Contains(got, "/tmp") {
+			t.Fatalf("argv on stderr %q", got)
+		}
+	})
+}
+
+func TestOverlapPolicyLine(t *testing.T) {
+	const marker = "REQMARKER9secret"
+	peer := func() (int, bool) { return 900, true }
+	setProjects := func(t *testing.T, sys runner.Sys, projects string) {
+		t.Helper()
+		body := "enabled = true\nimages = [\"ghcr.io/acme/*\"]\nprojects = " + projects + "\n"
+		if err := os.WriteFile(sys.Policy, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("image", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		setProjects(t, sys, `["acme", "acme-web"]`)
+		body := []byte(`{"note":"` + marker + `","path":"` + sys.Policy + `"}`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"container_list"}, bytes.NewReader(body), &out, sys, nil)
+			if code != 0 || !strings.Contains(out.String(), `"error":"policy_denied"`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		want := "bot-agent-runner: policy: overlapping projects acme acme-web\n" +
+			"bot-agent-runner: refuse container_list policy_denied\n"
+		if got != want {
+			t.Fatalf("stderr %q", got)
+		}
+		if strings.Contains(got, marker) || strings.Contains(got, sys.Policy) || strings.Count(got, "overlapping projects") != 1 {
+			t.Fatalf("stderr %q", got)
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("program", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		setProjects(t, sys, `["acme-web", "acme"]`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"list"}, strings.NewReader(`{}`), &out, sys, nil)
+			if code != 0 || !strings.Contains(out.String(), `"ok":true`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: policy: overlapping projects acme-web acme\n" {
+			t.Fatalf("stderr %q stdout %s", got, out.String())
+		}
+		if strings.Contains(got, marker) || strings.Contains(out.String(), "acme") {
+			t.Fatalf("stderr %q stdout %s", got, out.String())
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("serve-conn", func(t *testing.T) {
+		sys, calls := enabledSys(t)
+		setProjects(t, sys, `["web", "acme", "acme-web"]`)
+		var out bytes.Buffer
+		got := withStderr(t, func() {
+			code := run(0, []string{"serve-conn"}, bytes.NewReader(verbFrame("list", []byte(`{}`))), &out, sys, peer)
+			if code != 0 || !strings.Contains(out.String(), `"ok":true`) {
+				t.Fatalf("exit %d %s", code, out.String())
+			}
+		})
+		if got != "bot-agent-runner: policy: overlapping projects acme acme-web\n" {
+			t.Fatalf("stderr %q stdout %s", got, out.String())
+		}
+		if strings.Contains(got, sys.Policy) || strings.Count(got, "\n") != 1 {
+			t.Fatalf("stderr %q", got)
+		}
+		if len(*calls) != 0 {
+			t.Fatal(calls)
+		}
+	})
+
+	t.Run("neighbours", func(t *testing.T) {
+		for _, projects := range []string{`["acme", "acmeweb"]`, `["acme-web", "web"]`} {
+			sys, _ := enabledSys(t)
+			setProjects(t, sys, projects)
+			var out bytes.Buffer
+			got := withStderr(t, func() {
+				code := run(0, []string{"serve-conn"}, bytes.NewReader(verbFrame("list", []byte(`{}`))), &out, sys, peer)
+				if code != 0 || !strings.Contains(out.String(), `"ok":true`) {
+					t.Fatalf("exit %d %s", code, out.String())
+				}
+			})
+			if got != "" || strings.Contains(got, "overlapping") {
+				t.Fatalf("%s stderr %q", projects, got)
+			}
+		}
+	})
+}
+
+func withStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+	fn()
+	os.Stderr = old
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

@@ -739,6 +739,41 @@ func TestHelloImageFlags(t *testing.T) {
 	assertContainerSet(t, hello.Services, digest)
 }
 
+func TestHelloOverlappingProjects(t *testing.T) {
+	proc, sys, _ := fixtureProc(t, 9)
+	appendUnmapped(t, proc)
+	off := &fakeHelper{fn: func(verb string, body []byte) ([]byte, error) {
+		if verb == images.VerbList {
+			t.Fatal("container_list while overlapping projects disable images")
+		}
+		switch verb {
+		case "list":
+			return programs.EncodeList(nil), nil
+		default:
+			return nil, errors.New(verb)
+		}
+	}}
+	body := "enabled = true\nrun_as = [\"joe\"]\ndirs = [\"/home/joe/workspace-SENTINEL-dir\"]\nexec_allow = [\"/usr/bin/pnpm-SENTINEL\"]\nallow_shell = false\nmax_programs = 20\nimages = [\"ghcr.io/acme/*\"]\nprojects = [\"acme\", \"acme-web\"]\n"
+	path := filepath.Join(t.TempDir(), "runner.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hello, raw := helloFrame(t, Options{
+		ProcRoot: proc, SysRoot: sys, Passwd: joePasswd(t), GroupPath: joeGroup(t),
+		PolicyPath: path, PolicyUID: rootUID,
+		Helper: off,
+	})
+	if hello.Programs == nil || !hello.Programs.Enabled || hello.Programs.Images || !hello.Programs.Files {
+		t.Fatalf("%+v", hello.Programs)
+	}
+	if !strings.Contains(string(raw), `"images":false`) {
+		t.Fatalf("%s", raw)
+	}
+	if strings.Contains(string(raw), "acme-web") || strings.Contains(string(raw), "ghcr.io/acme") {
+		t.Fatalf("%s", raw)
+	}
+}
+
 func TestContainerListFailureSkipsFrame(t *testing.T) {
 	proc, sys, _ := fixtureProc(t, 9)
 	appendUnmapped(t, proc)
@@ -852,6 +887,9 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 	case images.VerbRemove:
 		return images.Encode(images.ActionResult{Status: missingStatus()}), nil
 	case images.VerbRollback:
+		if err := readRollback(cp); err != nil {
+			return nil, err
+		}
 		if s.rollback != "" {
 			return refuse("error", s.rollback), nil
 		}
@@ -876,6 +914,19 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 	default:
 		return nil, errors.New(verb)
 	}
+}
+
+// readRollback is the strict body check every container_rollback fake uses.
+// A deploy object has fields EntryRequest does not, so Decode rejects it.
+func readRollback(body []byte) error {
+	var req images.EntryRequest
+	if err := images.Decode(body, &req); err != nil {
+		return err
+	}
+	if req.Project != "acme" || req.Entry != "web" {
+		return errors.New("rollback target")
+	}
+	return nil
 }
 
 func imageRun(t *testing.T) (*agent, *fakeHelper, *testClock, *imageSeq) {

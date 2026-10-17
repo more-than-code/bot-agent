@@ -94,11 +94,19 @@ func finish(start time.Time, res Result) Result {
 	return res
 }
 
+// DialObserve, when set, reports the loopback address a TCP probe is about
+// to dial. Tests use it. Production leaves it nil. It cannot change the address.
+var DialObserve func(addr string)
+
 func dialTCP(ctx context.Context, spec Spec) Result {
 	ctx, cancel := context.WithTimeout(ctx, spec.Timeout)
 	defer cancel()
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(spec.Port)))
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(spec.Port))
+	if DialObserve != nil {
+		DialObserve(addr)
+	}
+	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return Result{Result: classify(err)}
 	}

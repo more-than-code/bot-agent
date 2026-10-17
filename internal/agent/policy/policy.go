@@ -66,9 +66,33 @@ type Policy struct {
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
-// image pattern and one project. An empty list is valid and leaves images off.
+// image pattern and one project, and no overlapping project names. An empty
+// list is valid and leaves images off. Overlap leaves the policy valid.
 func (p Policy) ImagesEnabled() bool {
+	if _, _, overlap := OverlappingProjects(p.Projects); overlap {
+		return false
+	}
 	return p.Valid && p.Enabled && len(p.Images) > 0 && len(p.Projects) > 0
+}
+
+// OverlappingProjects reports the first pair, in list order, where one slug
+// is the other plus "-" plus one or more characters. a is the earlier slug.
+// A bare trailing "-" is not a suffix: the contract's "anything" is not empty.
+// acme and acmeweb do not overlap. acme-web and web do not overlap.
+func OverlappingProjects(projects []string) (a, b string, ok bool) {
+	for i := 0; i < len(projects); i++ {
+		for j := i + 1; j < len(projects); j++ {
+			if projectOverlaps(projects[i], projects[j]) {
+				return projects[i], projects[j], true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func projectOverlaps(x, y string) bool {
+	return (strings.HasPrefix(y, x+"-") && len(y) > len(x)+1) ||
+		(strings.HasPrefix(x, y+"-") && len(x) > len(y)+1)
 }
 
 // Files selects the policy and the account databases.

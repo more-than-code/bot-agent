@@ -758,6 +758,11 @@ func TestStoreOpenErrors(t *testing.T) {
 		})
 	})
 	t.Run("other", func(t *testing.T) {
+		// Root ignores mode bits, so a mode-0 directory does not return EACCES.
+		// The assertion below needs that permission error.
+		if os.Geteuid() == 0 {
+			t.Skip("root does not get EACCES from a mode-0 directory")
+		}
 		// A permission error is not "no store", with or without files.
 		for _, withFiles := range []bool{false, true} {
 			t.Run(map[bool]string{false: "no-files", true: "files"}[withFiles], func(t *testing.T) {

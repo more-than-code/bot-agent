@@ -91,6 +91,16 @@ type fakeDocker struct {
 	badDigest    bool
 	renameFail   bool
 	startFail    bool
+	// renameLand is the 1-based rename that is applied and then rejected.
+	// Zero lets every rename finish. renameFail still rejects before applying.
+	renameLand int
+	renameN    int
+	renameHit  chan struct{}
+	renameWait chan struct{}
+	// listFailAfter rejects lists whose 1-based count is at least this.
+	// Zero lists every call.
+	listFailAfter int
+	listN         int
 	// slotDir, when set, is read at create and at start. The snapshot is
 	// the file contents in that directory at the moment the call arrives.
 	slotDir    string
@@ -281,6 +291,11 @@ func flush(w http.ResponseWriter) {
 }
 
 func (f *fakeDocker) serveList(w http.ResponseWriter) {
+	f.listN++
+	if f.listFailAfter > 0 && f.listN >= f.listFailAfter {
+		http.Error(w, "list failed", http.StatusInternalServerError)
+		return
+	}
 	var items []map[string]any
 	for _, c := range f.ctrs {
 		ports := []map[string]any{}
@@ -378,6 +393,20 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 		delete(f.ctrs, c.name)
 		c.name = next
 		f.ctrs[next] = c
+		f.renameN++
+		if f.renameLand > 0 && f.renameN == f.renameLand {
+			// Close and wait while this request is still the one the
+			// client is blocked on. The waiter only cancels that client;
+			// it does not take this lock, so the wait cannot deadlock it.
+			if f.renameHit != nil {
+				close(f.renameHit)
+			}
+			if f.renameWait != nil {
+				<-f.renameWait
+			}
+			http.Error(w, "rename failed", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case op == "logs" && r.Method == http.MethodGet:
 		if c == nil {
@@ -1549,6 +1578,45 @@ func TestStartStopRestartMissing(t *testing.T) {
 	}
 	if !sawStop || !sawStart {
 		t.Fatal("restart was not stop+start")
+	}
+}
+
+func TestOverlapDisablesImages(t *testing.T) {
+	const head = "enabled = true\nimages = [\"ghcr.io/acme/*\"]\n"
+	overlap := head + "projects = [\"acme\", \"acme-web\"]\n"
+	e := newImgEnv(t, overlap)
+	for _, verb := range []string{
+		images.VerbList, images.VerbPull, images.VerbDeploy, images.VerbRollback,
+		images.VerbRemove, images.VerbStart, images.VerbStop, images.VerbRestart,
+		images.VerbStatus, images.VerbLogs,
+	} {
+		raw := e.call(verb, []byte(`{}`))
+		if imgCode(t, raw) != programs.ReasonPolicy {
+			t.Fatalf("%s %s calls %d", verb, raw, len(e.fake.Calls()))
+		}
+	}
+	if len(e.fake.Calls()) != 0 {
+		t.Fatalf("engine %v", e.fake.Calls())
+	}
+	listed, reason, err := programs.DecodeList(e.call("list", []byte(`{}`)))
+	if err != nil || reason != "" || len(listed) != 0 {
+		t.Fatalf("list %q reason %s err %v", listed, reason, err)
+	}
+	if len(e.fake.Calls()) != 0 {
+		t.Fatal("program list dialed the engine")
+	}
+
+	for _, projects := range []string{`["acme", "acmeweb"]`, `["acme-web", "web"]`} {
+		fine := newImgEnv(t, head+"projects = "+projects+"\n")
+		raw := fine.call(images.VerbList, []byte(`{}`))
+		if imgCode(t, raw) != "" || len(fine.fake.Calls()) == 0 {
+			t.Fatalf("%s -> %s calls %d", projects, raw, len(fine.fake.Calls()))
+		}
+	}
+
+	three := newImgEnv(t, head+"projects = [\"acme\", \"other\", \"acme-web\"]\n")
+	if imgCode(t, three.call(images.VerbList, []byte(`{}`))) != programs.ReasonPolicy || len(three.fake.Calls()) != 0 {
+		t.Fatal("three projects still called the engine")
 	}
 }
 

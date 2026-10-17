@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -26,24 +27,68 @@ func main() {
 }
 
 func run(euid int, args []string, in io.Reader, out io.Writer, sys runner.Sys, peer func() (int, bool)) int {
+	sys.Logf = stderrLogf
 	if euid != 0 {
+		verb := ""
+		if len(args) == 1 {
+			verb = args[0]
+		}
+		noteRefusal(sys, verb, programs.ReasonPolicy)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonPolicy))
 	}
 	if len(args) == 1 && args[0] == "serve-conn" {
 		return serveConn(in, out, sys, peer)
 	}
 	if len(args) != 1 || !programs.KnownVerb(args[0]) {
+		noteRefusal(sys, "", programs.ReasonVerb)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonVerb))
 	}
 	limit := programs.FrameLimit(args[0])
 	body, err := io.ReadAll(io.LimitReader(in, int64(limit)+1))
 	if err != nil {
+		noteRefusal(sys, args[0], programs.ReasonIO)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonIO))
 	}
 	if len(body) > limit {
+		noteRefusal(sys, args[0], programs.ReasonBadSpec)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonBadSpec))
 	}
+	noteOverlap(sys)
 	return writeOut(out, runner.Handle(context.Background(), args[0], body, sys))
+}
+
+// stderrLogf is the production refusal logger. stdout is the socket, so
+// the line has to go to stderr, which the unit sends to the journal.
+func stderrLogf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// noteRefusal logs a refusal that returns before Handle. The verb is
+// printed only when it is a helper verb; an arbitrary argv is not.
+func noteRefusal(sys runner.Sys, verb, reason string) {
+	if sys.Logf == nil {
+		return
+	}
+	if !programs.KnownVerb(verb) {
+		verb = "-"
+	}
+	sys.Logf("bot-agent-runner: refuse %s %s", verb, reason)
+}
+
+// noteOverlap logs v1.5.2 rule 6 once per connection. The line is the two
+// slugs from the policy file and nothing from the request.
+func noteOverlap(sys runner.Sys) {
+	if sys.Logf == nil {
+		return
+	}
+	pol := policy.Load(policy.Files{
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+	})
+	a, b, ok := policy.OverlappingProjects(pol.Projects)
+	if !ok {
+		return
+	}
+	sys.Logf("bot-agent-runner: policy: overlapping projects %s %s", a, b)
 }
 
 // serveConn reads one newline-terminated request from the accepted socket
@@ -56,17 +101,21 @@ func serveConn(in io.Reader, out io.Writer, sys runner.Sys, peer func() (int, bo
 	}
 	want, found := lookupUID(sys.Passwd, "bot-agent")
 	if !ok || !found || uid != want || uid == 0 {
+		noteRefusal(sys, "", programs.ReasonPolicy)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonPolicy))
 	}
 	line, tooBig, err := readFrame(in)
 	if tooBig {
+		noteRefusal(sys, "", programs.ReasonBadSpec)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonBadSpec))
 	}
 	if err != nil {
+		noteRefusal(sys, "", programs.ReasonIO)
 		return writeOut(out, programs.EncodeRefusal(programs.ReasonIO))
 	}
 	verb, req, reason := parseEnvelope(line)
 	if reason != "" {
+		noteRefusal(sys, "", reason)
 		return writeOut(out, programs.EncodeRefusal(reason))
 	}
 	// A socket close cancels systemctl. A bytes.Reader used by tests is
@@ -85,6 +134,7 @@ func serveConn(in io.Reader, out io.Writer, sys runner.Sys, peer func() (int, bo
 			}
 		}()
 	}
+	noteOverlap(sys)
 	return writeOut(out, runner.Handle(ctx, verb, req, sys))
 }
 

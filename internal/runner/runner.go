@@ -37,6 +37,10 @@ type Sys struct {
 	Policy     string
 	UID        func(os.FileInfo) (uint32, bool)
 	Logf       func(string, ...any)
+	// logVerb is Handle's verb argument, copied onto this value so a refusal
+	// line can name it. It is not read from the request. A package variable
+	// would race under go test -race; refuse's callers do not take a verb.
+	logVerb string
 	// MachineID is the host-id file. Empty means /etc/machine-id.
 	// DockerSock is the Engine socket. Empty means /var/run/docker.sock.
 	// Neither is taken from a request. Tests set both.
@@ -59,6 +63,7 @@ type Sys struct {
 // Handle runs one verb. in is the raw JSON object from stdin.
 // The result is one JSON object and never contains env values.
 func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
+	sys.logVerb = verb
 	if images.IsVerb(verb) {
 		return handleImage(ctx, verb, in, sys)
 	}
@@ -141,7 +146,7 @@ func verbKind(verb string) string {
 
 func refuse(sys Sys, reason string) []byte {
 	if sys.Logf != nil {
-		sys.Logf("bot-agent-runner: refuse %s", reason)
+		sys.Logf("bot-agent-runner: refuse %s %s", refusalVerb(sys.logVerb), programs.FixedReason(reason))
 	}
 	return programs.EncodeRefusal(reason)
 }

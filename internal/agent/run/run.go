@@ -243,18 +243,21 @@ type agent struct {
 	listCutOnce   atomic.Bool
 	dockerOK      bool
 	dockerKnown   bool
-	idOnce        sync.Once
-	idLabel       string
-	idMiss        bool
-	idLogOnce     atomic.Bool
-	healthCh      chan protocol.Sample
-	healthCancel  context.CancelFunc
-	pending       pendingTasks
-	inflight      inflight
-	taskSlots     chan struct{}
-	taskMu        sync.Mutex
-	taskRunning   int
-	taskWaiting   int
+	// helperKind is the task kind while a task is talking to the helper.
+	// Empty during discovery, so those calls are not logged as task failures.
+	helperKind   string
+	idOnce       sync.Once
+	idLabel      string
+	idMiss       bool
+	idLogOnce    atomic.Bool
+	healthCh     chan protocol.Sample
+	healthCancel context.CancelFunc
+	pending      pendingTasks
+	inflight     inflight
+	taskSlots    chan struct{}
+	taskMu       sync.Mutex
+	taskRunning  int
+	taskWaiting  int
 }
 
 type writer struct {

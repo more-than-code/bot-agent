@@ -37,6 +37,7 @@ func TestRunnerSocketUnits(t *testing.T) {
 		"User=root\n",
 		"StandardInput=socket\n",
 		"StandardOutput=socket\n",
+		"StandardError=journal\n",
 		"ExecStart=/usr/local/libexec/bot-agent-runner serve-conn\n",
 		"RuntimeMaxSec=900\n",
 		"ProtectHome=read-only\n",

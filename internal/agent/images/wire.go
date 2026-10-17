@@ -140,13 +140,23 @@ type ActionResult struct {
 	Status ImageStatus `json:"status"`
 }
 
+// PrevView is the -prev container's labels only. Digest is null when that
+// image ref is not pinned. No env, mounts, state, or other labels.
+type PrevView struct {
+	Digest    *string `json:"digest"`
+	SpecHash  string  `json:"spec_hash"`
+	FilesHash string  `json:"files_hash"`
+}
+
 // StatusResult is container_status. SpecHash and FilesHash are empty when
 // the container is missing or has no such label. FilesHash is not omitempty:
-// the contract sends "" when there are no files.
+// the contract sends "" when there are no files. Prev is null when the entry
+// has no -prev container. The key is not omitempty: the contract sends null.
 type StatusResult struct {
 	Status    ImageStatus `json:"status"`
 	SpecHash  string      `json:"spec_hash"`
 	FilesHash string      `json:"files_hash"`
+	Prev      *PrevView   `json:"prev"`
 }
 
 // LogsResponse is container_logs.

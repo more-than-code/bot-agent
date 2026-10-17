@@ -60,6 +60,8 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 }
 
 func (a *agent) runProgram(ctx context.Context, task protocol.Task) protocol.TaskResult {
+	a.setHelperKind(task.Kind)
+	defer a.setHelperKind("")
 	tmo := time.Duration(task.TimeoutSec) * time.Second
 	if tmo <= 0 {
 		tmo = 15 * time.Second
@@ -82,9 +84,11 @@ func (a *agent) runProgram(ctx context.Context, task protocol.Task) protocol.Tas
 	}
 	reason, passed, err := peekOK(raw)
 	if err != nil {
+		a.logHelper(verb, "decode")
 		return a.helperFail(task, programs.ReasonHelper)
 	}
 	if !passed {
+		a.logHelper(verb, programs.FixedReason(reason))
 		return a.helperFail(task, reason)
 	}
 	switch task.Kind {
@@ -93,9 +97,11 @@ func (a *agent) runProgram(ctx context.Context, task protocol.Task) protocol.Tas
 	case "program_start", "program_restart":
 		st, reason, err := programs.DecodeStatus(raw)
 		if err != nil {
+			a.logHelper(verb, "decode")
 			return a.helperFail(task, programs.ReasonHelper)
 		}
 		if reason != "" {
+			a.logHelper(verb, programs.FixedReason(reason))
 			return a.helperFail(task, reason)
 		}
 		// fresh is false when this call did not move ActiveEnterTimestampMonotonic
@@ -151,11 +157,14 @@ func (a *agent) waitActive(ctx context.Context, task protocol.Task) protocol.Tas
 }
 
 func (a *agent) finishStatus(ctx context.Context, task protocol.Task, raw []byte) protocol.TaskResult {
+	verb, _ := programs.Verb(task.Kind)
 	st, reason, err := programs.DecodeStatus(raw)
 	if err != nil {
+		a.logHelper(verb, "decode")
 		return a.helperFail(task, programs.ReasonHelper)
 	}
 	if reason != "" {
+		a.logHelper(verb, programs.FixedReason(reason))
 		return a.helperFail(task, reason)
 	}
 	return a.successStatus(ctx, task, st)
@@ -206,9 +215,11 @@ func (a *agent) startFailed(ctx context.Context, task protocol.Task, st programs
 func (a *agent) finishLogs(task protocol.Task, raw []byte) protocol.TaskResult {
 	batch, reason, err := programs.DecodeLogs(raw)
 	if err != nil {
+		a.logHelper("logs", "decode")
 		return a.helperFail(task, programs.ReasonHelper)
 	}
 	if reason != "" {
+		a.logHelper("logs", programs.FixedReason(reason))
 		return a.helperFail(task, reason)
 	}
 	lines, cut := redact.Journal(batch.Lines)
@@ -240,7 +251,12 @@ func (a *agent) tail(ctx context.Context, project, entry string) []string {
 		return []string{}
 	}
 	batch, reason, err := programs.DecodeLogs(raw)
-	if err != nil || reason != "" {
+	if err != nil {
+		a.logHelper("logs", "decode")
+		return []string{}
+	}
+	if reason != "" {
+		a.logHelper("logs", programs.FixedReason(reason))
 		return []string{}
 	}
 	lines, _ := redact.Journal(batch.Lines)
@@ -255,7 +271,15 @@ func (a *agent) fetchStatus(ctx context.Context, project, entry string) (program
 	if err != nil {
 		return programs.Status{}, "", err
 	}
-	return programs.DecodeStatus(raw)
+	st, reason, err := programs.DecodeStatus(raw)
+	if err != nil {
+		a.logHelper("status", "decode")
+		return st, reason, err
+	}
+	if reason != "" {
+		a.logHelper("status", programs.FixedReason(reason))
+	}
+	return st, reason, nil
 }
 
 func (a *agent) sockets(ctx context.Context, project, entry string) ([]int, *string, error) {
@@ -264,7 +288,12 @@ func (a *agent) sockets(ctx context.Context, project, entry string) ([]int, *str
 		return nil, nil, err
 	}
 	ports, user, reason, err := programs.DecodeSockets(raw)
-	if err != nil || reason != "" {
+	if err != nil {
+		a.logHelper("sockets", "decode")
+		return nil, nil, errors.New("sockets")
+	}
+	if reason != "" {
+		a.logHelper("sockets", programs.FixedReason(reason))
 		return nil, nil, errors.New("sockets")
 	}
 	if ports == nil {
@@ -279,7 +308,12 @@ func (a *agent) listUnits(ctx context.Context) ([]programs.UnitInfo, error) {
 		return nil, err
 	}
 	units, reason, err := programs.DecodeList(raw)
-	if err != nil || reason != "" {
+	if err != nil {
+		a.logHelper("list", "decode")
+		return nil, errors.New("list")
+	}
+	if reason != "" {
+		a.logHelper("list", programs.FixedReason(reason))
 		return nil, errors.New("list")
 	}
 	return units, nil
@@ -311,7 +345,11 @@ func (a *agent) call(ctx context.Context, verb string, body []byte) ([]byte, err
 	if a.opt.Helper == nil || !programs.KnownVerb(verb) || len(body) > programs.FrameLimit(verb) {
 		return nil, errHelper
 	}
-	return a.opt.Helper.Call(ctx, verb, body)
+	raw, err := a.opt.Helper.Call(ctx, verb, body)
+	if err != nil && ctx.Err() == nil {
+		a.logHelper(verb, "transport")
+	}
+	return raw, err
 }
 
 func (a *agent) helperFail(task protocol.Task, reason string) protocol.TaskResult {

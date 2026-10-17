@@ -63,9 +63,18 @@ func handleImage(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 func imgErr(sys Sys, reason string) []byte {
 	reason = programs.FixedReason(reason)
 	if sys.Logf != nil {
-		sys.Logf("bot-agent-runner: refuse %s", reason)
+		sys.Logf("bot-agent-runner: refuse %s %s", refusalVerb(sys.logVerb), reason)
 	}
 	return images.EncodeError(reason)
+}
+
+// refusalVerb is the verb field of a refusal line. Anything that is not a
+// helper verb is "-", so the line cannot carry a path or a newline.
+func refusalVerb(verb string) string {
+	if programs.KnownVerb(verb) {
+		return verb
+	}
+	return "-"
 }
 
 func engReason(err error) string {
@@ -407,6 +416,11 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 		}
 	}
 	if err := park(ctx, eng, cur, prevName); err != nil {
+		// Stop or rename failed. A rename may already have moved the
+		// container onto -prev; the slot is still on the current name.
+		if code := matchSlot(st, eng, req.Project, req.Entry, host); code != "" {
+			return imgErr(sys, code)
+		}
 		return imgErr(sys, engReason(err))
 	}
 	if st != nil {
@@ -546,24 +560,22 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 			}
 		}
 		if err := eng.Rename(ctx, prev.id, curName); err != nil {
-			// The -prev container is still -prev. Put its slot back
-			// beside it. The current container is already gone, and so
-			// is its slot.
-			if moved {
-				if rerr := st.rename(curName, prevName); rerr != nil {
-					return imgErr(sys, storeCode(rerr))
-				}
+			// The rename may have landed before the error. The slot was
+			// already moved to the current name; put it back only when
+			// the container is still -prev.
+			if code := matchSlot(st, eng, req.Project, req.Entry, host); code != "" {
+				return imgErr(sys, code)
 			}
 			return imgErr(sys, engReason(err))
 		}
 		if err := eng.Start(ctx, prev.id); err != nil {
-			// Both names are the current name, and the container did not
-			// start. Put the container back on -prev first, then the slot,
-			// so a failed start ends like a failed container rename. Moving
-			// only the slot would leave the container on the current name.
-			// If the container rename back fails, the slot stays where it
-			// is: both are still the current name.
+			// The container is on the current name and did not start.
+			// Rename it back to -prev before the slot, so a failed start
+			// does not leave the container on the slot's old name.
 			if rerr := eng.Rename(ctx, prev.id, prevName); rerr != nil {
+				if code := matchSlot(st, eng, req.Project, req.Entry, host); code != "" {
+					return imgErr(sys, code)
+				}
 				return imgErr(sys, engReason(rerr))
 			}
 			if moved {
@@ -666,19 +678,34 @@ func doStatusCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []b
 		return imgErr(sys, code)
 	}
 	return withRead(ctx, sys, func(eng engine, host string) []byte {
-		_, cur, _, code := loadPair(ctx, eng, req.Project, req.Entry, host)
+		_, cur, prev, code := loadPair(ctx, eng, req.Project, req.Entry, host)
 		if code != "" {
 			return imgErr(sys, code)
 		}
+		// List row only. Inspect of -prev would also return env and mounts.
+		view := prevView(prev)
 		if !cur.found {
-			return images.Encode(images.StatusResult{Status: missingStatus(), SpecHash: "", FilesHash: ""})
+			return images.Encode(images.StatusResult{Status: missingStatus(), Prev: view})
 		}
 		st, hash, filesHash, code := inspectStatus(ctx, eng, cur.id)
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: filesHash})
+		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: filesHash, Prev: view})
 	})
+}
+
+// prevView is the labels of the -prev container. A missing container is a
+// JSON null, not an empty object.
+func prevView(s slot) *images.PrevView {
+	if !s.found {
+		return nil
+	}
+	return &images.PrevView{
+		Digest:    repoDigest(s.image),
+		SpecHash:  specHashOf(s.labels),
+		FilesHash: filesHashOf(s.labels),
+	}
 }
 
 func doLogsCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
@@ -844,6 +871,40 @@ func stopRemove(ctx context.Context, eng engine, sl slot) error {
 		return err
 	}
 	return eng.Remove(ctx, sl.id)
+}
+
+// renameSettle bounds the list that runs after a container rename
+// returns an error. The verb context is not used: the socket-close
+// watcher cancels it, and that list is what places the file slot.
+const renameSettle = 5 * time.Second
+
+// matchSlot moves the file slot onto the name the entry's container
+// actually has. The caller has just seen a rename error and must not
+// assume the name did not change. Labels are checked the same way as
+// loadPair. Anything other than exactly one of the two names leaves
+// the slot where it is and reports docker_unavailable.
+func matchSlot(st *store, eng engine, project, entry, host string) string {
+	if st == nil {
+		return ""
+	}
+	curName, prevName, _, ok := slotNames(project, entry)
+	if !ok {
+		return programs.ReasonDocker
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), renameSettle)
+	defer cancel()
+	_, cur, prev, code := loadPair(ctx, eng, project, entry, host)
+	if code != "" || cur.found == prev.found {
+		return programs.ReasonDocker
+	}
+	from, to := curName, prevName
+	if cur.found {
+		from, to = prevName, curName
+	}
+	if err := st.rename(from, to); err != nil {
+		return storeCode(err)
+	}
+	return ""
 }
 
 func park(ctx context.Context, eng engine, sl slot, name string) error {

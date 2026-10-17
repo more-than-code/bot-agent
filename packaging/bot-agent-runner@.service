@@ -42,5 +42,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 StandardInput=socket
 StandardOutput=socket
+# stdout is the socket. stderr must not go there: a refusal is one journal line.
+StandardError=journal
 ExecStart=/usr/local/libexec/bot-agent-runner serve-conn
 RuntimeMaxSec=900

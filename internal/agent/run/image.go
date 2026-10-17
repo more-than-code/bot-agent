@@ -26,6 +26,8 @@ const (
 )
 
 func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskResult {
+	a.setHelperKind(task.Kind)
+	defer a.setHelperKind("")
 	req, code := tasks.ParseImage(task, a.policy)
 	if code != "" {
 		return a.imageRejected(task)
@@ -86,6 +88,15 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	if err != nil {
 		return a.deployResult(task, "forbidden_spec", "", nil, missingStatus(), nil, ex)
 	}
+	// Service rollback to the kept container's digest must swap before the
+	// unchanged check. A content-only change has the same digest, so a pull
+	// and deploy would report unchanged and leave the old files parked.
+	// Jobs have no -prev generation.
+	if task.Kind == "image_rollback" && req.Spec.Kind == "service" {
+		if res, done := a.rollbackKept(ctx, task, req, deadline, ex, values); done {
+			return res
+		}
+	}
 	pullRef := req.Spec.Image
 	if task.Kind == "image_rollback" {
 		pullRef = ref.Name + "@" + req.Digest
@@ -103,14 +114,57 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	return a.deployJob(ctx, task, req, deadline, digest, ex, values)
 }
 
+// rollbackKept swaps -prev back when its digest equals the task digest.
+// done is false when this rollback must pull and deploy. A status failure
+// does not fall through: the kept digest is unknown, and deploying would
+// hide that. force does not matter; the swap is not the unchanged short-circuit.
+func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, values []string) (protocol.TaskResult, bool) {
+	tail := func() []string {
+		return a.tailImage(ctx, req.Project, req.Entry, ex, values)
+	}
+	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+	if err != nil {
+		return a.deployResult(task, "failed", "", nil, missingStatus(), tail(), ex), true
+	}
+	if code != "" {
+		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), tail(), ex), true
+	}
+	if resp.Prev == nil || resp.Prev.Digest == nil || *resp.Prev.Digest != req.Digest {
+		return protocol.TaskResult{}, false
+	}
+	digest := *resp.Prev.Digest
+	rcode, rerr := a.rollbackContainer(ctx, req.Project, req.Entry)
+	if rerr != nil {
+		return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex), true
+	}
+	if rcode != "" {
+		return a.deployResult(task, outcomeFor(rcode), digest, nil, missingStatus(), tail(), ex), true
+	}
+	w := a.waitHealthy(ctx, deadline, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
+	if w.err != nil || w.code != "" {
+		outcome := "failed"
+		if w.code != "" {
+			outcome = outcomeFor(w.code)
+		}
+		return a.deployResult(task, outcome, digest, nil, w.last, tail(), ex), true
+	}
+	if !w.healthy {
+		// The swapped container is the previous generation. There is no
+		// older one to return to.
+		return a.deployResult(task, "failed", digest, nil, w.last, tail(), ex), true
+	}
+	return a.deployResult(task, "succeeded", digest, nil, w.last, tail(), ex), true
+}
+
 func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, values []string) protocol.TaskResult {
-	st, hash, filesHash, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
 	if code != "" {
 		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
+	st, hash, filesHash := resp.Status, resp.SpecHash, resp.FilesHash
 	if !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files)) {
 		return a.deployResult(task, "unchanged", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
@@ -120,11 +174,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if code != "" {
 		return a.deployResult(task, outcomeFor(code), digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
 	}
-	need := time.Duration(req.Spec.HealthyAfterSec) * time.Second
-	if task.Kind == "image_rollback" && need <= 0 {
-		need = 30 * time.Second
-	}
-	w := a.waitHealthy(ctx, deadline, req, need)
+	w := a.waitHealthy(ctx, deadline, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
 		outcome := "failed"
 		if w.code != "" {
@@ -141,8 +191,8 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if rerr != nil || rcode != "" {
 		return a.deployResult(task, "rollback_failed", digest, nil, last, lines, ex)
 	}
-	if st, _, _, code, err = a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
-		last = st
+	if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
+		last = again.Status
 	}
 	return a.deployResult(task, "rolled_back", digest, nil, last, lines, ex)
 }
@@ -151,13 +201,14 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 	tail := func() []string {
 		return a.tailImage(ctx, req.Project, req.Entry, ex, values)
 	}
-	st, _, _, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 	}
 	if code != "" {
 		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), tail(), ex)
 	}
+	st := resp.Status
 	if st.State != "missing" {
 		code, err = a.removeContainer(ctx, req.Project, req.Entry)
 		if err != nil {
@@ -178,7 +229,8 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 		jobDeadline = deadline
 	}
 	for {
-		st, _, _, code, err = a.imageStatus(ctx, req.Project, req.Entry)
+		resp, code, err = a.imageStatus(ctx, req.Project, req.Entry)
+		st = resp.Status
 		if err != nil {
 			return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 		}
@@ -231,18 +283,18 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 		if a.expired(ctx, deadline) {
 			return healthStop{last: last}
 		}
-		st, _, _, code, err := a.imageStatus(ctx, project, entry)
+		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
 			return healthStop{err: err, last: last}
 		}
 		if code != "" {
 			return healthStop{code: code, last: last}
 		}
-		last = st
-		if terminalState(st.State) || st.RestartCount > 0 {
+		last = resp.Status
+		if terminalState(last.State) || last.RestartCount > 0 {
 			return healthStop{last: last}
 		}
-		if st.State == "running" {
+		if last.State == "running" {
 			now := a.now()
 			if !watching {
 				since = now
@@ -266,18 +318,18 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 		if a.expired(ctx, deadline) {
 			return healthStop{last: last}
 		}
-		st, _, _, code, err := a.imageStatus(ctx, project, entry)
+		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
 			return healthStop{err: err, last: last}
 		}
 		if code != "" {
 			return healthStop{code: code, last: last}
 		}
-		last = st
-		if terminalState(st.State) {
+		last = resp.Status
+		if terminalState(last.State) {
 			return healthStop{last: last}
 		}
-		if st.State == "running" && a.probesOK(ctx, checks) {
+		if last.State == "running" && a.probesOK(ctx, checks) {
 			return healthStop{healthy: true, last: last}
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
@@ -406,17 +458,28 @@ func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest 
 	return a.callImage(ctx, images.VerbDeploy, body, &id)
 }
 
-func (a *agent) imageStatus(ctx context.Context, project, entry string) (images.ImageStatus, string, string, string, error) {
+func (a *agent) imageStatus(ctx context.Context, project, entry string) (images.StatusResult, string, error) {
 	body := images.Encode(images.EntryRequest{Project: project, Entry: entry})
 	var resp images.StatusResult
 	code, err := a.callImage(ctx, images.VerbStatus, body, &resp)
 	if err != nil || code != "" {
-		return images.ImageStatus{}, "", "", code, err
+		return images.StatusResult{}, code, err
 	}
 	if !knownState(resp.Status.State) {
-		return resp.Status, resp.SpecHash, resp.FilesHash, "", errHelper
+		return resp, "", errHelper
 	}
-	return resp.Status, resp.SpecHash, resp.FilesHash, "", nil
+	return resp, "", nil
+}
+
+// healthyNeed is the stable-running wait. A rollback whose spec has no
+// healthy_after_sec (a job, or a service still at zero) waits 30s. A
+// service spec of 5s stays 5s, on the pull path and on the kept-container swap.
+func healthyNeed(kind string, sec int) time.Duration {
+	need := time.Duration(sec) * time.Second
+	if kind == "image_rollback" && need <= 0 {
+		need = 30 * time.Second
+	}
+	return need
 }
 
 func (a *agent) removeContainer(ctx context.Context, project, entry string) (string, error) {
@@ -468,15 +531,35 @@ func (a *agent) callImage(ctx context.Context, verb string, body []byte, dest an
 		return "", err
 	}
 	if code := imageRefusal(raw); code != "" {
+		a.logHelper(verb, code)
 		return code, nil
 	}
 	if dest == nil {
 		return "", nil
 	}
 	if err := images.Decode(raw, dest); err != nil {
+		a.logHelper(verb, "decode")
 		return "", err
 	}
 	return "", nil
+}
+
+func (a *agent) setHelperKind(kind string) {
+	a.mu.Lock()
+	a.helperKind = kind
+	a.mu.Unlock()
+}
+
+// logHelper writes one line for a failed helper call: task kind, verb, and
+// an allowlisted reason or the words transport or decode. No body.
+func (a *agent) logHelper(verb, reason string) {
+	a.mu.Lock()
+	kind := a.helperKind
+	a.mu.Unlock()
+	if kind == "" || a.opt.Log == nil {
+		return
+	}
+	a.opt.Log.Printf("bot-agent: helper kind=%s verb=%s reason=%s", quoteLog(kind), quoteLog(verb), quoteLog(reason))
 }
 
 func imageRefusal(raw []byte) string {

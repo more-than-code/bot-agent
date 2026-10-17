@@ -209,6 +209,49 @@ func TestImagePolicy(t *testing.T) {
 	}
 }
 
+func TestOverlappingProjects(t *testing.T) {
+	const head = "enabled = true\nimages = [\"ghcr.io/acme/*\"]\n"
+	cases := []struct {
+		name     string
+		projects string
+		on       bool
+		a, b     string
+	}{
+		{"acme and acme-web", `["acme", "acme-web"]`, false, "acme", "acme-web"},
+		{"longer suffix", `["acme", "acme-web-api"]`, false, "acme", "acme-web-api"},
+		{"reversed", `["acme-web", "acme"]`, false, "acme-web", "acme"},
+		{"acme and acmeweb", `["acme", "acmeweb"]`, true, "", ""},
+		{"acme-web and web", `["acme-web", "web"]`, true, "", ""},
+		{"trailing hyphen", `["acme", "acme-"]`, true, "", ""},
+		{"three, one pair", `["web", "acme", "acme-web"]`, false, "acme", "acme-web"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := head + "projects = " + tc.projects + "\n"
+			p := loadBytes(t, []byte(body), 0o644, rootUID)
+			if !p.Valid || !p.Enabled || p.Reason != "" {
+				t.Fatalf("valid %v enabled %v reason %s", p.Valid, p.Enabled, p.Reason)
+			}
+			if p.ImagesEnabled() != tc.on {
+				t.Fatalf("images on %v", p.ImagesEnabled())
+			}
+			a, b, ok := OverlappingProjects(p.Projects)
+			if ok != !tc.on || a != tc.a || b != tc.b {
+				t.Fatalf("pair %q %q ok %v", a, b, ok)
+			}
+		})
+	}
+	// The agent keeps a Policy value. The same function decides images.
+	built := Policy{
+		Valid: true, Enabled: true,
+		Images:   []string{"ghcr.io/acme/*"},
+		Projects: []string{"acme", "other", "acme-web"},
+	}
+	if built.ImagesEnabled() {
+		t.Fatal("struct literal stayed on")
+	}
+}
+
 func rootUID(os.FileInfo) (uint32, bool) { return 0, true }
 
 func loadBytes(t *testing.T, body []byte, mode os.FileMode, uid func(os.FileInfo) (uint32, bool)) Policy {
