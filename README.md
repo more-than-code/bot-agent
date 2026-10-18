@@ -115,9 +115,40 @@ printf '%s\n' '<token>' | bot-agent init --server '<wss-url>' --join-token-stdin
 
 The token is one trimmed line, 16–128 characters of `[A-Za-z0-9_-]`. `--join-token <tok>` is rejected. Optional `--env-file` selects the env file (default `/etc/bot-agent/env`). Nothing from the env file is printed.
 
+`bot-agent policy check FILE` parses a `runner.toml` with the same rules as the agent. It prints `valid` and the effective flags (`enabled`, `programs`, `images`, `projects`, `max_containers`, `allow_public_ports`, `image_patterns`), or `invalid: <reason>` and exits 1. Ownership and mode are not checked. `run_as` is still resolved. The command does not print the file.
+
 Discovered services are re-sent at least every 5 minutes while connected; see agent-protocol v1.2.
 
 A services report is the host's full set, so it is sent only from a complete discovery. If the process scan fails, or the program policy is enabled and the owned-program lookup fails, or images are enabled and `container_list` fails, that cycle sends nothing and the previous report stays. `hello` carries `services_complete`. It is false, with `services` empty, when the first discovery did not finish, so the server does not treat that hello as the full set. See agent-protocol v1.3.2.
+
+## Install and upgrade
+
+A release bundle contains `install.sh`, `SHA256SUMS`, `bot-agent-vX-linux-{amd64,arm64}`, `bot-agent-runner-vX-linux-{amd64,arm64}`, and `units/`. The script installs only files from that directory. It does not download anything. Run it as root on a Debian-family host with systemd:
+
+```bash
+sudo ./install.sh check
+sudo ./install.sh install --runner --runner-config /path/to/runner.toml
+printf '%s\n' '<token>' | sudo ./install.sh enroll --server 'wss://<api-host>/agent/v1/ws'
+sudo ./install.sh upgrade
+sudo ./install.sh rollback
+sudo ./install.sh remove
+```
+
+`check` confirms the architecture, systemd, and the bundle hashes, and reports what is already installed. With `--runner`, or when `runner.toml` is already there, it also runs `bot-agent policy check`. A non-empty `images` list makes it report whether `docker` is on `PATH`. `check` changes nothing.
+
+`install` creates the system user and group `bot-agent` (no home, no login shell), installs the agent and `bot-agent.service`, and leaves the unit disabled until `enroll`. `--runner` also installs the helper, the socket, the template unit, the tmpfiles snippet, and `runner.toml`. The policy file is the `--runner-config` you pass, or a template with `enabled = false`. The installer copies `--runner-config` into a private directory before it checks the file, and installs that copy. It refuses a symlink, anything that is not a regular file, or a file writable by group or other. An existing `runner.toml` or `/etc/bot-agent/env` is kept. `--insecure-dev` writes a drop-in that sets `BOT_AGENT_INSECURE_DEV=1`. That flag is for a dev host.
+
+`/etc/bot-agent` is `root:bot-agent` mode `0750`, so the agent can read the directory and cannot unlink `runner.toml`. `runner.toml` is `root:root` mode `0644`. The env file, once `enroll` writes it, is `bot-agent:bot-agent` mode `0600`. The binaries are `root:root` mode `0755`. Units and the tmpfiles snippet are `root:root` mode `0644`.
+
+`enroll` reads the join token from stdin and passes that stream to `bot-agent init --join-token-stdin`. On a terminal it prompts with echo off. The token is not an argument, an environment variable of the installer, or a temporary file, and the script does not print it. `enroll` then enables and starts the agent. `--runner` also enables the helper socket.
+
+`upgrade` refuses the same version unless `--force`. It copies each file it will replace to `<file>.prev` and records that set under `/var/lib/bot-agent-installer/prev/`. A unit whose hash does not match the installer's record is left alone unless `--force`. After the new files are in place it reloads systemd. When `/etc/bot-agent/env` exists, it restarts the agent whatever the unit's previous state, and requires `active`, `NRestarts` exactly 0, and `bot-agent version` equal to the bundle. Without that env file it does not restart and prints `not enrolled: agent not restarted`. A failure after that backup is written, including a failed copy or a failed check, restores the `.prev` set and exits 1. A successful upgrade keeps `.prev` for a later `rollback`. `env`, an existing `runner.toml`, and drop-ins this installer did not write are not touched.
+
+`rollback` restores that one previous set, then uses the same enrolled restart check as `upgrade`. A write that fails in the middle of that restore is tried again from `.prev` before the script exits 1. A second rollback does nothing.
+
+`remove` stops running `bot-agent-runner@*.service` instances, then stops and deletes the agent and helper units, the tmpfiles snippet, and the binaries. It keeps `/etc/bot-agent` and `/var/lib/bot-agent-runner`. It lists `deploybot-*.service` units and containers labelled `dev.deploybot.owner`, and leaves them in place. `--remove-workloads` stops and deletes only units that carry both `X-Deploybot-Project=` and `X-Deploybot-Entry=`, removes those containers, and removes labelled networks. If docker cannot list containers, volumes, or networks, `--remove-workloads` fails after that units part and does not delete the agent files. If `systemctl disable --now` or `stop` fails for the agent, the helper socket, a running helper instance, or an owned unit, the script reports it, still deletes the files, and exits 1 with `summary: remove incomplete`. A helper stop that matches no instance is not a failure. Volumes stay unless `--purge` is set as well. `--purge` also deletes `/etc/bot-agent`, `/var/lib/bot-agent`, `/var/lib/bot-agent-runner`, and the `bot-agent` user. The group is left in place. Every remove tells you to revoke the host in the console.
+
+`--dry-run` prints the writes and deletes and changes nothing. Exit 0 means the command finished, including "nothing to do". Exit 1 is a failure; a failed precheck also prints `nothing changed`. Exit 2 is usage. `--root` is test-only and is refused unless `BOT_AGENT_INSTALLER_TEST=1`.
 
 ## Programs (agent-protocol v1.3.1)
 

@@ -99,11 +99,21 @@ func projectOverlaps(x, y string) bool {
 // UID, when set, replaces the uid from the file's stat. Production leaves it
 // nil. Tests set it because this process cannot chown a file to root.
 // The override does not affect the mode check.
+// SkipOwner skips the root-owner and mode checks. bot-agent policy check sets
+// it; the installer checks root:root 0644 itself. run_as is still resolved.
 type Files struct {
-	Policy string
-	Passwd string
-	Group  string
-	UID    func(os.FileInfo) (uint32, bool)
+	Policy    string
+	Passwd    string
+	Group     string
+	UID       func(os.FileInfo) (uint32, bool)
+	SkipOwner bool
+}
+
+// Check parses path with the same rules as Load, including run_as against
+// passwd and group, but it does not check ownership or mode. Empty passwd
+// or group means the host /etc/passwd and /etc/group.
+func Check(path, passwd, group string) Policy {
+	return Load(Files{Policy: path, Passwd: passwd, Group: group, SkipOwner: true})
 }
 
 // Load reads the policy. A missing file returns a zero Policy (Exists false).
@@ -142,19 +152,21 @@ func Load(f Files) Policy {
 		out.Reason = "parse"
 		return out
 	}
-	uid, ok := fileUID(fi, f.UID)
-	if !ok || uid != 0 {
-		out.Reason = "not_root"
-		return out
-	}
-	perm := fi.Mode().Perm()
-	if perm&0o020 != 0 {
-		out.Reason = "group_writable"
-		return out
-	}
-	if perm&0o002 != 0 {
-		out.Reason = "world_writable"
-		return out
+	if !f.SkipOwner {
+		uid, ok := fileUID(fi, f.UID)
+		if !ok || uid != 0 {
+			out.Reason = "not_root"
+			return out
+		}
+		perm := fi.Mode().Perm()
+		if perm&0o020 != 0 {
+			out.Reason = "group_writable"
+			return out
+		}
+		if perm&0o002 != 0 {
+			out.Reason = "world_writable"
+			return out
+		}
 	}
 	parsed, reason := parseTOML(data)
 	if reason != "" {
