@@ -1009,6 +1009,53 @@ func TestInstallerAC6PurgeWorkloads(t *testing.T) {
 	}
 }
 
+// assertDryRun checks a --dry-run result. want is the exit code.
+// A finished plan exits 0. A failed precheck exits 1 and says nothing changed.
+// Neither may claim a file was written, deleted, or removed.
+func assertDryRun(t *testing.T, res cmdResult, want int, label string) {
+	t.Helper()
+	if res.code != want {
+		res.fail(t, "", fmt.Sprintf("%s: exit %d, want %d", label, res.code, want))
+	}
+	if strings.Contains(res.stdout, "wrote:") || strings.Contains(res.stderr, "wrote:") {
+		res.fail(t, "", label+": printed wrote:")
+	}
+	body := "\n" + res.stdout + "\n" + res.stderr + "\n"
+	for _, claimed := range []string{
+		"\ndeleted:",
+		"\npurged:",
+		"\nuseradd:",
+		"\ngroupadd:",
+		"\nuserdel:",
+		"\nremoved ",
+		"\nsummary: installed",
+		"\nsummary: upgraded",
+		"\nsummary: removed",
+		"\nsummary: remove incomplete",
+		"\nsummary: enrolled",
+		"\nsummary: rolled back",
+	} {
+		if strings.Contains(body, claimed) {
+			res.fail(t, "", label+": claimed a change: "+strings.TrimPrefix(claimed, "\n"))
+		}
+	}
+	if want == 0 && (strings.Contains(res.stderr, "No such file") || strings.Contains(res.stderr, "sha256sum:") || strings.Contains(res.stderr, "shasum:")) {
+		res.fail(t, "", label+": hashed a missing path")
+	}
+	if want == 1 && !strings.Contains(res.stdout, "nothing changed") {
+		res.fail(t, "", label+": precheck did not say nothing changed")
+	}
+}
+
+func assertHasLines(t *testing.T, res cmdResult, label string, lines ...string) {
+	t.Helper()
+	for _, line := range lines {
+		if !strings.Contains(res.combined(), line) {
+			res.fail(t, "", label+": missing "+line)
+		}
+	}
+}
+
 func TestInstallerAC7DryRun(t *testing.T) {
 	t.Parallel()
 	rg := newRig(t)
@@ -1016,25 +1063,45 @@ func TestInstallerAC7DryRun(t *testing.T) {
 	next := makeBundle(t, "0.2.1")
 	cfg := writeOKConfig(t)
 	before := treeSig(t, rg.root)
+	freshInstall := []string{
+		"dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root",
+		"dry-run: write /etc/systemd/system/bot-agent.service mode 0644 owner root:root",
+		"dry-run: write /usr/local/libexec/bot-agent-runner mode 0755 owner root:root",
+		"dry-run: write /etc/systemd/system/bot-agent-runner.socket mode 0644 owner root:root",
+		"dry-run: write /etc/systemd/system/bot-agent-runner@.service mode 0644 owner root:root",
+		"dry-run: write /etc/tmpfiles.d/bot-agent-runner.conf mode 0644 owner root:root",
+		"dry-run: write /etc/bot-agent/runner.toml mode 0644 owner root:root",
+		"summary: dry-run install 0.2.0",
+	}
+	// Fresh enroll and upgrade are prechecks: the agent is not installed.
+	// They exit 1. Every other dry-run finishes and exits 0.
 	cmds := []struct {
 		bundle string
 		args   []string
+		code   int
+		lines  []string
 	}{
-		{bundle, []string{"check", "--dry-run"}},
-		{bundle, []string{"check", "--dry-run", "--runner"}},
-		{bundle, []string{"install", "--dry-run", "--runner", "--runner-config", cfg}},
-		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}},
-		{bundle, []string{"upgrade", "--dry-run"}},
-		{bundle, []string{"rollback", "--dry-run"}},
-		{bundle, []string{"remove", "--dry-run"}},
-		{bundle, []string{"remove", "--dry-run", "--purge", "--remove-workloads"}},
+		{bundle, []string{"check", "--dry-run"}, 0, nil},
+		{bundle, []string{"check", "--dry-run", "--runner"}, 0, nil},
+		{bundle, []string{"install", "--dry-run", "--runner", "--runner-config", cfg}, 0, freshInstall},
+		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}, 1, []string{"bot-agent is not installed"}},
+		{bundle, []string{"upgrade", "--dry-run"}, 1, []string{"not installed by the installer"}},
+		{bundle, []string{"rollback", "--dry-run"}, 0, []string{"nothing to roll back"}},
+		{bundle, []string{"remove", "--dry-run"}, 0, []string{"summary: dry-run remove"}},
+		{bundle, []string{"remove", "--dry-run", "--purge", "--remove-workloads"}, 0, []string{"summary: dry-run remove"}},
 	}
 	for _, c := range cmds {
 		sig := treeSig(t, rg.root)
 		res := runBundle(t, c.bundle, rg, "", c.args...)
+		label := "empty " + strings.Join(c.args, " ")
 		if treeSig(t, rg.root) != sig || treeSig(t, rg.root) != before {
-			res.fail(t, "", "dry-run changed empty root: "+strings.Join(c.args, " "))
+			res.fail(t, "", "dry-run changed empty root: "+label)
 		}
+		assertDryRun(t, res, c.code, label)
+		assertHasLines(t, res, label, c.lines...)
+	}
+	if _, err := os.Lstat(filepath.Join(rg.root, "usr/local/bin/bot-agent")); !os.IsNotExist(err) {
+		t.Fatal("fresh install --dry-run created the agent binary")
 	}
 	installed := mustInstall(t, bundle, rg, cfg)
 	_ = installed
@@ -1042,19 +1109,54 @@ func TestInstallerAC7DryRun(t *testing.T) {
 	live := []struct {
 		bundle string
 		args   []string
+		lines  []string
 	}{
-		{bundle, []string{"check", "--dry-run", "--runner"}},
-		{bundle, []string{"install", "--dry-run", "--runner", "--runner-config", cfg}},
-		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}},
-		{next, []string{"upgrade", "--dry-run"}},
-		{bundle, []string{"rollback", "--dry-run"}},
-		{bundle, []string{"remove", "--dry-run", "--purge", "--remove-workloads"}},
+		{bundle, []string{"check", "--dry-run", "--runner"}, nil},
+		{bundle, []string{"install", "--dry-run", "--runner", "--runner-config", cfg}, []string{"already installed, nothing changed"}},
+		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}, []string{"summary: dry-run enroll", "dry-run: exec bot-agent init --server <url> --join-token-stdin --env-file /etc/bot-agent/env"}},
+		{next, []string{"upgrade", "--dry-run"}, []string{
+			"dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root",
+			"dry-run: write /usr/local/libexec/bot-agent-runner mode 0755 owner root:root",
+			"dry-run: backup replaced files to <file>.prev",
+			"summary: dry-run upgrade 0.2.0 -> 0.2.1",
+		}},
+		{bundle, []string{"rollback", "--dry-run"}, []string{"nothing to roll back"}},
+		{bundle, []string{"remove", "--dry-run", "--purge", "--remove-workloads"}, []string{
+			"dry-run: delete /usr/local/bin/bot-agent mode 755 owner root:root",
+			"summary: dry-run remove",
+		}},
 	}
 	for _, c := range live {
 		res := runBundle(t, c.bundle, rg, "", c.args...)
+		label := "installed " + strings.Join(c.args, " ")
 		if treeSig(t, rg.root) != after {
-			res.fail(t, "", "dry-run changed installed root: "+strings.Join(c.args, " "))
+			res.fail(t, "", "dry-run changed installed root: "+label)
 		}
+		assertDryRun(t, res, 0, label)
+		assertHasLines(t, res, label, c.lines...)
+	}
+
+	// A real upgrade leaves .prev. Rollback --dry-run must list restores
+	// and leave that set in place.
+	up := runBundle(t, next, rg, "", "upgrade")
+	if up.code != 0 {
+		up.fail(t, "", "upgrade before rollback dry-run")
+	}
+	withPrev := treeSig(t, rg.root)
+	rb := runBundle(t, next, rg, "", "rollback", "--dry-run")
+	if treeSig(t, rg.root) != withPrev {
+		rb.fail(t, "", "rollback dry-run changed the root")
+	}
+	assertDryRun(t, rb, 0, "rollback dry-run with prev")
+	assertHasLines(t, rb, "rollback dry-run with prev",
+		"dry-run: restore /usr/local/bin/bot-agent from /usr/local/bin/bot-agent.prev",
+		"summary: dry-run rollback 0.2.0",
+	)
+	if _, err := os.Lstat(filepath.Join(rg.root, "usr/local/bin/bot-agent.prev")); err != nil {
+		t.Fatal("rollback dry-run removed .prev")
+	}
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.1" {
+		t.Fatal("rollback dry-run replaced the binary")
 	}
 }
 

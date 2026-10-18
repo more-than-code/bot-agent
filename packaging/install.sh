@@ -953,6 +953,10 @@ apply_managed() {
       fi
       if [ -n "$RUNNER_CONFIG" ]; then
         install_bytes "$_path" "$_mode" "$_owner" "$RUNNER_CONFIG" || return 1
+        # Dry-run did not create the file. Hashing it fails the command.
+        if [ "$DRY" = "1" ]; then
+          continue
+        fi
         _ih=$(hash_file "$_dest") || return 1
         _sh=$(hash_file "$RUNNER_CONFIG") || return 1
         if [ "$_ih" != "$_sh" ]; then
@@ -1005,6 +1009,10 @@ apply_managed() {
       fi
     fi
     install_bytes "$_path" "$_mode" "$_owner" "$_src" || return 1
+    # "wrote:" means the file is on disk. Dry-run only printed the plan.
+    if [ "$DRY" = "1" ]; then
+      continue
+    fi
     say "wrote: ${_path}"
   done <<EOF
 $(each_managed)
@@ -1821,10 +1829,18 @@ do_remove() {
   fi
   say "revoke the host in the console"
   if [ "$REMOVE_INCOMPLETE" = "1" ]; then
-    say "summary: remove incomplete"
+    if [ "$DRY" = "1" ]; then
+      say "summary: dry-run remove incomplete"
+    else
+      say "summary: remove incomplete"
+    fi
     exit 1
   fi
-  say "summary: removed"
+  if [ "$DRY" = "1" ]; then
+    say "summary: dry-run remove"
+  else
+    say "summary: removed"
+  fi
 }
 
 do_enroll() {

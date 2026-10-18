@@ -96,17 +96,24 @@ build_bundle() {
   hash_tree "$dest"
 }
 
-build_bundle "$repo" "0.2.0" "$work/b020"
+# The test uses its own version labels (0.2.0 old, 0.2.1 new, 0.2.2 broken),
+# independent of the repo's current AgentVersion: each bundle is built from a
+# copy of the tree with the version set explicitly.
+versioned_src() {
+  _vs=$1
+  _dir=$2
+  mkdir -p "$_dir"
+  tar -C "$repo" -cf - go.mod go.sum cmd internal | tar -C "$_dir" -xf -
+  _proto=$_dir/internal/agent/protocol/protocol.go
+  sed "s/AgentVersion = \"[^\"]*\"/AgentVersion = \"$_vs\"/" "$_proto" > "$_proto.new"
+  mv "$_proto.new" "$_proto"
+  grep -q "AgentVersion = \"$_vs\"" "$_proto"
+}
 
-src2=$work/src021
-mkdir -p "$src2"
-tar -C "$repo" -cf - go.mod go.sum cmd internal | tar -C "$src2" -xf -
-proto=$src2/internal/agent/protocol/protocol.go
-sed 's/AgentVersion = "0.2.0"/AgentVersion = "0.2.1"/' "$proto" > "$proto.new"
-mv "$proto.new" "$proto"
-grep -q 'AgentVersion = "0.2.1"' "$proto"
-grep -q 'AgentVersion = "0.2.0"' "$repo/internal/agent/protocol/protocol.go"
-build_bundle "$src2" "0.2.1" "$work/b021"
+versioned_src "0.2.0" "$work/src020"
+build_bundle "$work/src020" "0.2.0" "$work/b020"
+versioned_src "0.2.1" "$work/src021"
+build_bundle "$work/src021" "0.2.1" "$work/b021"
 # The 0.2.1 unit differs from 0.2.0 so upgrade and rollback can be compared.
 printf '\n# bundle-0.2.1-unit\n' >> "$work/b021/units/bot-agent.service"
 hash_tree "$work/b021"
@@ -225,26 +232,58 @@ BAD
 chmod 0644 /opt/bad.toml
 
 # AC7 before anything is installed.
+# want is the exit code. A finished dry-run is 0. A failed precheck is 1
+# and must say "nothing changed". No dry-run may print "wrote:".
 before=$(snap)
-for cmd in \
-  "/opt/bundles/b020/install.sh check --dry-run" \
-  "/opt/bundles/b020/install.sh check --dry-run --runner" \
-  "/opt/bundles/b020/install.sh install --dry-run --runner --runner-config /opt/ok.toml" \
-  "/opt/bundles/b020/install.sh enroll --dry-run --server wss://example.invalid/agent/v1/ws" \
-  "/opt/bundles/b020/install.sh upgrade --dry-run" \
-  "/opt/bundles/b020/install.sh rollback --dry-run" \
-  "/opt/bundles/b020/install.sh remove --dry-run" \
-  "/opt/bundles/b020/install.sh remove --dry-run --purge --remove-workloads"
-do
+dry_case() {
+  _want=$1
+  shift
   set +e
-  sh -c "$cmd" >/tmp/dry.out 2>&1
+  "$@" >/tmp/dry.out 2>&1
+  _code=$?
   set -e
   after=$(snap)
   if [ "$before" != "$after" ]; then
     cat /tmp/dry.out >&2 || true
-    die "AC7 dry-run changed the host: $cmd"
+    die "AC7 dry-run changed the host: $*"
   fi
+  if grep -F 'wrote:' /tmp/dry.out >/dev/null 2>&1; then
+    cat /tmp/dry.out >&2 || true
+    die "AC7 dry-run printed wrote: $*"
+  fi
+  if [ "$_code" != "$_want" ]; then
+    cat /tmp/dry.out >&2 || true
+    die "AC7 dry-run exit ${_code} want ${_want}: $*"
+  fi
+  if [ "$_want" = "1" ]; then
+    if ! grep -F 'nothing changed' /tmp/dry.out >/dev/null 2>&1; then
+      cat /tmp/dry.out >&2 || true
+      die "AC7 dry-run precheck did not say nothing changed: $*"
+    fi
+  fi
+}
+
+dry_case 0 /opt/bundles/b020/install.sh check --dry-run
+dry_case 0 /opt/bundles/b020/install.sh check --dry-run --runner
+dry_case 0 /opt/bundles/b020/install.sh install --dry-run --runner --runner-config /opt/ok.toml
+for line in \
+  "dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root" \
+  "dry-run: write /etc/systemd/system/bot-agent.service mode 0644 owner root:root" \
+  "dry-run: write /usr/local/libexec/bot-agent-runner mode 0755 owner root:root" \
+  "dry-run: write /etc/systemd/system/bot-agent-runner.socket mode 0644 owner root:root" \
+  "dry-run: write /etc/systemd/system/bot-agent-runner@.service mode 0644 owner root:root" \
+  "dry-run: write /etc/tmpfiles.d/bot-agent-runner.conf mode 0644 owner root:root" \
+  "dry-run: write /etc/bot-agent/runner.toml mode 0644 owner root:root" \
+  "summary: dry-run install"
+do
+  grep -F "$line" /tmp/dry.out >/dev/null || die "AC7 fresh install missing: $line"
 done
+[ ! -e /usr/local/bin/bot-agent ] || die "AC7 fresh install created the agent binary"
+dry_case 1 /opt/bundles/b020/install.sh enroll --dry-run --server wss://example.invalid/agent/v1/ws
+dry_case 1 /opt/bundles/b020/install.sh upgrade --dry-run
+dry_case 0 /opt/bundles/b020/install.sh rollback --dry-run
+dry_case 0 /opt/bundles/b020/install.sh remove --dry-run
+dry_case 0 /opt/bundles/b020/install.sh remove --dry-run --purge --remove-workloads
 
 # AC2. A multi-line array is refused before any install.
 before=$(snap)
@@ -281,23 +320,19 @@ have "$out" "already installed, nothing changed" "AC1 rerun"
 
 # AC7 after install.
 before=$(snap)
-for cmd in \
-  "/opt/bundles/b020/install.sh check --dry-run --runner" \
-  "/opt/bundles/b020/install.sh install --dry-run --runner --runner-config /opt/ok.toml" \
-  "/opt/bundles/b020/install.sh enroll --dry-run --server wss://example.invalid/agent/v1/ws" \
-  "/opt/bundles/b021/install.sh upgrade --dry-run" \
-  "/opt/bundles/b020/install.sh rollback --dry-run" \
-  "/opt/bundles/b020/install.sh remove --dry-run --purge --remove-workloads"
-do
-  set +e
-  sh -c "$cmd" >/tmp/dry.out 2>&1
-  set -e
-  after=$(snap)
-  if [ "$before" != "$after" ]; then
-    cat /tmp/dry.out >&2 || true
-    die "AC7 dry-run changed an installed host: $cmd"
-  fi
-done
+dry_case 0 /opt/bundles/b020/install.sh check --dry-run --runner
+dry_case 0 /opt/bundles/b020/install.sh install --dry-run --runner --runner-config /opt/ok.toml
+grep -F 'already installed, nothing changed' /tmp/dry.out >/dev/null || die "AC7 reinstall dry-run"
+dry_case 0 /opt/bundles/b020/install.sh enroll --dry-run --server wss://example.invalid/agent/v1/ws
+grep -F 'summary: dry-run enroll' /tmp/dry.out >/dev/null || die "AC7 enroll dry-run plan"
+dry_case 0 /opt/bundles/b021/install.sh upgrade --dry-run
+grep -F 'dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root' /tmp/dry.out >/dev/null || die "AC7 upgrade dry-run plan"
+grep -F 'summary: dry-run upgrade' /tmp/dry.out >/dev/null || die "AC7 upgrade dry-run summary"
+dry_case 0 /opt/bundles/b020/install.sh rollback --dry-run
+grep -F 'nothing to roll back' /tmp/dry.out >/dev/null || die "AC7 rollback dry-run before upgrade"
+dry_case 0 /opt/bundles/b020/install.sh remove --dry-run --purge --remove-workloads
+grep -F 'dry-run: delete /usr/local/bin/bot-agent' /tmp/dry.out >/dev/null || die "AC7 remove dry-run plan"
+grep -F 'summary: dry-run remove' /tmp/dry.out >/dev/null || die "AC7 remove dry-run summary"
 
 # AC4 modified unit, then put the stock bytes back so a later upgrade can run.
 printf '\n# local\n' >> /etc/systemd/system/bot-agent.service
@@ -342,7 +377,7 @@ st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
 
 # AC4 upgrade while the agent is running. The installer must rename the
 # binary (a write in place returns ETXTBSY). NRestarts must be exactly 0.
-ts1=$(systemctl show -p ExecMainStartTimestamp --value bot-agent.service || true)
+id1=$(systemctl show -p InvocationID --value bot-agent.service || true)
 run_ok "AC4 upgrade" /opt/bundles/b021/install.sh upgrade >/tmp/up.out
 [ "$(/usr/local/bin/bot-agent version)" = "0.2.1" ] || die "upgrade version"
 [ -x /usr/local/bin/bot-agent.prev ] || die "missing .prev"
@@ -353,10 +388,17 @@ st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
 [ "$st" = "active" ] || die "agent is $st after upgrade"
 re=$(systemctl show -p NRestarts --value bot-agent.service) || die "NRestarts show failed"
 [ "$re" = "0" ] || die "NRestarts after upgrade: ${re:-empty}"
-ts2=$(systemctl show -p ExecMainStartTimestamp --value bot-agent.service || true)
-if [ -z "$ts2" ] || [ "$ts1" = "$ts2" ]; then
+id2=$(systemctl show -p InvocationID --value bot-agent.service || true)
+if [ -z "$id2" ] || [ "$id1" = "$id2" ]; then
   die "upgrade did not restart the agent"
 fi
+
+# Rollback dry-run while .prev exists lists restores and changes nothing.
+before=$(snap)
+dry_case 0 /opt/bundles/b021/install.sh rollback --dry-run
+grep -F 'dry-run: restore /usr/local/bin/bot-agent from /usr/local/bin/bot-agent.prev' /tmp/dry.out >/dev/null || die "AC5 rollback dry-run plan"
+[ -x /usr/local/bin/bot-agent.prev ] || die "rollback dry-run removed .prev"
+[ "$(/usr/local/bin/bot-agent version)" = "0.2.1" ] || die "rollback dry-run changed the binary"
 
 # AC5.
 run_ok "AC5 rollback" /opt/bundles/b021/install.sh rollback >/tmp/back.out
