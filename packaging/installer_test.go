@@ -287,6 +287,11 @@ for a in "$@"; do
   fi
 done
 if [ "${1:-}" = "is-active" ]; then
+  if [ "${2:-}" = "bot-agent-runner.socket" ] && [ -f "$BOT_AGENT_STUB_DIR/fail-socket-active" ]; then
+    rm -f "$BOT_AGENT_STUB_DIR/fail-socket-active"
+    printf '%s\n' "inactive"
+    exit 3
+  fi
   if [ -f "$BOT_AGENT_STUB_DIR/fail-active" ]; then
     rm -f "$BOT_AGENT_STUB_DIR/fail-active"
     printf '%s\n' "failed"
@@ -1851,6 +1856,471 @@ func TestInstallerRemoveStopFailure(t *testing.T) {
 	assertGone(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent.service"))
 	assertGone(t, filepath.Join(rg.root, "etc/systemd/system/deploybot-demo-web.service"))
 	assertExists(t, filepath.Join(rg.root, "etc/systemd/system/nginx.service"))
+}
+
+// watchSocketUnitAtDisable records whether the socket unit file existed
+// when systemctl disable --now bot-agent-runner.socket ran.
+func watchSocketUnitAtDisable(t *testing.T, rg *rig) {
+	t.Helper()
+	src := filepath.Join(rg.stubs, "systemctl")
+	real := filepath.Join(rg.stubs, "systemctl.real")
+	if err := os.Rename(src, real); err != nil {
+		t.Fatal(err)
+	}
+	unit := filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket")
+	writeExe(t, src, fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "disable" ] && [ "${3:-}" = "bot-agent-runner.socket" ]; then
+  if [ -e %q ] || [ -h %q ]; then
+    printf '%%s\n' "socket-unit-present-at-disable" >> "$BOT_AGENT_STUB_LOG"
+  else
+    printf '%%s\n' "socket-unit-absent-at-disable" >> "$BOT_AGENT_STUB_LOG"
+  fi
+fi
+exec %q "$@"
+`, unit, unit, real))
+}
+
+func assertLogOrder(t *testing.T, res cmdResult, label string, needles ...string) {
+	t.Helper()
+	pos := 0
+	for _, n := range needles {
+		rel := strings.Index(res.log[pos:], n)
+		if rel < 0 {
+			res.fail(t, "", label+": missing "+n)
+		}
+		pos += rel + len(n)
+	}
+}
+
+// assertNoSystemctlChange fails when dry-run invoked systemctl for real.
+// Every run still calls systemctl --version to see that systemd is present.
+func assertNoSystemctlChange(t *testing.T, res cmdResult, label string) {
+	t.Helper()
+	for _, line := range strings.Split(res.log, "\n") {
+		if line == "" || line == "systemctl --version" {
+			continue
+		}
+		if strings.HasPrefix(line, "systemctl ") {
+			res.fail(t, "", label+": systemctl was called: "+line)
+		}
+	}
+}
+
+func plantHandAgent(t *testing.T, rg *rig, bundle, version string) {
+	t.Helper()
+	src := filepath.Join(bundle, "bot-agent-v"+version+"-linux-"+bundleArch(t))
+	body, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(rg.root, "usr/local/bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(binDir, "bot-agent")
+	if err := os.WriteFile(dst, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unitDir := filepath.Join(rg.root, "etc/systemd/system")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := os.ReadFile(filepath.Join(bundle, "units", "bot-agent.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitPath := filepath.Join(unitDir, "bot-agent.service")
+	if err := os.WriteFile(unitPath, unit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plantEnv(t, rg)
+	if _, err := os.Lstat(filepath.Join(rg.root, "var/lib/bot-agent-installer")); !os.IsNotExist(err) {
+		t.Fatal("hand plant created an installer record")
+	}
+	if _, err := os.Lstat(filepath.Join(rg.root, "usr/local/libexec/bot-agent-runner")); !os.IsNotExist(err) {
+		t.Fatal("hand plant created the helper")
+	}
+}
+
+func TestInstallerUpgradeRunnerSocketEnrolled(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	plantEnv(t, rg)
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "upgrade", "--runner")
+	if res.code != 0 {
+		res.fail(t, "", "enrolled upgrade --runner")
+	}
+	assertLogOrder(t, res, "enrolled upgrade --runner",
+		"systemctl daemon-reload",
+		"systemctl enable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+		"systemctl is-active bot-agent-runner.socket",
+	)
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.1" {
+		t.Fatal("version")
+	}
+}
+
+func TestInstallerUpgradeRunnerSocketNotEnrolled(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	before := treeSig(t, rg.root)
+	rg.truncateLog(t)
+	dry := runBundle(t, next, rg, "", "upgrade", "--dry-run", "--runner")
+	if treeSig(t, rg.root) != before {
+		dry.fail(t, "", "not enrolled dry-run changed the root")
+	}
+	assertDryRun(t, dry, 0, "not enrolled upgrade --dry-run --runner")
+	assertNoSystemctlChange(t, dry, "not enrolled upgrade --dry-run --runner")
+	if strings.Contains(dry.combined(), "enable --now bot-agent-runner.socket") {
+		dry.fail(t, "", "not enrolled dry-run printed socket enable")
+	}
+	if !strings.Contains(dry.stdout, "not enrolled: agent not restarted") {
+		dry.fail(t, "", "not enrolled dry-run missing the not-enrolled line")
+	}
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "upgrade", "--runner")
+	if res.code != 0 {
+		res.fail(t, "", "not enrolled upgrade --runner")
+	}
+	if !strings.Contains(res.stdout, "not enrolled: agent not restarted") {
+		res.fail(t, "", "missing not-enrolled line")
+	}
+	if strings.Contains(res.log, "systemctl enable --now bot-agent-runner.socket") || strings.Contains(res.log, "systemctl restart ") {
+		res.fail(t, "", "not enrolled upgrade enabled the socket or restarted")
+	}
+}
+
+func TestInstallerUpgradeRunnerSocketDryRun(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	plantEnv(t, rg)
+	before := treeSig(t, rg.root)
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "upgrade", "--dry-run", "--runner")
+	if treeSig(t, rg.root) != before {
+		res.fail(t, "", "enrolled dry-run changed the root")
+	}
+	assertDryRun(t, res, 0, "enrolled upgrade --dry-run --runner")
+	assertNoSystemctlChange(t, res, "enrolled upgrade --dry-run --runner")
+	out := res.stdout
+	reloadAt := strings.Index(out, "dry-run: systemctl daemon-reload")
+	enableAt := strings.Index(out, "dry-run: systemctl enable --now bot-agent-runner.socket")
+	restartAt := strings.Index(out, "dry-run: systemctl restart bot-agent.service")
+	if reloadAt < 0 || enableAt < 0 || restartAt < 0 || !(reloadAt < enableAt && enableAt < restartAt) {
+		res.fail(t, "", "dry-run socket step order")
+	}
+	rg.truncateLog(t)
+	plain := runBundle(t, next, rg, "", "upgrade", "--dry-run")
+	if treeSig(t, rg.root) != before {
+		plain.fail(t, "", "enrolled dry-run without --runner changed the root")
+	}
+	assertNoSystemctlChange(t, plain, "enrolled upgrade --dry-run")
+	if strings.Contains(plain.combined(), "enable --now bot-agent-runner.socket") {
+		plain.fail(t, "", "upgrade without --runner printed a socket enable")
+	}
+}
+
+func TestInstallerRollbackRunnerSocketReenable(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	plantEnv(t, rg)
+	up := runBundle(t, next, rg, "", "upgrade", "--runner")
+	if up.code != 0 {
+		up.fail(t, "", "upgrade before re-enable rollback")
+	}
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "rollback")
+	if res.code != 0 {
+		res.fail(t, "", "rollback re-enable")
+	}
+	assertLogOrder(t, res, "rollback re-enable",
+		"systemctl daemon-reload",
+		"systemctl enable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+	)
+	if strings.Contains(res.log, "systemctl disable --now bot-agent-runner.socket") {
+		res.fail(t, "", "rollback disabled a socket it restored")
+	}
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("rollback version")
+	}
+	assertExists(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+}
+
+func TestInstallerRollbackRunnerSocketDisable(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	up := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if up.code != 0 {
+		up.fail(t, "", "hand upgrade before disable rollback")
+	}
+	assertExists(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+	watchSocketUnitAtDisable(t, rg)
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "rollback")
+	if res.code != 0 {
+		res.fail(t, "", "rollback disable")
+	}
+	assertLogOrder(t, res, "rollback disable",
+		"systemctl disable --now bot-agent-runner.socket",
+		"systemctl daemon-reload",
+		"systemctl restart bot-agent.service",
+	)
+	if strings.Contains(res.log, "socket-unit-absent-at-disable") || !strings.Contains(res.log, "socket-unit-present-at-disable") {
+		res.fail(t, "", "disable ran without the socket unit file")
+	}
+	if strings.Contains(res.log, "systemctl enable --now bot-agent-runner.socket") {
+		res.fail(t, "", "rollback re-enabled a socket it removed")
+	}
+	assertGone(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("rollback version")
+	}
+}
+
+func TestInstallerRollbackRunnerSocketDisableDryRun(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	up := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if up.code != 0 {
+		up.fail(t, "", "hand upgrade before disable dry-run")
+	}
+	before := treeSig(t, rg.root)
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "rollback", "--dry-run")
+	if treeSig(t, rg.root) != before {
+		res.fail(t, "", "disable dry-run changed the root")
+	}
+	assertDryRun(t, res, 0, "rollback disable dry-run")
+	assertNoSystemctlChange(t, res, "rollback disable dry-run")
+	disableAt := strings.Index(res.stdout, "dry-run: systemctl disable --now bot-agent-runner.socket")
+	deleteAt := strings.Index(res.stdout, "dry-run: delete /etc/systemd/system/bot-agent-runner.socket")
+	if disableAt < 0 || deleteAt < 0 || disableAt > deleteAt {
+		res.fail(t, "", "disable dry-run is not before the socket delete")
+	}
+	assertExists(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+}
+
+func TestInstallerUpgradeRunnerVerifyFailDisablesSocketBeforeDelete(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-restarts"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	watchSocketUnitAtDisable(t, rg)
+	res := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if res.code == 0 {
+		res.fail(t, "", "verify failure was accepted")
+	}
+	if !strings.Contains(res.combined(), "upgrade failed, restored 0.2.0") {
+		res.fail(t, "", "automatic rollback did not restore 0.2.0")
+	}
+	if strings.Contains(res.log, "socket-unit-absent-at-disable") || !strings.Contains(res.log, "socket-unit-present-at-disable") {
+		res.fail(t, "", "disable ran without the socket unit file")
+	}
+	assertGone(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("old agent was not restored")
+	}
+}
+
+func TestInstallerRefusesSymlinkedEtcBotAgent(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	target := t.TempDir()
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	etc := filepath.Join(rg.root, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(etc, "bot-agent")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	res := runBundle(t, bundle, rg, "", "install")
+	if res.code == 0 || !strings.Contains(res.combined(), "refusing symlink /etc/bot-agent") {
+		res.fail(t, "", "symlinked /etc/bot-agent was not refused")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink was replaced")
+	}
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("link target mode %o, want %o", after.Mode().Perm(), before.Mode().Perm())
+	}
+}
+
+func TestInstallerHandBinaryGroupWritableNotExecuted(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.1")
+	binDir := filepath.Join(rg.root, "usr/local/bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(rg.root, "hand-version-executed")
+	dst := filepath.Join(binDir, "bot-agent")
+	body := fmt.Sprintf("#!/bin/sh\nset -eu\nprintf '%%s\\n' executed > %q\nprintf '%%s\\n' '9.9.9'\n", marker)
+	if err := os.WriteFile(dst, []byte(body), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dst, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o020 == 0 {
+		t.Fatalf("fixture is not group-writable: %o", info.Mode().Perm())
+	}
+	res := runBundle(t, bundle, rg, "", "check")
+	if res.code != 0 {
+		res.fail(t, "", "check")
+	}
+	if !strings.Contains(res.stdout, "installed: none\n") || strings.Contains(res.stdout, "9.9.9") || strings.Contains(res.stdout, "(not installed by the installer)") {
+		res.fail(t, "", "group-writable binary was treated as installed")
+	}
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatal("group-writable binary was executed")
+	}
+}
+
+func TestInstallerRunnerSocketInactiveRollsBack(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	plantEnv(t, rg)
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-socket-active"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := runBundle(t, next, rg, "", "upgrade", "--runner")
+	if res.code == 0 {
+		res.fail(t, "", "inactive socket was accepted")
+	}
+	if !strings.Contains(res.combined(), "verify: runner socket is inactive") {
+		res.fail(t, "", "missing socket verify line")
+	}
+	if !strings.Contains(res.combined(), "rolling back") && !strings.Contains(res.combined(), "restored") {
+		res.fail(t, "", "no rollback")
+	}
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("version was not restored")
+	}
+	if _, err := os.Stat(filepath.Join(rg.root, "usr/local/bin/bot-agent.prev")); !os.IsNotExist(err) {
+		t.Fatal(".prev remained after rollback")
+	}
+}
+
+func TestInstallerHandInstalledVersion(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	const handLine = "installed: 0.2.0 (not installed by the installer)"
+
+	check := runBundle(t, next, rg, "", "check")
+	if check.code != 0 {
+		check.fail(t, "", "hand check")
+	}
+	if !strings.Contains(check.stdout, handLine) || !strings.Contains(check.stdout, "summary: check ok") {
+		check.fail(t, "", "hand check installed line")
+	}
+	if strings.Contains(check.stdout, "installed: none") {
+		check.fail(t, "", "hand check said none")
+	}
+
+	before := treeSig(t, rg.root)
+	refused := runBundle(t, next, rg, "", "upgrade")
+	if refused.code == 0 || !strings.Contains(refused.stdout, handLine) || !strings.Contains(refused.stdout, "nothing changed") {
+		refused.fail(t, "", "hand upgrade without --force")
+	}
+	if treeSig(t, rg.root) != before {
+		refused.fail(t, "", "refused hand upgrade changed the root")
+	}
+
+	rg.truncateLog(t)
+	dry := runBundle(t, next, rg, "", "upgrade", "--dry-run", "--force", "--runner")
+	if treeSig(t, rg.root) != before {
+		dry.fail(t, "", "hand dry-run changed the root")
+	}
+	assertDryRun(t, dry, 0, "hand upgrade dry-run")
+	assertNoSystemctlChange(t, dry, "hand upgrade dry-run")
+	if !strings.Contains(dry.stdout, handLine) || !strings.Contains(dry.stdout, "summary: dry-run upgrade 0.2.0 -> 0.2.1") {
+		dry.fail(t, "", "hand dry-run summary")
+	}
+	if !strings.Contains(dry.stdout, "dry-run: systemctl enable --now bot-agent-runner.socket") {
+		dry.fail(t, "", "hand dry-run missing socket step")
+	}
+
+	rg.truncateLog(t)
+	up := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if up.code != 0 {
+		up.fail(t, "", "hand upgrade")
+	}
+	if !strings.Contains(up.stdout, handLine) || !strings.Contains(up.stdout, "summary: upgraded 0.2.0 -> 0.2.1") {
+		up.fail(t, "", "hand upgrade summary")
+	}
+	if strings.Contains(up.stdout, "unknown") {
+		up.fail(t, "", "hand upgrade used unknown")
+	}
+	assertLogOrder(t, up, "hand upgrade",
+		"systemctl daemon-reload",
+		"systemctl enable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+	)
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.1" {
+		t.Fatal("version")
+	}
+
+	again := runBundle(t, next, rg, "", "check")
+	if again.code != 0 {
+		again.fail(t, "", "check after hand upgrade")
+	}
+	if !strings.Contains(again.stdout, "installed: 0.2.1\n") || strings.Contains(again.stdout, "not installed by the installer)") {
+		again.fail(t, "", "recorded version line")
+	}
 }
 
 func TestInstallerRemoveStopNoMatch(t *testing.T) {

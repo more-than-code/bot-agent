@@ -1,7 +1,10 @@
 #!/bin/sh
 # Orchestrator gate for the bot-agent installer on a disposable podman VM.
 # Starts a debian:12 container with systemd as PID 1, copies linux/arm64
-# bundles built from this tree, and runs AC1, AC2, AC4, AC5, AC6, and AC7.
+# bundles built from this tree, and runs AC1, AC2, AC4, AC5, AC6, and AC7,
+# plus a hand-installed enrolled host upgraded with --force --runner,
+# and an enrolled host with no socket whose upgrade --runner fails
+# verification and rolls the socket back off.
 # AC3 checks that enroll feeds the token to `bot-agent init` on stdin and
 # that the token is not in the script output or process arguments.
 # This script removes only the container it creates. It does not touch the
@@ -365,6 +368,8 @@ fi
 rm -f /tmp/ps.args
 [ -f /etc/bot-agent/env ] || die "enroll did not write the env file"
 [ "$(stat -c '%U:%G %a' /etc/bot-agent/env)" = "bot-agent:bot-agent 600" ] || die "env owner mode"
+cp /etc/bot-agent/env /opt/enrolled.env
+chmod 0600 /opt/enrolled.env
 if ! grep -q 'BOT_AGENT_SERVER_URL=wss://example.invalid/agent/v1/ws' /etc/bot-agent/env; then
   die "env missing server url"
 fi
@@ -538,6 +543,116 @@ if docker network ls | awk 'NR>1 {print $2}' | grep -qx net-owned; then
   die "owned network remained"
 fi
 docker network ls | awk 'NR>1 {print $2}' | grep -qx net-other || die "other network removed"
+
+# Hand-installed enrolled host: 0.2.0 binary, unit, and the env file from the
+# enroll above, copied without install.sh. No helper and no installer record.
+# upgrade --force --runner must enable the socket before the agent restarts.
+if ! getent group bot-agent >/dev/null 2>&1; then
+  groupadd --system bot-agent || die "hand setup: groupadd"
+fi
+if ! id bot-agent >/dev/null 2>&1; then
+  _shell=/usr/sbin/nologin
+  if [ ! -x "$_shell" ] && [ -x /sbin/nologin ]; then
+    _shell=/sbin/nologin
+  fi
+  useradd --system --gid bot-agent --no-create-home --shell "$_shell" --comment bot-agent bot-agent || die "hand setup: useradd"
+fi
+install -d -m 0755 /usr/local/bin
+install -d -m 0750 -o root -g bot-agent /etc/bot-agent
+install -d -m 0755 /etc/systemd/system
+cp /opt/bundles/b020/bot-agent-v0.2.0-linux-arm64 /usr/local/bin/bot-agent
+chmod 0755 /usr/local/bin/bot-agent
+cp /opt/bundles/b020/units/bot-agent.service /etc/systemd/system/bot-agent.service
+chmod 0644 /etc/systemd/system/bot-agent.service
+cp /opt/enrolled.env /etc/bot-agent/env
+chown bot-agent:bot-agent /etc/bot-agent/env
+chmod 0600 /etc/bot-agent/env
+[ ! -e /usr/local/libexec/bot-agent-runner ] || die "hand setup: helper present"
+[ ! -e /etc/systemd/system/bot-agent-runner.socket ] || die "hand setup: socket unit present"
+[ ! -e /var/lib/bot-agent-installer ] || die "hand setup: installer record present"
+[ "$(/usr/local/bin/bot-agent version)" = "0.2.0" ] || die "hand setup: version"
+systemctl daemon-reload || die "hand setup: daemon-reload"
+systemctl enable --now bot-agent.service || die "hand setup: agent did not start"
+st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+[ "$st" = "active" ] || die "hand setup: agent is ${st:-unknown}"
+id_before=$(systemctl show -p InvocationID --value bot-agent.service || true)
+[ -n "$id_before" ] || die "hand setup: no InvocationID"
+
+out=$(run_ok "hand check" /opt/bundles/b021/install.sh check)
+have "$out" "installed: 0.2.0 (not installed by the installer)" "hand check installed line"
+out=$(run_ok "hand upgrade" /opt/bundles/b021/install.sh upgrade --force --runner)
+have "$out" "installed: 0.2.0 (not installed by the installer)" "hand upgrade installed line"
+have "$out" "summary: upgraded 0.2.0 -> 0.2.1" "hand upgrade summary"
+[ "$(/usr/local/bin/bot-agent version)" = "0.2.1" ] || die "hand upgrade version"
+en=$(systemctl is-enabled bot-agent-runner.socket 2>/dev/null || true)
+[ "$en" = "enabled" ] || die "hand socket is-enabled: ${en:-empty}"
+st=$(systemctl is-active bot-agent-runner.socket 2>/dev/null || true)
+[ "$st" = "active" ] || die "hand socket is-active: ${st:-empty}"
+id_after=$(systemctl show -p InvocationID --value bot-agent.service || true)
+if [ -z "$id_after" ] || [ "$id_before" = "$id_after" ]; then
+  die "hand upgrade did not restart the agent"
+fi
+# Microseconds since boot. The new agent invocation must start after the socket.
+sock_mono=$(systemctl show -p ActiveEnterTimestampMonotonic --value bot-agent-runner.socket || true)
+agent_mono=$(systemctl show -p ActiveEnterTimestampMonotonic --value bot-agent.service || true)
+case "$sock_mono" in
+  ''|*[!0-9]*) die "hand socket ActiveEnterTimestampMonotonic: ${sock_mono:-empty}" ;;
+esac
+case "$agent_mono" in
+  ''|*[!0-9]*) die "hand agent ActiveEnterTimestampMonotonic: ${agent_mono:-empty}" ;;
+esac
+if [ "$agent_mono" -le "$sock_mono" ]; then
+  die "agent ActiveEnterTimestampMonotonic $agent_mono is not after socket $sock_mono"
+fi
+
+# Enrolled host, no socket unit. upgrade --runner of the broken bundle
+# fails verification. Rollback must disable the socket before deleting the
+# unit file, then leave 0.2.0 running.
+systemctl disable --now bot-agent-runner.socket || die "socket reset: disable"
+systemctl disable --now bot-agent.service || die "socket reset: agent"
+rm -f \
+  /etc/systemd/system/bot-agent-runner.socket \
+  "/etc/systemd/system/bot-agent-runner@.service" \
+  /etc/tmpfiles.d/bot-agent-runner.conf \
+  /usr/local/libexec/bot-agent-runner \
+  /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket
+rm -rf /var/lib/bot-agent-installer
+cp /opt/bundles/b020/bot-agent-v0.2.0-linux-arm64 /usr/local/bin/bot-agent
+chmod 0755 /usr/local/bin/bot-agent
+cp /opt/bundles/b020/units/bot-agent.service /etc/systemd/system/bot-agent.service
+chmod 0644 /etc/systemd/system/bot-agent.service
+[ -f /etc/bot-agent/env ] || die "socket reset: env missing"
+[ ! -e /etc/systemd/system/bot-agent-runner.socket ] || die "socket reset: unit remained"
+systemctl daemon-reload || die "socket reset: daemon-reload"
+systemctl enable --now bot-agent.service || die "socket reset: agent did not start"
+st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+[ "$st" = "active" ] || die "socket reset: agent is ${st:-unknown}"
+[ "$(/usr/local/bin/bot-agent version)" = "0.2.0" ] || die "socket reset: version"
+set +e
+out=$(/opt/bundles/b022/install.sh upgrade --force --runner 2>&1)
+code=$?
+set -e
+[ "$code" != 0 ] || die "no-socket bad upgrade succeeded"
+case "$out" in
+  *rolling\ back*|*restored*) ;;
+  *) printf '%s\n' "$out" >&2; die "no-socket bad upgrade did not roll back" ;;
+esac
+[ "$(/usr/local/bin/bot-agent version)" = "0.2.0" ] || die "no-socket rollback version"
+st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+[ "$st" = "active" ] || die "no-socket rollback: agent is ${st:-unknown}"
+[ ! -e /etc/systemd/system/bot-agent-runner.socket ] || die "no-socket rollback left the unit file"
+[ ! -h /etc/systemd/system/bot-agent-runner.socket ] || die "no-socket rollback left a unit symlink"
+st=$(systemctl is-active bot-agent-runner.socket 2>/dev/null || true)
+case "$st" in
+  active) die "no-socket rollback left the socket active (${st})" ;;
+esac
+en=$(systemctl is-enabled bot-agent-runner.socket 2>/dev/null || true)
+case "$en" in
+  enabled) die "no-socket rollback left the socket enabled (${en})" ;;
+esac
+if [ -e /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket ] || [ -h /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket ]; then
+  die "no-socket rollback left sockets.target.wants"
+fi
 printf '%s\n' "inner checks passed"
 EOF
 

@@ -3,6 +3,7 @@
 # Test-only: --root DIR is refused unless BOT_AGENT_INSTALLER_TEST=1,
 # which also skips the uid 0 check and then requires --root.
 # Outside test mode PATH is fixed. Test mode keeps PATH so stubs work.
+# umask 022 so a new directory is at most 0755 before a tighter chmod.
 # xtrace stays off: a join token must not be written to a trace.
 set -eu
 set +x
@@ -10,6 +11,7 @@ if [ "${BOT_AGENT_INSTALLER_TEST:-}" != "1" ]; then
   PATH=/usr/sbin:/usr/bin:/sbin:/bin
   export PATH
 fi
+umask 022
 
 STAGE=
 STTY_SAVED=
@@ -18,6 +20,13 @@ STTY_SAVED=
 ROLLBACK_ARMED=0
 ROLLBACK_KIND=upgrade
 REMOVE_INCOMPLETE=0
+# Set when this command enabled the runner socket and verification must see it active.
+SOCKET_VERIFY=0
+SOCKET_UNIT=bot-agent-runner.socket
+SOCKET_PATH=/etc/systemd/system/bot-agent-runner.socket
+# enable, disable, or none. Set before a rollback restore so disable can run
+# while an added unit file is still on disk.
+RB_SOCKET_ACT=none
 
 # stty -g prints a list of arguments. They must be split, not passed as one word.
 restore_stty() {
@@ -228,6 +237,14 @@ hash_file() {
 file_mode() {
   _m=$(stat -c %a "$1" 2>/dev/null) || _m=$(stat -f %OLp "$1") || return 1
   printf '%s\n' "$_m" | awk '{print $1+0}'
+}
+
+file_uid() {
+  _u=$(stat -c %u "$1" 2>/dev/null) || _u=$(stat -f %u "$1" 2>/dev/null) || return 1
+  case "$_u" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$_u"
 }
 
 # 0 when the numeric mode has the group or other write bit.
@@ -480,7 +497,55 @@ record_hash() {
 }
 
 installed_ver=$(record_version "$RECORD")
-if [ -n "$installed_ver" ]; then
+# No installer record. check and upgrade report `bot-agent version` instead of "none".
+HAND_VER=
+if [ -z "$installed_ver" ] && [ ! -f "$RECORD" ]; then
+  if [ "$CMD" = "check" ] || [ "$CMD" = "upgrade" ]; then
+    _hbin=$(hostpath /usr/local/bin/bot-agent)
+    # Do not execute an untrusted binary as root. Test mode skips only the
+    # uid 0 check, because the fake root is not owned by root. A group or
+    # other write bit still means there is no version.
+    _htrust=0
+    if [ -f "$_hbin" ] && [ ! -h "$_hbin" ] && [ -x "$_hbin" ]; then
+      _hmode=$(file_mode "$_hbin") || _hmode=
+      if [ -n "$_hmode" ] && ! mode_group_or_other_writable "$_hmode"; then
+        if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ]; then
+          _htrust=1
+        else
+          _huid=$(file_uid "$_hbin") || _huid=
+          if [ "$_huid" = "0" ]; then
+            _htrust=1
+          fi
+        fi
+      fi
+    fi
+    if [ "$_htrust" = "1" ]; then
+      _hv=$("$_hbin" version 2>/dev/null) || _hv=
+      # Trailing newlines are already gone. Reject a second line.
+      case "$_hv" in
+        *'
+'*) _hv= ;;
+      esac
+      # One token, so the prev record's "version <word>" stays one field.
+      case "$_hv" in
+        ''|*[!0-9A-Za-z._+-]*|-*) _hv= ;;
+      esac
+      if [ -n "$_hv" ]; then
+        _hlen=$(printf '%s' "$_hv" | awk '{print length($0); exit}')
+        if [ "$_hlen" -gt 64 ]; then
+          _hv=
+        fi
+      fi
+      if [ -n "$_hv" ]; then
+        HAND_VER="$_hv"
+        installed_ver=$_hv
+      fi
+    fi
+  fi
+fi
+if [ -n "$HAND_VER" ]; then
+  say "installed: ${installed_ver} (not installed by the installer)"
+elif [ -n "$installed_ver" ]; then
   say "installed: ${installed_ver}"
 else
   say "installed: none"
@@ -653,6 +718,22 @@ do_check() {
   say "summary: check ok"
 }
 
+# Paths the installer itself may install. Rollback will not delete any other
+# path, even if a prev record names it as added.
+managed_install_path() {
+  case "$1" in
+    /usr/local/bin/bot-agent) return 0 ;;
+    /etc/systemd/system/bot-agent.service) return 0 ;;
+    /usr/local/libexec/bot-agent-runner) return 0 ;;
+    /etc/systemd/system/bot-agent-runner.socket) return 0 ;;
+    /etc/systemd/system/bot-agent-runner@.service) return 0 ;;
+    /etc/tmpfiles.d/bot-agent-runner.conf) return 0 ;;
+    /etc/bot-agent/runner.toml) return 0 ;;
+    /etc/systemd/system/bot-agent.service.d/insecure-dev.conf) return 0 ;;
+  esac
+  return 1
+}
+
 # Paths the installer may write. kind is bin, unit, file, policy, or dropin.
 each_managed() {
   printf '%s\n' "/usr/local/bin/bot-agent 0755 root:root bin ${BUNDLE}/$(basename "$AGENT_SRC")"
@@ -696,11 +777,68 @@ ensure_user() {
   fi
 }
 
+# A symlink is refused before mkdir, so chmod cannot follow it onto another directory.
+refuse_dir_symlink() {
+  if [ -h "$1" ]; then
+    printf '%s\n' "refusing symlink $2" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Shared directories keep whatever mode and owner they already have.
+# chmod only when this installer creates the directory.
+ensure_shared_dir() {
+  _p=$1
+  _label=$2
+  refuse_dir_symlink "$_p" "$_label" || return 1
+  if [ -d "$_p" ]; then
+    return 0
+  fi
+  mkdir -p "$_p" || return 1
+  if [ -h "$_p" ]; then
+    printf '%s\n' "refusing symlink ${_label}" >&2
+    return 1
+  fi
+  chmod 0755 "$_p" || return 1
+  return 0
+}
+
+# Owned directories get an explicit mode and owner every time.
+ensure_owned_dir() {
+  _p=$1
+  _label=$2
+  _mode=$3
+  _owner=$4
+  refuse_dir_symlink "$_p" "$_label" || return 1
+  mkdir -p "$_p" || return 1
+  if [ -h "$_p" ]; then
+    printf '%s\n' "refusing symlink ${_label}" >&2
+    return 1
+  fi
+  chmod "$_mode" "$_p" || return 1
+  chown "$_owner" "$_p" || return 1
+  return 0
+}
+
 prepare_dirs() {
   _etc=$(hostpath /etc/bot-agent)
   _libexec=$(hostpath /usr/local/libexec)
   _bin=$(hostpath /usr/local/bin)
   _unit=$(hostpath /etc/systemd/system)
+  _tmpfiles=$(hostpath /etc/tmpfiles.d)
+  _dd=$(hostpath /etc/systemd/system/bot-agent.service.d)
+  refuse_dir_symlink "$_bin" "/usr/local/bin" || return 1
+  refuse_dir_symlink "$_unit" "/etc/systemd/system" || return 1
+  refuse_dir_symlink "$_etc" "/etc/bot-agent" || return 1
+  refuse_dir_symlink "$STATE" "/var/lib/bot-agent-installer" || return 1
+  if [ "$WANT_RUNNER" = "1" ]; then
+    refuse_dir_symlink "$_libexec" "/usr/local/libexec" || return 1
+    refuse_dir_symlink "$_tmpfiles" "/etc/tmpfiles.d" || return 1
+  fi
+  if [ "$INSECURE" = "1" ]; then
+    refuse_dir_symlink "$_dd" "/etc/systemd/system/bot-agent.service.d" || return 1
+  fi
   if [ "$DRY" = "1" ]; then
     say "dry-run: mkdir /usr/local/bin mode 0755 owner root:root"
     say "dry-run: mkdir /etc/bot-agent mode 0750 owner root:bot-agent"
@@ -714,23 +852,17 @@ prepare_dirs() {
     fi
     return 0
   fi
-  mkdir -p "$_bin" "$_unit" "$_etc" "$STATE" || return 1
-  chmod 0755 "$_bin" "$_unit" || return 1
+  ensure_shared_dir "$_bin" "/usr/local/bin" || return 1
+  ensure_shared_dir "$_unit" "/etc/systemd/system" || return 1
   # 0750 root:bot-agent: the agent can read the directory and cannot unlink runner.toml.
-  chmod 0750 "$_etc" || return 1
-  chown root:bot-agent "$_etc" || return 1
-  chmod 0700 "$STATE" || return 1
-  chown root:root "$STATE" || return 1
+  ensure_owned_dir "$_etc" "/etc/bot-agent" 0750 root:bot-agent || return 1
+  ensure_owned_dir "$STATE" "/var/lib/bot-agent-installer" 0700 root:root || return 1
   if [ "$WANT_RUNNER" = "1" ]; then
-    mkdir -p "$_libexec" "$(hostpath /etc/tmpfiles.d)" || return 1
-    chmod 0755 "$_libexec" "$(hostpath /etc/tmpfiles.d)" || return 1
-    chown root:root "$_libexec" "$(hostpath /etc/tmpfiles.d)" || return 1
+    ensure_owned_dir "$_libexec" "/usr/local/libexec" 0755 root:root || return 1
+    ensure_owned_dir "$_tmpfiles" "/etc/tmpfiles.d" 0755 root:root || return 1
   fi
   if [ "$INSECURE" = "1" ]; then
-    _dd=$(hostpath /etc/systemd/system/bot-agent.service.d)
-    mkdir -p "$_dd" || return 1
-    chmod 0755 "$_dd" || return 1
-    chown root:root "$_dd" || return 1
+    ensure_owned_dir "$_dd" "/etc/systemd/system/bot-agent.service.d" 0755 root:root || return 1
   fi
   require_mode "$_etc" 0750
   require_mode "$STATE" 0700
@@ -1103,7 +1235,7 @@ EOF
   fi
   if [ "$DRY" = "1" ]; then
     ensure_user
-    prepare_dirs
+    prepare_dirs || fail "directories failed"
     apply_managed
     say "dry-run: systemctl daemon-reload"
     if [ "$WANT_RUNNER" = "1" ]; then
@@ -1135,6 +1267,103 @@ host_enrolled() {
   return 1
 }
 
+# enable, disable, or none from the prev record. The socket is included when
+# a hash line names it, and removed when the upgrade recorded it as added.
+socket_action_from_prev() {
+  if [ ! -f "$PREV" ] || [ -h "$PREV" ]; then
+    printf '%s\n' "none"
+    return 0
+  fi
+  _sact=none
+  while IFS= read -r _sline || [ -n "$_sline" ]; do
+    case "$_sline" in
+      "added ${SOCKET_PATH}")
+        _sact=disable
+        ;;
+      *)
+        _spath=$(printf '%s\n' "$_sline" | awk '{print $2}')
+        if [ "$_spath" = "$SOCKET_PATH" ]; then
+          _sact=enable
+        fi
+        ;;
+    esac
+  done < "$PREV"
+  printf '%s\n' "$_sact"
+}
+
+# enable or disable. Disable of a unit that is already gone is success:
+# systemd 252 exits non-zero from `disable --now` once the unit file is gone.
+run_socket_action() {
+  case "$1" in
+    enable)
+      if [ "$DRY" = "1" ]; then
+        say "dry-run: systemctl enable --now ${SOCKET_UNIT}"
+        return 0
+      fi
+      systemctl enable --now "$SOCKET_UNIT" || return 1
+      SOCKET_VERIFY=1
+      ;;
+    disable)
+      if [ "$DRY" = "1" ]; then
+        say "dry-run: systemctl disable --now ${SOCKET_UNIT}"
+        return 0
+      fi
+      _su=$(hostpath "$SOCKET_PATH")
+      if [ ! -e "$_su" ] && [ ! -h "$_su" ]; then
+        if ! systemctl cat "$SOCKET_UNIT" >/dev/null 2>&1; then
+          return 0
+        fi
+      fi
+      systemctl disable --now "$SOCKET_UNIT" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# After daemon-reload and before the agent restart. The agent probes the
+# helper only at start-up. Upgrade enables only with --runner. A host
+# without env enables nothing. Rollback does not use this: a disable has
+# to run before restore deletes an added unit file.
+sync_runner_socket() {
+  _swhen=$1
+  SOCKET_VERIFY=0
+  if ! host_enrolled; then
+    return 0
+  fi
+  if [ "$_swhen" != "upgrade" ] || [ "$RUNNER" != "1" ]; then
+    return 0
+  fi
+  run_socket_action enable || return 1
+  return 0
+}
+
+# Disable while the added unit file is still installed. Enable waits until
+# restore and daemon-reload have put the unit file back.
+begin_rollback_socket() {
+  SOCKET_VERIFY=0
+  RB_SOCKET_ACT=none
+  if ! host_enrolled; then
+    return 0
+  fi
+  RB_SOCKET_ACT=$(socket_action_from_prev) || return 1
+  case "$RB_SOCKET_ACT" in
+    enable|none) return 0 ;;
+    disable)
+      run_socket_action disable || return 1
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+finish_rollback_socket() {
+  if [ "$RB_SOCKET_ACT" = "enable" ]; then
+    run_socket_action enable || return 1
+  fi
+  return 0
+}
+
 # Restart and require NRestarts exactly 0 only when the host is enrolled.
 # Every status is checked explicitly: this runs under `||` where set -e is off.
 verify_active_version() {
@@ -1160,6 +1389,13 @@ verify_active_version() {
     if [ "$_rc" != "0" ] || [ "$_re" != "0" ]; then
       say "verify: NRestarts is not 0"
       return 1
+    fi
+    if [ "$SOCKET_VERIFY" = "1" ]; then
+      _sst=$(systemctl is-active "$SOCKET_UNIT" 2>/dev/null || true)
+      if [ "$_sst" != "active" ]; then
+        say "verify: runner socket is ${_sst:-unknown}"
+        return 1
+      fi
     fi
   else
     say "not enrolled: agent not restarted"
@@ -1211,6 +1447,24 @@ backup_one() {
 }
 
 backup_tree() {
+  if [ -h "$STATE" ]; then
+    printf '%s\n' "refusing symlink /var/lib/bot-agent-installer" >&2
+    return 1
+  fi
+  if [ ! -d "$STATE" ]; then
+    mkdir -p "$STATE" || return 1
+  fi
+  if [ -h "$STATE" ]; then
+    printf '%s\n' "refusing symlink /var/lib/bot-agent-installer" >&2
+    return 1
+  fi
+  # Tighten state before anything is written under prev.
+  chmod 0700 "$STATE" || return 1
+  chown root:root "$STATE" || return 1
+  if [ -h "$STATE/prev" ]; then
+    printf '%s\n' "refusing symlink /var/lib/bot-agent-installer/prev" >&2
+    return 1
+  fi
   _prevdir=$STATE/prev
   mkdir -p "$_prevdir" || return 1
   chmod 0700 "$_prevdir" || return 1
@@ -1280,6 +1534,10 @@ restore_prev() {
       ''|version\ *|was-active\ *|enrolled\ *) continue ;;
       added\ *)
         _path=${_line#added }
+        if ! managed_install_path "$_path"; then
+          printf '%s\n' "refusing to delete unmanaged path ${_path}" >&2
+          return 1
+        fi
         _dest=$(hostpath "$_path")
         if [ "$DRY" = "1" ]; then
           say "dry-run: delete ${_path}"
@@ -1376,9 +1634,15 @@ rollback_armed_now() {
   _back=
   say "rolling back"
   _rb=0
-  restore_prev || _rb=$?
+  begin_rollback_socket || _rb=$?
+  if [ "$_rb" = "0" ]; then
+    restore_prev || _rb=$?
+  fi
   if [ "$_rb" = "0" ]; then
     systemctl daemon-reload || true
+    finish_rollback_socket || _rb=$?
+  fi
+  if [ "$_rb" = "0" ]; then
     _back=$(record_version "$RECORD") || _back=
     verify_active_version "$_back" || _rb=$?
   fi
@@ -1397,12 +1661,10 @@ rollback_armed_now() {
 rollback_unverified() {
   ROLLBACK_ARMED=0
   say "$1"
-  _rc=0
-  restore_prev || _rc=$?
-  if [ "$_rc" != "0" ]; then
-    fail "rollback failed"
-  fi
-  systemctl daemon-reload || true
+  begin_rollback_socket || fail "rollback failed"
+  restore_prev || fail "rollback failed"
+  systemctl daemon-reload || fail "daemon-reload failed"
+  finish_rollback_socket || fail "rollback failed"
   _back=$(record_version "$RECORD")
   _rc=0
   verify_active_version "$_back" || _rc=$?
@@ -1436,18 +1698,19 @@ do_upgrade() {
   done <<EOF
 $(each_managed)
 EOF
+  if [ -z "$installed_ver" ]; then
+    installed_ver=unknown
+  fi
   if [ "$DRY" = "1" ]; then
     say "dry-run: backup replaced files to <file>.prev"
     apply_managed
     say "dry-run: systemctl daemon-reload"
+    sync_runner_socket upgrade
     say_restart_plan
     say "summary: dry-run upgrade ${installed_ver} -> ${VER}"
     exit 0
   fi
   mark_mutated
-  if [ -z "$installed_ver" ]; then
-    installed_ver=unknown
-  fi
   _rc=0
   backup_tree || _rc=$?
   if [ "$_rc" != "0" ]; then
@@ -1479,6 +1742,11 @@ EOF
     rollback_unverified "apply failed, rolling back"
   fi
   _rc=0
+  sync_runner_socket upgrade || _rc=$?
+  if [ "$_rc" != "0" ]; then
+    rollback_unverified "runner socket update failed, rolling back"
+  fi
+  _rc=0
   verify_active_version "$VER" || _rc=$?
   if [ "$_rc" != "0" ]; then
     rollback_unverified "verify failed, rolling back"
@@ -1496,8 +1764,10 @@ do_rollback() {
   _old=$(record_version "$PREV")
   refuse_managed_symlinks
   if [ "$DRY" = "1" ]; then
-    restore_prev
+    begin_rollback_socket || fail "runner socket update failed"
+    restore_prev || fail "rollback failed"
     say "dry-run: systemctl daemon-reload"
+    finish_rollback_socket || fail "runner socket update failed"
     say_restart_plan
     say "summary: dry-run rollback ${_old}"
     exit 0
@@ -1505,14 +1775,13 @@ do_rollback() {
   mark_mutated
   # The first restore write is the first rollback write. A later exit
   # runs restore again so a partial write does not stay mixed.
+  # Disable runs before that restore: the unit file has to still exist.
   ROLLBACK_KIND=rollback
   ROLLBACK_ARMED=1
-  _rc=0
-  restore_prev || _rc=$?
-  if [ "$_rc" != "0" ]; then
-    fail "rollback failed"
-  fi
+  begin_rollback_socket || fail "runner socket update failed"
+  restore_prev || fail "rollback failed"
   systemctl daemon-reload || fail "daemon-reload failed"
+  finish_rollback_socket || fail "runner socket update failed"
   _rc=0
   verify_active_version "$_old" || _rc=$?
   if [ "$_rc" != "0" ]; then
