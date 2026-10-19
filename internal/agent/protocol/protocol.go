@@ -12,7 +12,7 @@ import (
 
 const (
 	Version      = 1
-	AgentVersion = "0.2.1"
+	AgentVersion = "0.2.2"
 	MaxFrame     = 1 << 20
 	MaxSamples   = 5000
 	CmdlineMax   = 1024
