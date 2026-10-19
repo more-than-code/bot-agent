@@ -120,6 +120,7 @@ func (rg *rig) env() []string {
 	return append(os.Environ(),
 		"BOT_AGENT_INSTALLER_TEST=1",
 		"BOT_AGENT_INSTALLER_SETTLE=0",
+		"BOT_AGENT_ENROLL_WAIT=0",
 		"BOT_AGENT_STUB_LOG="+rg.log,
 		"BOT_AGENT_STUB_DIR="+rg.stubs,
 		"PATH="+rg.stubs+string(os.PathListSeparator)+path,
@@ -303,6 +304,12 @@ if [ "${1:-}" = "is-active" ]; then
       exit 3
     fi
   fi
+  if [ -f "$BOT_AGENT_STUB_DIR/inactive-until-enable" ]; then
+    if ! grep -q 'systemctl enable --now bot-agent.service' "$BOT_AGENT_STUB_LOG"; then
+      printf '%s\n' "inactive"
+      exit 3
+    fi
+  fi
   printf '%s\n' "active"
   exit 0
 fi
@@ -336,6 +343,49 @@ fi
 if [ -f "$BOT_AGENT_STUB_DIR/stop-nomatch" ] && [ "${1:-}" = "stop" ]; then
   printf '%s\n' "stop failed" >&2
   exit 1
+fi
+if [ "${1:-}" = "cat" ]; then
+  exit 1
+fi
+if [ -f "$BOT_AGENT_STUB_DIR/fail-socket-disable" ]; then
+  if [ "${1:-}" = "disable" ] && [ "${2:-}" = "--now" ] && [ "${3:-}" = "bot-agent-runner.socket" ]; then
+    printf '%s\n' "disable failed" >&2
+    exit 1
+  fi
+fi
+if [ -f "$BOT_AGENT_STUB_DIR/persist-env-path" ]; then
+  _do=0
+  if [ "${1:-}" = "restart" ] && [ "${2:-}" = "bot-agent.service" ]; then
+    _do=1
+  fi
+  if [ "${1:-}" = "enable" ] && [ "${2:-}" = "--now" ] && [ "${3:-}" = "bot-agent.service" ]; then
+    _do=1
+  fi
+  if [ "$_do" = "1" ]; then
+    _p=$(cat "$BOT_AGENT_STUB_DIR/persist-env-path")
+    if [ -n "$_p" ] && [ -f "$_p" ]; then
+      if [ -f "$BOT_AGENT_STUB_DIR/persist-env-body" ]; then
+        cat "$BOT_AGENT_STUB_DIR/persist-env-body" > "$_p"
+      else
+        _url=
+        while IFS= read -r _line || [ -n "$_line" ]; do
+          case "$_line" in
+            BOT_AGENT_SERVER_URL=*) _url="$_line" ;;
+          esac
+        done < "$_p"
+        if [ -z "$_url" ]; then
+          _url=BOT_AGENT_SERVER_URL=wss://example.invalid/agent/v1/ws
+        fi
+        {
+          printf '%s\n' "$_url"
+          printf '%s\n' "BOT_AGENT_HOST_ID=11111111-1111-4111-8111-111111111111"
+          printf '%s\n' "BOT_AGENT_CREDENTIAL_ID=22222222-2222-4222-8222-222222222222"
+          printf '%s\n' "BOT_AGENT_CREDENTIAL=ccccccccccccccccccccccccccccccccccccccccccc"
+        } > "$_p"
+      fi
+      chmod 0600 "$_p"
+    fi
+  fi
 fi
 exit 0
 `)
@@ -431,6 +481,21 @@ exit 0
 	writeExe(t, filepath.Join(dir, "chown"), `#!/bin/sh
 set -eu
 printf '%s\n' "chown $*" >> "$BOT_AGENT_STUB_LOG"
+if [ -f "$BOT_AGENT_STUB_DIR/chown-swap-env" ]; then
+  _last=
+  for a in "$@"; do
+    _last=$a
+  done
+  case "$_last" in
+    */etc/bot-agent/env)
+      _sent=$(cat "$BOT_AGENT_STUB_DIR/chown-swap-env")
+      if [ -n "$_sent" ]; then
+        rm -f "$_last"
+        ln -s "$_sent" "$_last"
+      fi
+      ;;
+  esac
+fi
 exit 0
 `)
 	writeExe(t, filepath.Join(dir, "systemd-tmpfiles"), `#!/bin/sh
@@ -444,7 +509,7 @@ printf '%s\n' "docker $*" >> "$BOT_AGENT_STUB_LOG"
 labelled=0
 for a in "$@"; do
   case "$a" in
-    *label=dev.deploybot.owner*) labelled=1 ;;
+    *label=dev.deploybot.owner=bot-agent*) labelled=1 ;;
   esac
 done
 show() {
@@ -604,7 +669,7 @@ func TestInstallerAC1InstallAndRerun(t *testing.T) {
 	assertPerm(t, filepath.Join(root, "etc/systemd/system/bot-agent-runner@.service"), 0o644)
 	assertPerm(t, filepath.Join(root, "etc/tmpfiles.d/bot-agent-runner.conf"), 0o644)
 	assertPerm(t, filepath.Join(root, "etc/bot-agent/runner.toml"), 0o644)
-	assertPerm(t, filepath.Join(root, "etc/bot-agent"), 0o750)
+	assertStickyDir(t, filepath.Join(root, "etc/bot-agent"))
 	assertPerm(t, filepath.Join(root, "var/lib/bot-agent-installer"), 0o700)
 	rec, err := os.ReadFile(filepath.Join(root, "var/lib/bot-agent-installer/installed"))
 	if err != nil {
@@ -959,6 +1024,16 @@ func TestInstallerAC6RemoveWorkloads(t *testing.T) {
 	if !strings.Contains(res.log, "docker network rm net-owned") || strings.Contains(res.log, "net-other") {
 		res.fail(t, "", "network selection")
 	}
+	for _, needle := range []string{
+		"label=dev.deploybot.owner=bot-agent",
+	} {
+		if !strings.Contains(res.log, needle) {
+			res.fail(t, "", "missing "+needle)
+		}
+	}
+	if strings.Contains(res.log, "label=dev.deploybot.owner ") || strings.Contains(res.log, "label=dev.deploybot.owner\n") {
+		res.fail(t, "", "label filter has no value")
+	}
 }
 
 func TestInstallerAC6Purge(t *testing.T) {
@@ -1118,7 +1193,12 @@ func TestInstallerAC7DryRun(t *testing.T) {
 	}{
 		{bundle, []string{"check", "--dry-run", "--runner"}, nil},
 		{bundle, []string{"install", "--dry-run", "--runner", "--runner-config", cfg}, []string{"already installed, nothing changed"}},
-		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}, []string{"summary: dry-run enroll", "dry-run: exec bot-agent init --server <url> --join-token-stdin --env-file /etc/bot-agent/env"}},
+		{bundle, []string{"enroll", "--dry-run", "--server", "wss://example.invalid/agent/v1/ws"}, []string{
+			"summary: dry-run enroll",
+			"dry-run: exec bot-agent init --server <url> --join-token-stdin --env-file /etc/bot-agent/env",
+			"dry-run: systemctl restart bot-agent.service",
+			"dry-run: systemctl enable --now bot-agent-runner.socket",
+		}},
 		{next, []string{"upgrade", "--dry-run"}, []string{
 			"dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root",
 			"dry-run: write /usr/local/libexec/bot-agent-runner mode 0755 owner root:root",
@@ -1201,28 +1281,50 @@ func TestInstallerEnrollTokenHidden(t *testing.T) {
 	rg := newRig(t)
 	bundle := makeBundle(t, "0.2.0")
 	mustInstall(t, bundle, rg, writeOKConfig(t))
+	markPersist(t, rg)
 	rg.truncateLog(t)
 	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
 	if res.code != 0 {
 		res.fail(t, token, "enroll")
 	}
-	if strings.Contains(res.stdout, token) || strings.Contains(res.stderr, token) || strings.Contains(res.log, token) {
-		t.Fatal("token appeared in installer output or stub log")
+	assertNoToken(t, res, token)
+	if strings.Contains(res.log, "systemctl enable --now bot-agent.service") {
+		res.fail(t, token, "active agent was enabled instead of restarted")
 	}
-	if !strings.Contains(res.log, "systemctl enable --now bot-agent.service") {
-		res.fail(t, token, "agent not enabled")
+	if !strings.Contains(res.log, "systemctl restart bot-agent.service") {
+		res.fail(t, token, "active agent was not restarted")
+	}
+	if !strings.Contains(res.log, "systemctl enable --now bot-agent-runner.socket") {
+		res.fail(t, token, "runner socket was not enabled")
+	}
+	for _, line := range []string{
+		"systemctl restart bot-agent.service",
+		"systemctl enable --now bot-agent-runner.socket",
+		"verify: active, NRestarts 0, version 0.2.0",
+		"verify: runner socket active",
+		"summary: enrolled",
+	} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, token, "missing "+line)
+		}
 	}
 	envPath := filepath.Join(rg.root, "etc/bot-agent/env")
 	assertPerm(t, envPath, 0o600)
-	if !strings.Contains(res.log, "chown bot-agent:bot-agent ") || !strings.Contains(res.log, "etc/bot-agent/env") {
+	if !strings.Contains(res.log, "chown -h bot-agent:bot-agent ") || !strings.Contains(res.log, "etc/bot-agent/env") {
 		res.fail(t, token, "env chown")
 	}
+	assertLogOrder(t, res, "enroll settle",
+		"systemctl restart bot-agent.service",
+		"systemctl reset-failed bot-agent.service",
+		"systemctl show -p NRestarts --value bot-agent.service",
+	)
+	assertEnvKeys(t, envPath, true, true, false)
 	body, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(body, []byte("BOT_AGENT_SERVER_URL=")) {
-		t.Fatal("env missing server url")
+	if !bytes.Contains(body, []byte("BOT_AGENT_SERVER_URL=wss://example.invalid/agent/v1/ws\n")) || bytes.Contains(body, []byte(token)) {
+		t.Fatal("env server url")
 	}
 }
 
@@ -1497,6 +1599,9 @@ func TestInstallerUpgradeNotEnrolled(t *testing.T) {
 	}
 	if !strings.Contains(res.stdout, "not enrolled: agent not restarted") {
 		res.fail(t, "", "missing not-enrolled line")
+	}
+	if strings.Contains(res.stdout, "verify: active") || strings.Contains(res.stdout, "systemctl restart") {
+		res.fail(t, "", "not-enrolled upgrade printed a restart")
 	}
 	if strings.Contains(res.log, "systemctl restart ") {
 		res.fail(t, "", "restarted without env")
@@ -1961,6 +2066,16 @@ func TestInstallerUpgradeRunnerSocketEnrolled(t *testing.T) {
 		"systemctl restart bot-agent.service",
 		"systemctl is-active bot-agent-runner.socket",
 	)
+	for _, line := range []string{
+		"systemctl enable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+		"verify: active, NRestarts 0, version 0.2.1",
+		"verify: runner socket active",
+	} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, "", "missing "+line)
+		}
+	}
 	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.1" {
 		t.Fatal("version")
 	}
@@ -1993,6 +2108,9 @@ func TestInstallerUpgradeRunnerSocketNotEnrolled(t *testing.T) {
 	}
 	if !strings.Contains(res.stdout, "not enrolled: agent not restarted") {
 		res.fail(t, "", "missing not-enrolled line")
+	}
+	if strings.Contains(res.stdout, "verify: active") || strings.Contains(res.stdout, "systemctl restart") || strings.Contains(res.stdout, "enable --now bot-agent-runner.socket") {
+		res.fail(t, "", "not enrolled upgrade printed a socket or restart step")
 	}
 	if strings.Contains(res.log, "systemctl enable --now bot-agent-runner.socket") || strings.Contains(res.log, "systemctl restart ") {
 		res.fail(t, "", "not enrolled upgrade enabled the socket or restarted")
@@ -2053,6 +2171,16 @@ func TestInstallerRollbackRunnerSocketReenable(t *testing.T) {
 		"systemctl enable --now bot-agent-runner.socket",
 		"systemctl restart bot-agent.service",
 	)
+	for _, line := range []string{
+		"systemctl enable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+		"verify: active, NRestarts 0, version 0.2.0",
+		"verify: runner socket active",
+	} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, "", "missing "+line)
+		}
+	}
 	if strings.Contains(res.log, "systemctl disable --now bot-agent-runner.socket") {
 		res.fail(t, "", "rollback disabled a socket it restored")
 	}
@@ -2084,6 +2212,18 @@ func TestInstallerRollbackRunnerSocketDisable(t *testing.T) {
 		"systemctl daemon-reload",
 		"systemctl restart bot-agent.service",
 	)
+	for _, line := range []string{
+		"systemctl disable --now bot-agent-runner.socket",
+		"systemctl restart bot-agent.service",
+		"verify: active, NRestarts 0, version 0.2.0",
+	} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, "", "missing "+line)
+		}
+	}
+	if strings.Contains(res.stdout, "verify: runner socket active") {
+		res.fail(t, "", "disable rollback claimed the socket was active")
+	}
 	if strings.Contains(res.log, "socket-unit-absent-at-disable") || !strings.Contains(res.log, "socket-unit-present-at-disable") {
 		res.fail(t, "", "disable ran without the socket unit file")
 	}
@@ -2361,5 +2501,594 @@ func TestInstallerRemoveWorkloadsDockerAbsent(t *testing.T) {
 	assertExists(t, agent)
 	if strings.Contains(res.stdout, "nothing changed") {
 		res.fail(t, "", "precheck message after units")
+	}
+}
+
+func assertStickyDir(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fi.Mode() & (os.ModePerm | os.ModeSticky | os.ModeSetuid | os.ModeSetgid)
+	want := os.ModeSticky | 0o770
+	if got != want {
+		t.Fatalf("%s mode %#o, want sticky|0770", path, got)
+	}
+}
+
+func assertNoToken(t *testing.T, res cmdResult, token string) {
+	t.Helper()
+	if token != "" && (strings.Contains(res.stdout, token) || strings.Contains(res.stderr, token) || strings.Contains(res.log, token)) {
+		t.Fatal("token appeared in installer output or stub log")
+	}
+}
+
+func markPersist(t *testing.T, rg *rig) {
+	t.Helper()
+	path := filepath.Join(rg.root, "etc", "bot-agent", "env")
+	if err := os.WriteFile(filepath.Join(rg.stubs, "persist-env-path"), []byte(path), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertEnvKeys(t *testing.T, path string, wantHost, wantCred, wantJoin bool) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, cred, join := false, false, false
+	for _, line := range strings.Split(string(body), "\n") {
+		switch {
+		case strings.HasPrefix(line, "BOT_AGENT_HOST_ID=") && len(line) > len("BOT_AGENT_HOST_ID="):
+			host = true
+		case strings.HasPrefix(line, "BOT_AGENT_CREDENTIAL_ID=") && len(line) > len("BOT_AGENT_CREDENTIAL_ID="):
+			cred = true
+		case strings.HasPrefix(line, "BOT_AGENT_JOIN_TOKEN="):
+			join = true
+		}
+	}
+	if host != wantHost || cred != wantCred || join != wantJoin {
+		t.Fatalf("env keys host=%t cred=%t join=%t, want %t %t %t", host, cred, join, wantHost, wantCred, wantJoin)
+	}
+}
+
+func TestInstallerEtcModeRepaired(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	mustInstall(t, old, rg, writeOKConfig(t))
+	etc := filepath.Join(rg.root, "etc/bot-agent")
+	assertStickyDir(t, etc)
+	if err := os.Chmod(etc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	plantEnv(t, rg)
+	up := runBundle(t, next, rg, "", "upgrade")
+	if up.code != 0 {
+		up.fail(t, "", "upgrade repairs etc mode")
+	}
+	assertStickyDir(t, etc)
+	if err := os.Chmod(etc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	back := runBundle(t, next, rg, "", "rollback")
+	if back.code != 0 {
+		back.fail(t, "", "rollback repairs etc mode")
+	}
+	assertStickyDir(t, etc)
+}
+
+func TestInstallerEnrollInsecureDev(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollInsecureToken12"
+	wantDrop := []byte("# Dev only. Written by install.sh --insecure-dev.\n[Service]\nEnvironment=BOT_AGENT_INSECURE_DEV=1\n")
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	drop := filepath.Join(rg.root, "etc/systemd/system/bot-agent.service.d/insecure-dev.conf")
+
+	before := treeSig(t, rg.root)
+	dry := runBundle(t, bundle, rg, "", "enroll", "--dry-run", "--insecure-dev", "--server", "ws://127.0.0.1:9")
+	if treeSig(t, rg.root) != before {
+		dry.fail(t, "", "insecure enroll dry-run changed the root")
+	}
+	assertDryRun(t, dry, 0, "insecure enroll dry-run")
+	if !strings.Contains(dry.stdout, "dry-run: write /etc/systemd/system/bot-agent.service.d/insecure-dev.conf mode 0644 owner root:root") {
+		dry.fail(t, "", "insecure enroll dry-run missing the drop-in")
+	}
+	if _, err := os.Lstat(drop); !os.IsNotExist(err) {
+		t.Fatal("dry-run wrote the drop-in")
+	}
+
+	bad := runBundle(t, bundle, rg, "not a token\n", "enroll", "--insecure-dev", "--server", "ws://127.0.0.1:9")
+	if bad.code == 0 || !strings.Contains(bad.combined(), "enroll failed") || !strings.Contains(bad.stdout, "nothing changed") {
+		bad.fail(t, "not a token", "bad token enroll")
+	}
+	assertNoToken(t, bad, "not a token")
+	if _, err := os.Lstat(drop); !os.IsNotExist(err) {
+		t.Fatal("failed init wrote the drop-in")
+	}
+	if _, err := os.Lstat(filepath.Join(rg.root, "etc/bot-agent/env")); !os.IsNotExist(err) {
+		t.Fatal("failed init wrote the env file")
+	}
+
+	markPersist(t, rg)
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--insecure-dev", "--server", "ws://127.0.0.1:9")
+	if res.code != 0 {
+		res.fail(t, token, "insecure enroll")
+	}
+	assertNoToken(t, res, token)
+	got, err := os.ReadFile(drop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantDrop) {
+		t.Fatalf("drop-in:\n%s", got)
+	}
+	assertPerm(t, drop, 0o644)
+	envPath := filepath.Join(rg.root, "etc/bot-agent/env")
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("BOT_AGENT_SERVER_URL=ws://127.0.0.1:9/agent/v1/ws\n")) || bytes.Contains(body, []byte(token)) {
+		t.Fatal("stored server url")
+	}
+	assertEnvKeys(t, envPath, true, true, false)
+
+	// An existing drop-in still lets init use ws without passing the flag again.
+	plain := newRig(t)
+	installed := runBundle(t, bundle, plain, "", "install", "--runner", "--runner-config", writeOKConfig(t), "--insecure-dev")
+	if installed.code != 0 {
+		installed.fail(t, "", "install insecure before enroll")
+	}
+	markPersist(t, plain)
+	again := runBundle(t, bundle, plain, token+"\n", "enroll", "--server", "ws://127.0.0.1:9")
+	if again.code != 0 {
+		again.fail(t, token, "enroll with existing drop-in")
+	}
+	assertNoToken(t, again, token)
+	body, err = os.ReadFile(filepath.Join(plain.root, "etc/bot-agent/env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("BOT_AGENT_SERVER_URL=ws://127.0.0.1:9/agent/v1/ws\n")) {
+		t.Fatal("existing drop-in did not complete the url")
+	}
+}
+
+func TestInstallerEnrollWsWithoutFlag(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollWsTokenValue1"
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	before := treeSig(t, rg.root)
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "ws://127.0.0.1:9")
+	if res.code == 0 || !strings.Contains(res.combined(), "enroll failed") || !strings.Contains(res.stdout, "nothing changed") {
+		res.fail(t, token, "ws enroll without the flag")
+	}
+	assertNoToken(t, res, token)
+	if strings.Contains(res.combined(), "summary: enrolled") {
+		res.fail(t, token, "ws enroll claimed success")
+	}
+	if _, err := os.Lstat(filepath.Join(rg.root, "etc/bot-agent/env")); !os.IsNotExist(err) {
+		t.Fatal("rejected ws enroll wrote the env file")
+	}
+	if _, err := os.Lstat(filepath.Join(rg.root, "etc/systemd/system/bot-agent.service.d/insecure-dev.conf")); !os.IsNotExist(err) {
+		t.Fatal("rejected ws enroll wrote the drop-in")
+	}
+	if treeSig(t, rg.root) != before {
+		t.Fatal("rejected ws enroll changed the root")
+	}
+}
+
+func TestInstallerEnrollInactiveEnable(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollInactiveToken1"
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	if err := os.WriteFile(filepath.Join(rg.stubs, "inactive-until-enable"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	markPersist(t, rg)
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
+	if res.code != 0 {
+		res.fail(t, token, "inactive enroll")
+	}
+	assertNoToken(t, res, token)
+	if strings.Contains(res.stdout, "systemctl restart bot-agent.service") || strings.Contains(res.log, "systemctl restart ") {
+		res.fail(t, token, "inactive enroll restarted")
+	}
+	for _, line := range []string{
+		"systemctl enable --now bot-agent.service",
+		"systemctl enable --now bot-agent-runner.socket",
+		"verify: active, NRestarts 0, version 0.2.0",
+		"verify: runner socket active",
+		"summary: enrolled",
+	} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, token, "missing "+line)
+		}
+	}
+	assertEnvKeys(t, filepath.Join(rg.root, "etc/bot-agent/env"), true, true, false)
+}
+
+func TestInstallerEnrollCredentialNotPersisted(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollMissingKeys123"
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
+	if res.code != 1 || !strings.Contains(res.combined(), "enroll failed: credential not persisted") {
+		res.fail(t, token, "missing credential keys")
+	}
+	assertNoToken(t, res, token)
+	if strings.Contains(res.stdout, "summary: enrolled") || strings.Contains(res.stdout, "nothing changed") {
+		res.fail(t, token, "failed enroll printed success")
+	}
+	if !strings.Contains(res.stdout, "systemctl restart bot-agent.service") {
+		res.fail(t, token, "active agent was not restarted before the check")
+	}
+	envPath := filepath.Join(rg.root, "etc/bot-agent/env")
+	assertEnvKeys(t, envPath, false, false, true)
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(token)) == false || bytes.Contains(body, []byte("BOT_AGENT_HOST_ID=")) {
+		t.Fatal("env did not keep the join token without a credential")
+	}
+}
+
+func TestInstallerEnrollChmodBeforeChown(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollChmodToken1234"
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	sentinel := filepath.Join(rg.root, "sentinel-not-env")
+	if err := os.WriteFile(sentinel, []byte("sentinel-bytes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rg.stubs, "chown-swap-env"), []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeExe(t, filepath.Join(rg.stubs, "chmod"), `#!/bin/sh
+set -eu
+printf '%s\n' "chmod $*" >> "$BOT_AGENT_STUB_LOG"
+real=/bin/chmod
+if [ ! -x "$real" ]; then
+  real=/usr/bin/chmod
+fi
+exec "$real" "$@"
+`)
+	rg.truncateLog(t)
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
+	assertNoToken(t, res, token)
+	chmodAt := strings.Index(res.log, "chmod 0600 ")
+	chownAt := strings.Index(res.log, "chown -h bot-agent:bot-agent ")
+	if chmodAt < 0 || chownAt < 0 || chmodAt > chownAt {
+		res.fail(t, token, "chmod 0600 did not run before chown -h")
+	}
+	chmodLine := res.log[chmodAt:]
+	if nl := strings.Index(chmodLine, "\n"); nl >= 0 {
+		chmodLine = chmodLine[:nl]
+	}
+	chownLine := res.log[chownAt:]
+	if nl := strings.Index(chownLine, "\n"); nl >= 0 {
+		chownLine = chownLine[:nl]
+	}
+	if !strings.HasSuffix(chmodLine, "/etc/bot-agent/env") || !strings.HasSuffix(chownLine, "/etc/bot-agent/env") {
+		res.fail(t, token, "env chmod or chown targeted another path")
+	}
+	for _, line := range strings.Split(res.log[chownAt+len(chownLine):], "\n") {
+		if strings.HasPrefix(line, "chmod ") && strings.HasSuffix(line, "/etc/bot-agent/env") {
+			res.fail(t, token, "chmod followed env after chown")
+		}
+	}
+	info, err := os.Lstat(sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("sentinel mode %o, want 644", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "sentinel-bytes\n" {
+		t.Fatalf("sentinel bytes changed: %q", got)
+	}
+	envPath := filepath.Join(rg.root, "etc/bot-agent/env")
+	link, err := os.Lstat(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("env was not replaced at chown")
+	}
+}
+
+func TestInstallerEnrollEnvParse(t *testing.T) {
+	t.Parallel()
+	const (
+		token = "EnrollParseToken1234"
+		host  = "11111111-1111-4111-8111-111111111111"
+		cred  = "22222222-2222-4222-8222-222222222222"
+	)
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{
+			name: "export with leading space",
+			body: "BOT_AGENT_HOST_ID=" + host + "\nBOT_AGENT_CREDENTIAL_ID=" + cred + "\n export BOT_AGENT_JOIN_TOKEN=x\n",
+		},
+		{
+			name: "space before equals",
+			body: "BOT_AGENT_HOST_ID=" + host + "\nBOT_AGENT_CREDENTIAL_ID=" + cred + "\nBOT_AGENT_JOIN_TOKEN =x\n",
+		},
+		{
+			name: "quoted empty host id",
+			body: "BOT_AGENT_HOST_ID=\"\"\nBOT_AGENT_CREDENTIAL_ID=" + cred + "\n",
+		},
+		{
+			name: "quoted ids",
+			body: "BOT_AGENT_HOST_ID=\"" + host + "\"\nBOT_AGENT_CREDENTIAL_ID=\"" + cred + "\"\n",
+			ok:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rg := newRig(t)
+			bundle := makeBundle(t, "0.2.0")
+			mustInstall(t, bundle, rg, writeOKConfig(t))
+			markPersist(t, rg)
+			if err := os.WriteFile(filepath.Join(rg.stubs, "persist-env-body"), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
+			assertNoToken(t, res, token)
+			if strings.Contains(res.combined(), " export BOT_AGENT_JOIN_TOKEN") || strings.Contains(res.combined(), "BOT_AGENT_JOIN_TOKEN =x") {
+				res.fail(t, token, "env line was printed")
+			}
+			envPath := filepath.Join(rg.root, "etc/bot-agent/env")
+			if _, err := os.Lstat(envPath); err != nil {
+				t.Fatal(err)
+			}
+			if tc.ok {
+				if res.code != 0 || !strings.Contains(res.stdout, "summary: enrolled") {
+					res.fail(t, token, "quoted ids were not ready")
+				}
+				return
+			}
+			if res.code != 1 || !strings.Contains(res.combined(), "enroll failed: credential not persisted") {
+				res.fail(t, token, "malformed env was accepted")
+			}
+			if strings.Contains(res.stdout, "summary: enrolled") {
+				res.fail(t, token, "malformed env claimed enrolled")
+			}
+		})
+	}
+}
+
+func TestInstallerEnrollSettleFailure(t *testing.T) {
+	t.Parallel()
+	const token = "EnrollSettleToken123"
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	mustInstall(t, bundle, rg, writeOKConfig(t))
+	markPersist(t, rg)
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-restarts"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := runBundle(t, bundle, rg, token+"\n", "enroll", "--server", "wss://example.invalid/agent/v1/ws")
+	assertNoToken(t, res, token)
+	if res.code != 1 {
+		res.fail(t, token, "settle failure was accepted")
+	}
+	for _, needle := range []string{
+		"systemctl stop bot-agent",
+		"move /etc/bot-agent/env aside",
+		"then enroll again",
+	} {
+		if !strings.Contains(res.combined(), needle) {
+			res.fail(t, token, "missing "+needle)
+		}
+	}
+	if strings.Contains(res.stdout, "nothing changed") || strings.Contains(res.stdout, "summary: enrolled") {
+		res.fail(t, token, "settle failure looked successful")
+	}
+	assertEnvKeys(t, filepath.Join(rg.root, "etc/bot-agent/env"), true, true, false)
+	assertLogOrder(t, res, "settle order",
+		"systemctl restart bot-agent.service",
+		"systemctl reset-failed bot-agent.service",
+		"systemctl show -p NRestarts --value bot-agent.service",
+	)
+}
+
+func TestInstallerRollbackSocketStopStillRestores(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-restarts"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-socket-disable"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	watchSocketUnitAtDisable(t, rg)
+	res := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if res.code == 0 {
+		res.fail(t, "", "verify failure was accepted")
+	}
+	if !strings.Contains(res.combined(), "upgrade failed, restored 0.2.0") {
+		res.fail(t, "", "restore did not finish after the socket stop failed")
+	}
+	if strings.Contains(res.log, "socket-unit-absent-at-disable") || !strings.Contains(res.log, "socket-unit-present-at-disable") {
+		res.fail(t, "", "socket stop did not run while the unit file existed")
+	}
+	assertGone(t, filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket"))
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("old agent was not restored")
+	}
+}
+
+func TestInstallerRollbackAbsentSocketIsSuccess(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	plantHandAgent(t, rg, old, "0.2.0")
+	up := runBundle(t, next, rg, "", "upgrade", "--force", "--runner")
+	if up.code != 0 {
+		up.fail(t, "", "upgrade")
+	}
+	socket := filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket")
+	if err := os.Remove(socket); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-socket-disable"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rg.truncateLog(t)
+	res := runBundle(t, next, rg, "", "rollback")
+	if res.code != 0 {
+		res.fail(t, "", "absent socket disable failed the rollback")
+	}
+	if strings.Contains(res.log, "systemctl disable --now bot-agent-runner.socket") {
+		res.fail(t, "", "disable ran for an absent socket unit")
+	}
+	if binVersion(t, filepath.Join(rg.root, "usr/local/bin/bot-agent")) != "0.2.0" {
+		t.Fatal("rollback version")
+	}
+}
+
+func TestInstallerRemoveAbsentSocketDisable(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	installed := runBundle(t, bundle, rg, "", "install")
+	if installed.code != 0 {
+		installed.fail(t, "", "install without runner")
+	}
+	socket := filepath.Join(rg.root, "etc/systemd/system/bot-agent-runner.socket")
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatal("install without runner created the socket unit")
+	}
+	if err := os.WriteFile(filepath.Join(rg.stubs, "fail-socket-disable"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rg.truncateLog(t)
+	res := runBundle(t, bundle, rg, "", "remove")
+	if res.code != 0 || !strings.Contains(res.stdout, "summary: removed") || strings.Contains(res.stdout, "summary: remove incomplete") {
+		res.fail(t, "", "absent socket made remove incomplete")
+	}
+	if strings.Contains(res.log, "systemctl disable --now bot-agent-runner.socket") {
+		res.fail(t, "", "disable ran for a socket that was never installed")
+	}
+	assertGone(t, filepath.Join(rg.root, "usr/local/bin/bot-agent"))
+}
+
+func TestInstallerUpgradeRefusesPolicySymlink(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	old := makeBundle(t, "0.2.0")
+	next := makeBundle(t, "0.2.1")
+	installed := runBundle(t, old, rg, "", "install")
+	if installed.code != 0 {
+		installed.fail(t, "", "install without runner")
+	}
+	sentinel := filepath.Join(rg.root, "sentinel-policy")
+	if err := os.WriteFile(sentinel, []byte("not-a-template\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	policy := filepath.Join(rg.root, "etc/bot-agent/runner.toml")
+	writeExe(t, filepath.Join(rg.stubs, "mv"), fmt.Sprintf(`#!/bin/sh
+set -eu
+real=/bin/mv
+if [ ! -x "$real" ]; then
+  real=/usr/bin/mv
+fi
+dest=
+for a in "$@"; do
+  case "$a" in
+    -*) ;;
+    *) dest=$a ;;
+  esac
+done
+"$real" "$@"
+case "$dest" in
+  */usr/local/libexec/bot-agent-runner)
+    if [ ! -e %q ] && [ ! -h %q ]; then
+      ln -s %q %q
+    fi
+    ;;
+esac
+`, policy, policy, sentinel, policy))
+	res := runBundle(t, next, rg, "", "upgrade", "--runner")
+	if res.code == 0 || !strings.Contains(res.combined(), "refusing symlink /etc/bot-agent/runner.toml") {
+		res.fail(t, "", "policy symlink was not refused")
+	}
+	if strings.Contains(res.combined(), "kept: /etc/bot-agent/runner.toml") {
+		res.fail(t, "", "policy symlink was kept")
+	}
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "not-a-template\n" || bytes.Contains(got, []byte("enabled = false")) {
+		t.Fatalf("sentinel changed: %q", got)
+	}
+}
+
+func TestInstallerReexecStagedScript(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	res := runBundle(t, bundle, rg, "", "check")
+	if res.code != 0 {
+		res.fail(t, "", "check")
+	}
+	raw, err := os.ReadFile(filepath.Join(rg.stubs, "installer-argv0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(raw))
+	if !strings.Contains(got, "bot-agent-inst.") || !strings.HasSuffix(got, "/install.sh") {
+		t.Fatalf("continuing script was %q", got)
+	}
+	if got == filepath.Join(bundle, "install.sh") {
+		t.Fatal("ran the bundle copy")
+	}
+	if _, err := os.Lstat(got); !os.IsNotExist(err) {
+		t.Fatalf("stage directory was not removed: %v", err)
+	}
+	if strings.Count(res.stdout, "arch:") != 1 {
+		res.fail(t, "", "arch line was repeated")
+	}
+	if strings.Count(res.stdout, "systemd: present") != 1 {
+		res.fail(t, "", "systemd line was repeated")
+	}
+	dry := runBundle(t, bundle, rg, "", "check", "--dry-run")
+	if dry.code != 0 {
+		dry.fail(t, "", "check dry-run")
+	}
+	if strings.Count(dry.stdout, "systemd: present") != 1 {
+		dry.fail(t, "", "dry-run duplicated the preamble")
 	}
 }

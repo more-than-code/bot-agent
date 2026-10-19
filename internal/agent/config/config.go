@@ -151,6 +151,52 @@ func (c Config) DiskHasJoin() bool {
 	return c.disk[keyJoin] != ""
 }
 
+// completeServerURL appends /agent/v1/ws when the URL path is empty or "/".
+// Any other path is returned unchanged, not re-serialized. A value that
+// does not parse is returned unchanged so ValidateServerURL can reject it,
+// except a ws or wss URL with a non-numeric port: net/url fails before it
+// reports the path, and a bare form such as ws://h:p still gets the suffix.
+func completeServerURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return completeUnparsed(raw)
+	}
+	if u.Host == "" || (u.Scheme != "ws" && u.Scheme != "wss") {
+		return raw
+	}
+	if u.Path != "" && u.Path != "/" {
+		return raw
+	}
+	u.Path = "/agent/v1/ws"
+	u.RawPath = ""
+	return u.String()
+}
+
+// completeUnparsed appends the agent path when url.Parse failed and the
+// value is still a ws or wss URL with an empty path or a lone slash.
+func completeUnparsed(raw string) string {
+	rest := raw
+	switch {
+	case strings.HasPrefix(raw, "wss://"):
+		rest = raw[len("wss://"):]
+	case strings.HasPrefix(raw, "ws://"):
+		rest = raw[len("ws://"):]
+	default:
+		return raw
+	}
+	if rest == "" {
+		return raw
+	}
+	cut := strings.IndexAny(rest, "/?#")
+	if cut < 0 {
+		return raw + "/agent/v1/ws"
+	}
+	if rest[cut:] == "/" {
+		return raw + "agent/v1/ws"
+	}
+	return raw
+}
+
 // ValidateServerURL accepts wss, and ws only for the dev loopback rule.
 func ValidateServerURL(raw string, insecureDev bool) error {
 	u, err := url.Parse(raw)
@@ -193,6 +239,7 @@ func initFrom(args []string, in io.Reader) error {
 	if err != nil {
 		return errors.New("insecure dev flag is not valid")
 	}
+	server = completeServerURL(server)
 	if err := ValidateServerURL(server, insecure); err != nil {
 		return err
 	}

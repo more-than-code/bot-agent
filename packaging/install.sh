@@ -67,7 +67,7 @@ usage() {
 usage: install.sh check|install|enroll|upgrade|rollback|remove [flags]
   check
   install [--runner] [--runner-config FILE] [--insecure-dev]
-  enroll --server URL [--runner]
+  enroll --server URL [--runner] [--insecure-dev]
   upgrade [--force] [--runner] [--insecure-dev]
   rollback
   remove [--purge] [--remove-workloads]
@@ -101,6 +101,7 @@ REMOVE_WL=0
 INSECURE=0
 SERVER=
 RUNNER_CONFIG=
+RUNNER_CONFIG_ORIG=
 MUTATED=0
 WANT_RUNNER=0
 VER=
@@ -113,6 +114,16 @@ SETTLE=${BOT_AGENT_INSTALLER_SETTLE:-15}
 case "$SETTLE" in
   ''|*[!0-9]*) fail "BOT_AGENT_INSTALLER_SETTLE must be a non-negative integer" ;;
 esac
+
+# How long enroll waits for the credential keys. Outside test mode this
+# stays 30s even if the variable is set.
+ENROLL_WAIT=30
+if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_ENROLL_WAIT:-}" ]; then
+  case "$BOT_AGENT_ENROLL_WAIT" in
+    *[!0-9]*) fail "BOT_AGENT_ENROLL_WAIT must be a non-negative integer" ;;
+  esac
+  ENROLL_WAIT=$BOT_AGENT_ENROLL_WAIT
+fi
 
 if [ "$#" -lt 1 ]; then
   usage
@@ -163,7 +174,7 @@ case "$CMD" in
     fi
     ;;
   enroll)
-    if [ "$FORCE" != "0" ] || [ "$PURGE" != "0" ] || [ "$REMOVE_WL" != "0" ] || [ "$INSECURE" != "0" ] || [ -n "$RUNNER_CONFIG" ]; then
+    if [ "$FORCE" != "0" ] || [ "$PURGE" != "0" ] || [ "$REMOVE_WL" != "0" ] || [ -n "$RUNNER_CONFIG" ]; then
       usage
     fi
     if [ -z "$SERVER" ]; then
@@ -234,9 +245,21 @@ hash_file() {
   printf '%s\n' "$_hout" | awk '{print $1}'
 }
 
+# Permission bits, including setuid, setgid, and sticky.
+# Linux stat -c %a prints those bits. macOS stat -f %p prints the whole
+# st_mode, so keep the last four octal digits.
 file_mode() {
-  _m=$(stat -c %a "$1" 2>/dev/null) || _m=$(stat -f %OLp "$1") || return 1
-  printf '%s\n' "$_m" | awk '{print $1+0}'
+  if _m=$(stat -c %a "$1" 2>/dev/null); then
+    :
+  else
+    _m=$(stat -f %p "$1" 2>/dev/null) || return 1
+  fi
+  printf '%s\n' "$_m" | awk '{
+    s=$1
+    n=length(s)
+    if (n>4) s=substr(s, n-3)
+    print s+0
+  }'
 }
 
 file_uid() {
@@ -274,22 +297,6 @@ case "$ORIG_BUNDLE" in
   *[[:space:]]*) precheck_fail "bundle path contains whitespace" ;;
 esac
 BUNDLE=$ORIG_BUNDLE
-
-mach=$(uname -m) || fail "uname failed"
-case "$mach" in
-  x86_64|amd64) ARCH=amd64 ;;
-  aarch64|arm64) ARCH=arm64 ;;
-  *) precheck_fail "unsupported arch ${mach}" ;;
-esac
-say "arch: ${ARCH}"
-
-if ! command -v systemctl >/dev/null 2>&1; then
-  precheck_fail "systemd: absent"
-fi
-if ! systemctl --version >/dev/null 2>&1; then
-  precheck_fail "systemd: absent"
-fi
-say "systemd: present"
 
 # sum_path prints the relative path from one SHA256SUMS line, or nothing.
 sum_path() {
@@ -409,6 +416,51 @@ stage_runner_config() {
   RUNNER_CONFIG=$STAGE/runner-config.toml
 }
 
+# The shell may read this script in chunks. After the hash check, keep running
+# the staged copy so a later rewrite of the original path is not parsed.
+# Arguments are rebuilt from the flags already accepted. The guard stops a second exec.
+exec_staged_installer() {
+  if [ "${BOT_AGENT_INSTALL_REEXEC:-}" = "1" ]; then
+    return 0
+  fi
+  if [ "$0" = "$STAGE/install.sh" ]; then
+    return 0
+  fi
+  BOT_AGENT_INSTALL_REEXEC=1
+  export BOT_AGENT_INSTALL_REEXEC
+  set -- "$CMD"
+  if [ "$DRY" = "1" ]; then
+    set -- "$@" --dry-run
+  fi
+  if [ "$RUNNER" = "1" ]; then
+    set -- "$@" --runner
+  fi
+  if [ "$FORCE" = "1" ]; then
+    set -- "$@" --force
+  fi
+  if [ "$PURGE" = "1" ]; then
+    set -- "$@" --purge
+  fi
+  if [ "$REMOVE_WL" = "1" ]; then
+    set -- "$@" --remove-workloads
+  fi
+  if [ "$INSECURE" = "1" ]; then
+    set -- "$@" --insecure-dev
+  fi
+  if [ -n "$ROOT" ]; then
+    set -- "$@" --root "$ROOT"
+  fi
+  if [ -n "$RUNNER_CONFIG_ORIG" ]; then
+    set -- "$@" --runner-config "$RUNNER_CONFIG_ORIG"
+  fi
+  if [ -n "$SERVER" ]; then
+    set -- "$@" --server "$SERVER"
+  fi
+  # shellcheck disable=SC2093 # exec replaces this process; the next line runs only if it fails
+  exec "$STAGE/install.sh" "$@"
+  precheck_fail "cannot re-exec staged install.sh"
+}
+
 sum_listed() {
   _want=$1
   _found=0
@@ -422,9 +474,23 @@ sum_listed() {
   [ "$_found" = "1" ]
 }
 
-stage_bundle
+RUNNER_CONFIG_ORIG=$RUNNER_CONFIG
+if [ "${BOT_AGENT_INSTALL_REEXEC:-}" = "1" ]; then
+  STAGE=$ORIG_BUNDLE
+  case "$STAGE" in
+    *bot-agent-inst.*) ;;
+    *) precheck_fail "refusing staged re-exec" ;;
+  esac
+  BUNDLE=$STAGE
+else
+  stage_bundle
+fi
 stage_runner_config
 verify_sums
+exec_staged_installer
+if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_STUB_DIR:-}" ]; then
+  printf '%s\n' "$0" > "$BOT_AGENT_STUB_DIR/installer-argv0"
+fi
 
 find_bins() {
   AGENT_SRC=
@@ -472,6 +538,22 @@ find_bins() {
     sum_listed "$_rb" || precheck_fail "SHA256SUMS does not list ${_rb}"
   fi
 }
+
+mach=$(uname -m) || fail "uname failed"
+case "$mach" in
+  x86_64|amd64) ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
+  *) precheck_fail "unsupported arch ${mach}" ;;
+esac
+say "arch: ${ARCH}"
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  precheck_fail "systemd: absent"
+fi
+if ! systemctl --version >/dev/null 2>&1; then
+  precheck_fail "systemd: absent"
+fi
+say "systemd: present"
 
 find_bins
 
@@ -841,7 +923,7 @@ prepare_dirs() {
   fi
   if [ "$DRY" = "1" ]; then
     say "dry-run: mkdir /usr/local/bin mode 0755 owner root:root"
-    say "dry-run: mkdir /etc/bot-agent mode 0750 owner root:bot-agent"
+    say "dry-run: mkdir /etc/bot-agent mode 1770 owner root:bot-agent"
     say "dry-run: mkdir /var/lib/bot-agent-installer mode 0700 owner root:root"
     if [ "$WANT_RUNNER" = "1" ]; then
       say "dry-run: mkdir /usr/local/libexec mode 0755 owner root:root"
@@ -854,8 +936,9 @@ prepare_dirs() {
   fi
   ensure_shared_dir "$_bin" "/usr/local/bin" || return 1
   ensure_shared_dir "$_unit" "/etc/systemd/system" || return 1
-  # 0750 root:bot-agent: the agent can read the directory and cannot unlink runner.toml.
-  ensure_owned_dir "$_etc" "/etc/bot-agent" 0750 root:bot-agent || return 1
+  # 1770 root:bot-agent, sticky. The agent can create its temp file and
+  # rename it over env. It cannot unlink the root-owned runner.toml.
+  ensure_owned_dir "$_etc" "/etc/bot-agent" 1770 root:bot-agent || return 1
   ensure_owned_dir "$STATE" "/var/lib/bot-agent-installer" 0700 root:root || return 1
   if [ "$WANT_RUNNER" = "1" ]; then
     ensure_owned_dir "$_libexec" "/usr/local/libexec" 0755 root:root || return 1
@@ -864,7 +947,7 @@ prepare_dirs() {
   if [ "$INSECURE" = "1" ]; then
     ensure_owned_dir "$_dd" "/etc/systemd/system/bot-agent.service.d" 0755 root:root || return 1
   fi
-  require_mode "$_etc" 0750
+  require_mode "$_etc" 1770
   require_mode "$STATE" 0700
 }
 
@@ -1079,7 +1162,15 @@ apply_managed() {
       if [ -e "$ENV_DEST" ]; then
         say "kept: ${ENV_HOST}"
       fi
-      if [ -f "$_dest" ]; then
+      # [ -f ] follows a symlink. Refuse one, and check again immediately
+      # before keeping the file: the directory is group-writable by then.
+      if [ -h "$_dest" ]; then
+        fail "refusing symlink ${_path}"
+      fi
+      if [ -f "$_dest" ] && [ ! -h "$_dest" ]; then
+        if [ -h "$_dest" ] || [ ! -f "$_dest" ]; then
+          fail "refusing symlink ${_path}"
+        fi
         say "kept: ${_path}"
         continue
       fi
@@ -1300,6 +1391,7 @@ run_socket_action() {
         say "dry-run: systemctl enable --now ${SOCKET_UNIT}"
         return 0
       fi
+      say "systemctl enable --now ${SOCKET_UNIT}"
       systemctl enable --now "$SOCKET_UNIT" || return 1
       SOCKET_VERIFY=1
       ;;
@@ -1314,6 +1406,7 @@ run_socket_action() {
           return 0
         fi
       fi
+      say "systemctl disable --now ${SOCKET_UNIT}"
       systemctl disable --now "$SOCKET_UNIT" || return 1
       ;;
     *) return 1 ;;
@@ -1364,12 +1457,52 @@ finish_rollback_socket() {
   return 0
 }
 
+# Active, NRestarts exactly 0, the bundle version, and the socket when this
+# command enabled it. Prints the success lines. Does not restart.
+# Every status is checked explicitly: callers run under `||` where set -e is off.
+require_running_version() {
+  _expect=$1
+  _st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+  if [ "$_st" != "active" ]; then
+    say "verify: agent is ${_st:-unknown}"
+    return 1
+  fi
+  _re=$(systemctl show -p NRestarts --value bot-agent.service 2>/dev/null)
+  _rc=$?
+  if [ "$_rc" != "0" ] || [ "$_re" != "0" ]; then
+    say "verify: NRestarts is not 0"
+    return 1
+  fi
+  if [ "$SOCKET_VERIFY" = "1" ]; then
+    _sst=$(systemctl is-active "$SOCKET_UNIT" 2>/dev/null || true)
+    if [ "$_sst" != "active" ]; then
+      say "verify: runner socket is ${_sst:-unknown}"
+      return 1
+    fi
+  fi
+  _bin=$(hostpath /usr/local/bin/bot-agent)
+  _got=$("$_bin" version)
+  _rc=$?
+  if [ "$_rc" != "0" ]; then
+    return 1
+  fi
+  if [ "$_got" != "$_expect" ]; then
+    say "verify: version ${_got} != ${_expect}"
+    return 1
+  fi
+  say "verify: active, NRestarts 0, version ${_got}"
+  if [ "$SOCKET_VERIFY" = "1" ]; then
+    say "verify: runner socket active"
+  fi
+  return 0
+}
+
 # Restart and require NRestarts exactly 0 only when the host is enrolled.
-# Every status is checked explicitly: this runs under `||` where set -e is off.
 verify_active_version() {
   _expect=$1
   if host_enrolled; then
     systemctl reset-failed bot-agent.service >/dev/null 2>&1 || true
+    say "systemctl restart bot-agent.service"
     if ! systemctl restart bot-agent.service; then
       say "verify: restart failed"
       return 1
@@ -1379,27 +1512,10 @@ verify_active_version() {
         return 1
       fi
     fi
-    _st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
-    if [ "$_st" != "active" ]; then
-      say "verify: agent is ${_st:-unknown}"
-      return 1
-    fi
-    _re=$(systemctl show -p NRestarts --value bot-agent.service 2>/dev/null)
-    _rc=$?
-    if [ "$_rc" != "0" ] || [ "$_re" != "0" ]; then
-      say "verify: NRestarts is not 0"
-      return 1
-    fi
-    if [ "$SOCKET_VERIFY" = "1" ]; then
-      _sst=$(systemctl is-active "$SOCKET_UNIT" 2>/dev/null || true)
-      if [ "$_sst" != "active" ]; then
-        say "verify: runner socket is ${_sst:-unknown}"
-        return 1
-      fi
-    fi
-  else
-    say "not enrolled: agent not restarted"
+    require_running_version "$_expect" || return 1
+    return 0
   fi
+  say "not enrolled: agent not restarted"
   _bin=$(hostpath /usr/local/bin/bot-agent)
   _got=$("$_bin" version)
   _rc=$?
@@ -1633,11 +1749,10 @@ rollback_armed_now() {
   _kind=$1
   _back=
   say "rolling back"
+  # A failed socket stop must not skip the file restore.
+  begin_rollback_socket || true
   _rb=0
-  begin_rollback_socket || _rb=$?
-  if [ "$_rb" = "0" ]; then
-    restore_prev || _rb=$?
-  fi
+  restore_prev || _rb=$?
   if [ "$_rb" = "0" ]; then
     systemctl daemon-reload || true
     finish_rollback_socket || _rb=$?
@@ -1659,10 +1774,11 @@ rollback_armed_now() {
 
 # Restore the previous set, verify it, and only then delete .prev.
 rollback_unverified() {
-  ROLLBACK_ARMED=0
   say "$1"
-  begin_rollback_socket || fail "rollback failed"
+  # Stay armed until restore_prev returns. A socket-stop failure still restores.
+  begin_rollback_socket || true
   restore_prev || fail "rollback failed"
+  ROLLBACK_ARMED=0
   systemctl daemon-reload || fail "daemon-reload failed"
   finish_rollback_socket || fail "rollback failed"
   _back=$(record_version "$RECORD")
@@ -1766,6 +1882,7 @@ do_rollback() {
   if [ "$DRY" = "1" ]; then
     begin_rollback_socket || fail "runner socket update failed"
     restore_prev || fail "rollback failed"
+    prepare_dirs || fail "directories failed"
     say "dry-run: systemctl daemon-reload"
     finish_rollback_socket || fail "runner socket update failed"
     say_restart_plan
@@ -1778,8 +1895,11 @@ do_rollback() {
   # Disable runs before that restore: the unit file has to still exist.
   ROLLBACK_KIND=rollback
   ROLLBACK_ARMED=1
-  begin_rollback_socket || fail "runner socket update failed"
+  _sock=0
+  begin_rollback_socket || _sock=$?
   restore_prev || fail "rollback failed"
+  ROLLBACK_ARMED=0
+  prepare_dirs || fail "directories failed"
   systemctl daemon-reload || fail "daemon-reload failed"
   finish_rollback_socket || fail "runner socket update failed"
   _rc=0
@@ -1787,7 +1907,9 @@ do_rollback() {
   if [ "$_rc" != "0" ]; then
     fail "rollback verify failed"
   fi
-  ROLLBACK_ARMED=0
+  if [ "$_sock" != "0" ]; then
+    fail "runner socket update failed"
+  fi
   discard_prevs || fail "could not remove backups"
   say "summary: rolled back ${_old}"
 }
@@ -1896,7 +2018,7 @@ remove_containers() {
     say "left in place: containers not listed (docker absent)"
     return 0
   fi
-  _lines=$(docker ps -a --filter label=dev.deploybot.owner --format '{{.ID}} {{.Names}}') || {
+  _lines=$(docker ps -a --filter label=dev.deploybot.owner=bot-agent --format '{{.ID}} {{.Names}}') || {
     if [ "$REMOVE_WL" = "1" ]; then
       say "containers could not be listed"
       return 1
@@ -2042,8 +2164,8 @@ do_remove() {
   stop_runner_instances || fail "could not stop runner instances"
   _wl=0
   remove_containers || _wl=1
-  remove_labelled volume 1 volume ls --filter label=dev.deploybot.owner --format '{{.Name}}' || _wl=1
-  remove_labelled network 0 network ls --filter label=dev.deploybot.owner --format '{{.Name}}' || _wl=1
+  remove_labelled volume 1 volume ls --filter label=dev.deploybot.owner=bot-agent --format '{{.Name}}' || _wl=1
+  remove_labelled network 0 network ls --filter label=dev.deploybot.owner=bot-agent --format '{{.Name}}' || _wl=1
   if [ "$_wl" != "0" ]; then
     fail "could not remove workloads"
   fi
@@ -2053,13 +2175,13 @@ do_remove() {
       say "systemctl failed: disable --now bot-agent.service"
       REMOVE_INCOMPLETE=1
     fi
-    if ! systemctl disable --now bot-agent-runner.socket; then
-      say "systemctl failed: disable --now bot-agent-runner.socket"
-      REMOVE_INCOMPLETE=1
-    fi
   else
     say "dry-run: systemctl disable --now bot-agent.service"
-    say "dry-run: systemctl disable --now bot-agent-runner.socket"
+  fi
+  # Absent socket unit is success, including systemd 252's non-zero disable.
+  if ! run_socket_action disable; then
+    say "systemctl failed: disable --now ${SOCKET_UNIT}"
+    REMOVE_INCOMPLETE=1
   fi
   delete_managed_files
   if [ "$PURGE" = "1" ]; then
@@ -2112,6 +2234,209 @@ do_remove() {
   fi
 }
 
+# Same drop-in install --insecure-dev writes. Refuses a symlink.
+install_insecure_dropin() {
+  _path=/etc/systemd/system/bot-agent.service.d/insecure-dev.conf
+  _dd=$(hostpath /etc/systemd/system/bot-agent.service.d)
+  _dest=$(hostpath "$_path")
+  refuse_dir_symlink "$_dd" "/etc/systemd/system/bot-agent.service.d" || return 1
+  if [ "$DRY" = "1" ]; then
+    say "dry-run: mkdir /etc/systemd/system/bot-agent.service.d mode 0755 owner root:root"
+    say "dry-run: write ${_path} mode 0644 owner root:root"
+    return 0
+  fi
+  ensure_owned_dir "$_dd" "/etc/systemd/system/bot-agent.service.d" 0755 root:root || return 1
+  if [ -h "$_dest" ]; then
+    fail "refusing symlink ${_path}"
+  fi
+  atomic_start "$_dest" "$_path" || return 1
+  write_dropin "$ATOMIC_TMP" || return 1
+  atomic_finish 0644 root:root || return 1
+  require_mode "$_dest" 0644
+  return 0
+}
+
+# Restart when the unit is already active. Otherwise enable and start it.
+# Dry-run only reads is-active.
+enroll_start_agent() {
+  _st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+  if [ "$_st" = "active" ]; then
+    if [ "$DRY" = "1" ]; then
+      say "dry-run: systemctl restart bot-agent.service"
+      return 0
+    fi
+    say "systemctl restart bot-agent.service"
+    systemctl restart bot-agent.service || return 1
+    return 0
+  fi
+  if [ "$DRY" = "1" ]; then
+    say "dry-run: systemctl enable --now bot-agent.service"
+    return 0
+  fi
+  say "systemctl enable --now bot-agent.service"
+  systemctl enable --now bot-agent.service || return 1
+  return 0
+}
+
+# Trim spaces and tabs on $_trim. Matches strings.TrimSpace for those bytes.
+trim_spaces() {
+  _tab=$(printf '\t')
+  while :; do
+    case "$_trim" in
+      ' '*|"$_tab"*) _trim=${_trim#?} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$_trim" in
+      *' '|*"$_tab") _trim=${_trim%?} ;;
+      *) break ;;
+    esac
+  done
+  _tab=
+}
+
+# $_q includes the surrounding quotes. Result is $_uq. Trailing backslash fails.
+# One backslash drops itself and keeps the next byte, same as parseEnv's unquote.
+env_unquote() {
+  _inner=${_q#\"}
+  _inner=${_inner%\"}
+  _uq=
+  _esc=0
+  # shellcheck disable=SC1003 # the byte is one backslash, the env escape character
+  _bs=$(printf '\\')
+  while [ -n "$_inner" ]; do
+    _rest=${_inner#?}
+    _c=${_inner%"$_rest"}
+    _inner=$_rest
+    if [ "$_esc" = "1" ]; then
+      _uq=${_uq}${_c}
+      _esc=0
+      continue
+    fi
+    if [ "$_c" = "$_bs" ]; then
+      _esc=1
+      continue
+    fi
+    _uq=${_uq}${_c}
+  done
+  _bs=
+  _inner=
+  _rest=
+  _c=
+  if [ "$_esc" = "1" ]; then
+    _uq=
+    _esc=
+    return 1
+  fi
+  _esc=
+  return 0
+}
+
+# Same rules as parseEnv: trim, one leading "export ", trim the key, unquote.
+# A join-token key counts whatever its value. Host and credential ids must be
+# non-empty after unquoting. A line the agent would reject is not ready.
+# The line and value variables are cleared before return. A symlink is not ready.
+env_credential_ready() {
+  _f=$1
+  if [ -h "$_f" ] || [ ! -f "$_f" ]; then
+    return 1
+  fi
+  _host=0
+  _cid=0
+  _join=0
+  _bad=0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _trim=$_line
+    trim_spaces
+    _line=$_trim
+    case "$_line" in
+      ''|\#*) continue ;;
+    esac
+    case "$_line" in
+      'export '*) _line=${_line#export } ;;
+    esac
+    case "$_line" in
+      *=*) ;;
+      *) _bad=1; break ;;
+    esac
+    _key=${_line%%=*}
+    _val=${_line#*=}
+    _trim=$_key
+    trim_spaces
+    _key=$_trim
+    _trim=$_val
+    trim_spaces
+    _val=$_trim
+    _tab=$(printf '\t')
+    case "$_key" in
+      ''|*' '*|*"$_tab"*) _bad=1 ;;
+    esac
+    _tab=
+    if [ "$_bad" = "1" ]; then
+      break
+    fi
+    case "$_val" in
+      \"*\")
+        _q=$_val
+        if env_unquote; then
+          _val=$_uq
+        else
+          _bad=1
+          break
+        fi
+        ;;
+    esac
+    case "$_key" in
+      BOT_AGENT_HOST_ID)
+        if [ -n "$_val" ]; then
+          _host=1
+        else
+          _host=0
+        fi
+        ;;
+      BOT_AGENT_CREDENTIAL_ID)
+        if [ -n "$_val" ]; then
+          _cid=1
+        else
+          _cid=0
+        fi
+        ;;
+      BOT_AGENT_JOIN_TOKEN) _join=1 ;;
+    esac
+  done < "$_f"
+  _line=
+  _trim=
+  _key=
+  _val=
+  _q=
+  _uq=
+  _inner=
+  _rest=
+  _c=
+  if [ "$_bad" = "1" ]; then
+    return 1
+  fi
+  if [ "$_host" = "1" ] && [ "$_cid" = "1" ] && [ "$_join" = "0" ]; then
+    return 0
+  fi
+  return 1
+}
+
+wait_enroll_persisted() {
+  _i=0
+  while :; do
+    if env_credential_ready "$ENV_DEST"; then
+      return 0
+    fi
+    if [ "$_i" -ge "$ENROLL_WAIT" ]; then
+      return 1
+    fi
+    sleep 1 || return 1
+    _i=$((_i + 1))
+  done
+}
+
 do_enroll() {
   _agent=$(hostpath /usr/local/bin/bot-agent)
   if [ ! -x "$_agent" ]; then
@@ -2123,18 +2448,22 @@ do_enroll() {
   esac
   if [ "$DRY" = "1" ]; then
     say "dry-run: exec bot-agent init --server <url> --join-token-stdin --env-file ${ENV_HOST}"
-    say "dry-run: systemctl enable --now bot-agent.service"
+    if [ "$INSECURE" = "1" ]; then
+      install_insecure_dropin || fail "drop-in failed"
+    fi
+    enroll_start_agent || fail "enroll failed"
     if [ "$RUNNER" = "1" ] || [ "$WANT_RUNNER" = "1" ]; then
-      say "dry-run: systemctl enable --now bot-agent-runner.socket"
+      run_socket_action enable || fail "enroll failed"
     fi
     say "summary: dry-run enroll"
     exit 0
   fi
-  mark_mutated
+  # init is the first write. A refusal here leaves the host unchanged.
   _init_env=
   if [ "$INSECURE" = "1" ] || [ -f "$(hostpath /etc/systemd/system/bot-agent.service.d/insecure-dev.conf)" ]; then
     _init_env=1
   fi
+  _enr=0
   if [ -t 0 ]; then
     printf '%s' "join token (not echoed): " >&2
     STTY_SAVED=$(stty -g) || fail "stty failed"
@@ -2143,36 +2472,54 @@ do_enroll() {
     restore_stty
     printf '\n' >&2
     # printf is a shell builtin in dash, so the token is not in any process's argv.
-    _enr=0
     if [ "$_init_env" = "1" ]; then
       printf '%s\n' "$_tok" | BOT_AGENT_INSECURE_DEV=1 "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST" || _enr=$?
     else
       printf '%s\n' "$_tok" | "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST" || _enr=$?
     fi
     _tok=
-    if [ "$_enr" != "0" ]; then
-      fail "enroll failed"
-    fi
   else
     if [ "$_init_env" = "1" ]; then
-      BOT_AGENT_INSECURE_DEV=1 "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST"
+      BOT_AGENT_INSECURE_DEV=1 "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST" || _enr=$?
     else
-      "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST"
+      "$_agent" init --server "$SERVER" --join-token-stdin --env-file "$ENV_DEST" || _enr=$?
     fi
   fi
+  if [ "$_enr" != "0" ]; then
+    precheck_fail "enroll failed"
+  fi
+  mark_mutated
+  if [ "$INSECURE" = "1" ]; then
+    install_insecure_dropin || fail "drop-in failed"
+  fi
+  if [ -h "$ENV_DEST" ]; then
+    fail "refusing symlink ${ENV_HOST}"
+  fi
   if [ -f "$ENV_DEST" ]; then
-    chown bot-agent:bot-agent "$ENV_DEST" || fail "env chown failed"
+    # Mode while the inode is still root-owned. After chown, do not chmod or
+    # stat this path: both follow a symlink the new owner can plant.
     chmod 0600 "$ENV_DEST" || fail "env chmod failed"
-    require_mode "$ENV_DEST" 0600
+    if [ -h "$ENV_DEST" ] || [ ! -f "$ENV_DEST" ]; then
+      fail "refusing symlink ${ENV_HOST}"
+    fi
+    chown -h bot-agent:bot-agent "$ENV_DEST" || fail "env chown failed"
   fi
-  systemctl daemon-reload
-  systemctl enable --now bot-agent.service
+  systemctl daemon-reload || fail "daemon-reload failed"
+  enroll_start_agent || fail "enroll failed"
   if [ "$RUNNER" = "1" ] || [ "$WANT_RUNNER" = "1" ]; then
-    systemctl enable --now bot-agent-runner.socket
+    run_socket_action enable || fail "enroll failed"
   fi
-  _st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
-  if [ "$_st" != "active" ]; then
-    fail "agent is not active"
+  if ! wait_enroll_persisted; then
+    fail "enroll failed: credential not persisted"
+  fi
+  systemctl reset-failed bot-agent.service >/dev/null 2>&1 || true
+  if [ "$SETTLE" != "0" ]; then
+    if ! sleep "$SETTLE"; then
+      fail "enroll failed"
+    fi
+  fi
+  if ! require_running_version "$VER"; then
+    fail "enroll failed: agent did not stay up. Run systemctl stop bot-agent, move ${ENV_HOST} aside, then enroll again"
   fi
   say "summary: enrolled"
 }

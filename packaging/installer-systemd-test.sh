@@ -3,10 +3,12 @@
 # Starts a debian:12 container with systemd as PID 1, copies linux/arm64
 # bundles built from this tree, and runs AC1, AC2, AC4, AC5, AC6, and AC7,
 # plus a hand-installed enrolled host upgraded with --force --runner,
-# and an enrolled host with no socket whose upgrade --runner fails
-# verification and rolls the socket back off.
-# AC3 checks that enroll feeds the token to `bot-agent init` on stdin and
-# that the token is not in the script output or process arguments.
+# an enrolled host with no socket whose upgrade --runner fails
+# verification and rolls the socket back off, and a real enrolment
+# against an in-container fake API.
+# AC3 checks that enroll feeds the token to `bot-agent init` on stdin,
+# that the token is not in the script output or process arguments, and
+# that an unreachable server exits 1 because the credential is not persisted.
 # This script removes only the container it creates. It does not touch the
 # Mac's /etc, /usr, systemd, or Docker.
 set -eu
@@ -309,7 +311,7 @@ run_ok "AC1 install" /opt/bundles/b020/install.sh install --runner --runner-conf
 [ "$(stat -c %a /etc/systemd/system/bot-agent.service)" = "644" ] || die "unit mode"
 [ "$(stat -c %a /etc/bot-agent/runner.toml)" = "644" ] || die "policy mode"
 [ "$(stat -c %U:%G /etc/bot-agent/runner.toml)" = "root:root" ] || die "policy owner"
-[ "$(stat -c %a /etc/bot-agent)" = "750" ] || die "etc mode"
+[ "$(stat -c %a /etc/bot-agent)" = "1770" ] || die "etc mode"
 [ "$(stat -c %U:%G /etc/bot-agent)" = "root:bot-agent" ] || die "etc owner"
 [ "$(stat -c %a /var/lib/bot-agent-installer)" = "700" ] || die "state mode"
 [ "$(stat -c %U:%G /var/lib/bot-agent-installer)" = "root:root" ] || die "state owner"
@@ -328,6 +330,7 @@ dry_case 0 /opt/bundles/b020/install.sh install --dry-run --runner --runner-conf
 grep -F 'already installed, nothing changed' /tmp/dry.out >/dev/null || die "AC7 reinstall dry-run"
 dry_case 0 /opt/bundles/b020/install.sh enroll --dry-run --server wss://example.invalid/agent/v1/ws
 grep -F 'summary: dry-run enroll' /tmp/dry.out >/dev/null || die "AC7 enroll dry-run plan"
+grep -F 'dry-run: systemctl enable --now bot-agent.service' /tmp/dry.out >/dev/null || die "AC7 enroll dry-run did not plan enable"
 dry_case 0 /opt/bundles/b021/install.sh upgrade --dry-run
 grep -F 'dry-run: write /usr/local/bin/bot-agent mode 0755 owner root:root' /tmp/dry.out >/dev/null || die "AC7 upgrade dry-run plan"
 grep -F 'summary: dry-run upgrade' /tmp/dry.out >/dev/null || die "AC7 upgrade dry-run summary"
@@ -350,9 +353,10 @@ grep -q '# local' /etc/systemd/system/bot-agent.service || die "local edit disap
 cp /opt/bundles/b020/units/bot-agent.service /etc/systemd/system/bot-agent.service
 chmod 0644 /etc/systemd/system/bot-agent.service
 
-# AC3. The server is unreachable. init must consume the token; the agent
-# does not have to complete a handshake. ps is argv only: systemd's
-# EnvironmentFile puts the token in the process environment on purpose.
+# AC3. The server is unreachable, so the credential is never written.
+# init must consume the token. The agent is started, then enroll exits 1.
+# ps is argv only: systemd's EnvironmentFile puts the token in the process
+# environment on purpose.
 set +e
 out=$(printf '%s\n' "$token" | /opt/bundles/b020/install.sh enroll --server 'wss://example.invalid/agent/v1/ws' 2>&1)
 code=$?
@@ -373,10 +377,11 @@ chmod 0600 /opt/enrolled.env
 if ! grep -q 'BOT_AGENT_SERVER_URL=wss://example.invalid/agent/v1/ws' /etc/bot-agent/env; then
   die "env missing server url"
 fi
-if [ "$code" != 0 ]; then
+if [ "$code" != 1 ]; then
   printf '%s\n' "$out" >&2
-  die "enroll exited $code"
+  die "unreachable enroll exited $code"
 fi
+have "$out" "enroll failed: credential not persisted" "AC3 persist"
 st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
 [ "$st" = "active" ] || die "agent is $st after enroll"
 
@@ -397,6 +402,8 @@ id2=$(systemctl show -p InvocationID --value bot-agent.service || true)
 if [ -z "$id2" ] || [ "$id1" = "$id2" ]; then
   die "upgrade did not restart the agent"
 fi
+grep -F 'systemctl restart bot-agent.service' /tmp/up.out >/dev/null || die "AC4 upgrade missing restart line"
+grep -F 'verify: active, NRestarts 0, version 0.2.1' /tmp/up.out >/dev/null || die "AC4 upgrade missing verify line"
 
 # Rollback dry-run while .prev exists lists restores and changes nothing.
 before=$(snap)
@@ -407,6 +414,9 @@ grep -F 'dry-run: restore /usr/local/bin/bot-agent from /usr/local/bin/bot-agent
 
 # AC5.
 run_ok "AC5 rollback" /opt/bundles/b021/install.sh rollback >/tmp/back.out
+grep -F 'systemctl restart bot-agent.service' /tmp/back.out >/dev/null || die "AC5 rollback missing restart line"
+grep -F 'verify: active, NRestarts 0, version 0.2.0' /tmp/back.out >/dev/null || die "AC5 rollback missing verify line"
+[ "$(stat -c %a /etc/bot-agent)" = "1770" ] || die "etc mode after rollback"
 [ "$(/usr/local/bin/bot-agent version)" = "0.2.0" ] || die "rollback version"
 cmp -s /etc/systemd/system/bot-agent.service /opt/bundles/b020/units/bot-agent.service || die "rolled-back unit bytes"
 [ ! -e /usr/local/bin/bot-agent.prev ] || die ".prev remained"
@@ -583,6 +593,12 @@ have "$out" "installed: 0.2.0 (not installed by the installer)" "hand check inst
 out=$(run_ok "hand upgrade" /opt/bundles/b021/install.sh upgrade --force --runner)
 have "$out" "installed: 0.2.0 (not installed by the installer)" "hand upgrade installed line"
 have "$out" "summary: upgraded 0.2.0 -> 0.2.1" "hand upgrade summary"
+have "$out" "systemctl enable --now bot-agent-runner.socket" "hand upgrade socket line"
+have "$out" "systemctl restart bot-agent.service" "hand upgrade restart line"
+have "$out" "verify: active, NRestarts 0, version 0.2.1" "hand upgrade verify"
+have "$out" "verify: runner socket active" "hand upgrade socket verify"
+[ "$(stat -c %a /etc/bot-agent)" = "1770" ] || die "hand upgrade etc mode"
+[ "$(stat -c %U:%G /etc/bot-agent)" = "root:bot-agent" ] || die "hand upgrade etc owner"
 [ "$(/usr/local/bin/bot-agent version)" = "0.2.1" ] || die "hand upgrade version"
 en=$(systemctl is-enabled bot-agent-runner.socket 2>/dev/null || true)
 [ "$en" = "enabled" ] || die "hand socket is-enabled: ${en:-empty}"
@@ -653,6 +669,164 @@ esac
 if [ -e /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket ] || [ -h /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket ]; then
   die "no-socket rollback left sockets.target.wants"
 fi
+# Real enrolment against the in-container fake API. The host above has no
+# runner unit file, so install a fresh 0.2.0 tree first. The unit is inactive,
+# so enroll enables it. A later restart must connect again.
+systemctl disable --now bot-agent.service >/dev/null 2>&1 || true
+systemctl disable --now bot-agent-runner.socket >/dev/null 2>&1 || true
+rm -f \
+  /usr/local/bin/bot-agent \
+  /usr/local/bin/bot-agent.prev \
+  /usr/local/libexec/bot-agent-runner \
+  /etc/systemd/system/bot-agent.service \
+  /etc/systemd/system/bot-agent.service.prev \
+  /etc/systemd/system/bot-agent-runner.socket \
+  "/etc/systemd/system/bot-agent-runner@.service" \
+  /etc/tmpfiles.d/bot-agent-runner.conf \
+  /etc/systemd/system/multi-user.target.wants/bot-agent.service \
+  /etc/systemd/system/sockets.target.wants/bot-agent-runner.socket
+rm -rf \
+  /etc/bot-agent \
+  /var/lib/bot-agent \
+  /var/lib/bot-agent-installer \
+  /etc/systemd/system/bot-agent.service.d
+systemctl daemon-reload || die "real enroll setup: daemon-reload"
+run_ok "real enroll install" /opt/bundles/b020/install.sh install --runner --runner-config /opt/ok.toml >/tmp/real-install.out
+[ "$(stat -c '%a %U:%G' /etc/bot-agent)" = "1770 root:bot-agent" ] || die "real enroll install etc mode"
+en=$(systemctl is-enabled bot-agent.service 2>/dev/null || true)
+[ "$en" = "disabled" ] || die "real enroll install left the agent $en"
+
+chmod 0755 /opt/fakeapi
+rm -f /tmp/fake.url /tmp/fake.count /tmp/fakeapi.log
+BOT_AGENT_FAKE_URL_FILE=/tmp/fake.url BOT_AGENT_FAKE_COUNT_FILE=/tmp/fake.count \
+  /opt/fakeapi -test.run '^TestServe$' -test.timeout 0 >/tmp/fakeapi.log 2>&1 &
+fake_pid=$!
+i=0
+while [ "$i" -lt 20 ]; do
+  if [ -s /tmp/fake.url ]; then
+    break
+  fi
+  if ! kill -0 "$fake_pid" 2>/dev/null; then
+    cat /tmp/fakeapi.log >&2 || true
+    die "fake api exited"
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+[ -s /tmp/fake.url ] || die "fake api did not write a url"
+fake_url=$(cat /tmp/fake.url)
+bare=${fake_url%/agent/v1/ws}
+[ "$bare" != "$fake_url" ] || die "fake url has no agent path"
+case "$bare" in
+  ws://127.0.0.1:*) ;;
+  *) die "fake url is not loopback" ;;
+esac
+
+live_token=LiveEnrollToken12345
+set +e
+out=$(printf '%s\n' "$live_token" | /opt/bundles/b020/install.sh enroll --insecure-dev --server "$bare" 2>&1)
+code=$?
+set -e
+case "$out" in
+  *"$live_token"*) die "token in real enroll output" ;;
+esac
+ps -eo args > /tmp/ps.args
+if grep -q "$live_token" /tmp/ps.args; then
+  rm -f /tmp/ps.args
+  die "token in real enroll process arguments"
+fi
+rm -f /tmp/ps.args
+if grep -q "$live_token" /tmp/fakeapi.log; then
+  die "token in fake api log"
+fi
+if [ "$code" != 0 ]; then
+  _journal=$(journalctl -u bot-agent --no-pager -n 40 2>&1 || true)
+  case "$_journal" in
+    *"$live_token"*) die "real enroll failed and the journal has the token" ;;
+  esac
+  printf '%s\n' "$out" >&2
+  printf '%s\n' "$_journal" >&2
+  die "real enroll exited $code"
+fi
+have "$out" "systemctl enable --now bot-agent.service" "real enroll enable"
+have "$out" "systemctl enable --now bot-agent-runner.socket" "real enroll socket"
+have "$out" "verify: active, NRestarts 0, version 0.2.0" "real enroll verify"
+have "$out" "verify: runner socket active" "real enroll socket verify"
+have "$out" "summary: enrolled" "real enroll summary"
+case "$out" in
+  *"systemctl restart bot-agent.service"*) die "fresh enroll restarted" ;;
+esac
+[ "$(stat -c '%a %U:%G' /etc/bot-agent)" = "1770 root:bot-agent" ] || die "real enroll etc mode"
+[ "$(stat -c '%U:%G %a' /etc/bot-agent/env)" = "bot-agent:bot-agent 600" ] || die "real enroll env mode"
+if ! grep -F -x "BOT_AGENT_SERVER_URL=${fake_url}" /etc/bot-agent/env >/dev/null; then
+  die "stored server url is not the completed path"
+fi
+awk '
+  /^BOT_AGENT_HOST_ID=11111111-1111-1111-1111-111111111111$/ { h=1 }
+  /^BOT_AGENT_CREDENTIAL_ID=22222222-2222-2222-2222-222222222222$/ { c=1 }
+  /^BOT_AGENT_CREDENTIAL=.+/ { k=1 }
+  /^BOT_AGENT_JOIN_TOKEN=/ { j=1 }
+  END { exit !(h && c && k && !j) }
+' /etc/bot-agent/env || die "env keys after real enroll"
+if ! grep -qx 'Environment=BOT_AGENT_INSECURE_DEV=1' /etc/systemd/system/bot-agent.service.d/insecure-dev.conf; then
+  die "real enroll drop-in"
+fi
+
+wait_hello() {
+  _want=$1
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    _n=0
+    if [ -s /tmp/fake.count ]; then
+      _n=$(cat /tmp/fake.count)
+    fi
+    case "$_n" in
+      ''|*[!0-9]*) _n=0 ;;
+    esac
+    if [ "$_n" -ge "$_want" ]; then
+      printf '%s\n' "$_n"
+      return 0
+    fi
+    _i=$((_i + 1))
+    sleep 1
+  done
+  return 1
+}
+n1=$(wait_hello 1) || die "no hello after enroll"
+systemctl restart bot-agent || die "restart after enroll"
+n2=$(wait_hello $((n1 + 1))) || die "no hello after restart"
+[ "$n2" -gt "$n1" ] || die "hello count did not increase"
+st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
+[ "$st" = "active" ] || die "agent is $st after restart"
+re=$(systemctl show -p NRestarts --value bot-agent.service) || die "NRestarts show failed"
+[ "$re" = "0" ] || die "NRestarts after restart: ${re:-empty}"
+
+env_sum=$(sha256sum /etc/bot-agent/env)
+id_before=$(systemctl show -p InvocationID --value bot-agent.service || true)
+other_token=SecondEnrollToken9876
+set +e
+out=$(printf '%s\n' "$other_token" | /opt/bundles/b020/install.sh enroll --insecure-dev --server "$bare" 2>&1)
+code=$?
+set -e
+case "$out" in
+  *"$live_token"*|*"$other_token"*) die "token in second enroll output" ;;
+esac
+[ "$code" != 0 ] || die "second enroll succeeded"
+have "$out" "enroll failed" "second enroll"
+have "$out" "nothing changed" "second enroll changed something"
+have "$out" "env file already has a credential" "second enroll reason"
+case "$out" in
+  *"summary: enrolled"*) die "second enroll claimed success" ;;
+  *"systemctl restart bot-agent.service"*) die "second enroll restarted" ;;
+esac
+env_sum2=$(sha256sum /etc/bot-agent/env)
+[ "$env_sum" = "$env_sum2" ] || die "second enroll changed the env"
+id_after=$(systemctl show -p InvocationID --value bot-agent.service || true)
+[ -n "$id_before" ] && [ "$id_before" = "$id_after" ] || die "second enroll changed the running agent"
+if grep -q "$other_token" /tmp/fakeapi.log; then
+  die "second token in fake api log"
+fi
+kill "$fake_pid" >/dev/null 2>&1 || true
 printf '%s\n' "inner checks passed"
 EOF
 
@@ -672,6 +846,10 @@ EOF
   cd "$work/sleeper-src"
   go mod init example.com/sleeper
   CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$work/sleeper" .
+)
+(
+  cd "$repo"
+  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -o "$work/fakeapi" ./packaging/testdata/fakeapi
 )
 
 podman run -d --name "$name" --systemd=always --privileged bot-agent-installer-test:debian12 >/dev/null
@@ -700,6 +878,8 @@ podman cp "$work/b022" "$name:/opt/bundles/b022"
 podman cp "$work/real-bot-agent" "$name:/opt/bot-agent-real"
 podman cp "$work/sleeper" "$name:/opt/sleeper"
 podman exec "$name" chmod 0755 /opt/sleeper
+podman cp "$work/fakeapi" "$name:/opt/fakeapi"
+podman exec "$name" chmod 0755 /opt/fakeapi
 podman cp "$work/inner.sh" "$name:/opt/inner.sh"
 podman exec "$name" /bin/sh /opt/inner.sh
 printf '%s\n' "installer systemd test passed"

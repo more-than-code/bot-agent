@@ -37,6 +37,64 @@ func TestLoadRefusesModeAndSymlink(t *testing.T) {
 	}
 }
 
+func TestCompleteServerURL(t *testing.T) {
+	cases := []struct {
+		in, out string
+	}{
+		{"ws://h:p", "ws://h:p/agent/v1/ws"},
+		{"ws://h:p/", "ws://h:p/agent/v1/ws"},
+		{"wss://h", "wss://h/agent/v1/ws"},
+		{"wss://example.invalid/custom", "wss://example.invalid/custom"},
+		{"ws://h:p/custom", "ws://h:p/custom"},
+		{"wss://example.invalid/agent/v1/ws", "wss://example.invalid/agent/v1/ws"},
+	}
+	for _, c := range cases {
+		if got := completeServerURL(c.in); got != c.out {
+			t.Fatalf("%s -> %s, want %s", c.in, got, c.out)
+		}
+	}
+
+	clearEnv(t)
+	token := "join-token-test-value"
+	path := filepath.Join(t.TempDir(), "env")
+	if err := initFrom([]string{"--server", "wss://h", "--join-token-stdin", "--env-file", path}, strings.NewReader(token+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerURL != "wss://h/agent/v1/ws" {
+		t.Fatalf("stored %s", cfg.ServerURL)
+	}
+
+	explicit := "wss://example.invalid/custom"
+	path = filepath.Join(t.TempDir(), "env")
+	if err := initFrom([]string{"--server", explicit, "--join-token-stdin", "--env-file", path}, strings.NewReader(token+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerURL != explicit {
+		t.Fatalf("stored %s", cfg.ServerURL)
+	}
+
+	t.Setenv("BOT_AGENT_INSECURE_DEV", "1")
+	path = filepath.Join(t.TempDir(), "env")
+	if err := initFrom([]string{"--server", "ws://127.0.0.1:9", "--join-token-stdin", "--env-file", path}, strings.NewReader(token+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerURL != "ws://127.0.0.1:9/agent/v1/ws" {
+		t.Fatalf("stored %s", cfg.ServerURL)
+	}
+}
+
 func TestServerURL(t *testing.T) {
 	if err := ValidateServerURL("ws://127.0.0.1:1/agent/v1/ws", false); err == nil {
 		t.Fatal("ws without the dev flag")
