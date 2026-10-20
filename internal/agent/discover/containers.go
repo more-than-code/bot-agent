@@ -84,6 +84,7 @@ func ApplyContainers(res Result, items []images.ContainerInfo, hostID string, pr
 		}
 		used[display] = true
 		rows = append(rows, containerRow{display: display, c: c, owned: true})
+		noteContainerHealth(&res, display, c.info.Health)
 	}
 	sort.Slice(other, func(i, j int) bool { return other[i].name < other[j].name })
 	for _, c := range other {
@@ -100,6 +101,7 @@ func ApplyContainers(res Result, items []images.ContainerInfo, hostID string, pr
 		}
 		used[display] = true
 		rows = append(rows, containerRow{display: display, c: c, owned: false})
+		noteContainerHealth(&res, display, c.info.Health)
 	}
 	renamed := map[string]string{}
 	var kept []protocol.Discovered
@@ -160,6 +162,21 @@ type containerRow struct {
 	display string
 	c       containerCand
 	owned   bool
+}
+
+func noteContainerHealth(res *Result, name string, health *string) {
+	if health == nil {
+		return
+	}
+	switch *health {
+	case "healthy", "unhealthy", "starting":
+	default:
+		return
+	}
+	if res.ContainerHealth == nil {
+		res.ContainerHealth = map[string]string{}
+	}
+	res.ContainerHealth[name] = *health
 }
 
 func trimContainer(name string) string {

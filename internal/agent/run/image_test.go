@@ -693,10 +693,10 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeRunner(t, true, false), PolicyUID: rootUID,
 		Helper: off,
 	})
-	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker || !hello.Programs.Files {
+	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck {
 		t.Fatalf("%+v", hello.Programs)
 	}
-	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) || !strings.Contains(string(raw), `"files":true`) {
+	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) || !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) {
 		t.Fatalf("%s", raw)
 	}
 
@@ -727,10 +727,10 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeImageRunner(t), PolicyUID: rootUID,
 		Helper: on, MachineID: idPath,
 	})
-	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.Programs.Files || !hello.ServicesComplete {
+	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.ServicesComplete {
 		t.Fatalf("programs %+v complete %v", hello.Programs, hello.ServicesComplete)
 	}
-	if !strings.Contains(string(raw), `"files":true`) {
+	if !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) {
 		t.Fatalf("%s", raw)
 	}
 	if strings.Contains(string(raw), "SENTINEL") || strings.Contains(string(raw), "ghcr.io/acme/*") || strings.Contains(string(raw), "port-3031") || strings.Contains(string(raw), "port-6379") {
@@ -763,7 +763,7 @@ func TestHelloOverlappingProjects(t *testing.T) {
 		PolicyPath: path, PolicyUID: rootUID,
 		Helper: off,
 	})
-	if hello.Programs == nil || !hello.Programs.Enabled || hello.Programs.Images || !hello.Programs.Files {
+	if hello.Programs == nil || !hello.Programs.Enabled || hello.Programs.Images || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck {
 		t.Fatalf("%+v", hello.Programs)
 	}
 	if !strings.Contains(string(raw), `"images":false`) {

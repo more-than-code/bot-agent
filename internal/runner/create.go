@@ -3,6 +3,7 @@ package runner
 import (
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -50,6 +51,19 @@ type networkConfigBody struct {
 	EndpointsConfig map[string]endpointBody `json:"EndpointsConfig"`
 }
 
+// healthcheckBody is the Engine ContainerCreate Healthcheck object.
+// API v1.47 already accepts it. Durations are nanoseconds, the same unit as
+// time.Duration. The inner numbers are not omitempty: StartPeriod 0 is sent.
+// Test is "CMD" plus the catalog argv. The key is omitted when the spec has
+// no healthcheck, so the image keeps its own check.
+type healthcheckBody struct {
+	Test        []string `json:"Test"`
+	Interval    int64    `json:"Interval"`
+	Timeout     int64    `json:"Timeout"`
+	Retries     int      `json:"Retries"`
+	StartPeriod int64    `json:"StartPeriod"`
+}
+
 type createBody struct {
 	Image            string              `json:"Image"`
 	Cmd              []string            `json:"Cmd,omitempty"`
@@ -58,6 +72,7 @@ type createBody struct {
 	Labels           map[string]string   `json:"Labels"`
 	ExposedPorts     map[string]emptyObj `json:"ExposedPorts,omitempty"`
 	User             string              `json:"User,omitempty"`
+	Healthcheck      *healthcheckBody    `json:"Healthcheck,omitempty"`
 	HostConfig       hostConfigBody      `json:"HostConfig"`
 	NetworkingConfig networkConfigBody   `json:"NetworkingConfig"`
 }
@@ -160,6 +175,16 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 		mem := int64(*spec.MemoryMB) * 1024 * 1024
 		body.HostConfig.Memory = mem
 		body.HostConfig.MemorySwap = mem
+	}
+	if spec.Healthcheck != nil {
+		hc := spec.Healthcheck
+		body.Healthcheck = &healthcheckBody{
+			Test:        append([]string{"CMD"}, hc.Test...),
+			Interval:    int64(hc.IntervalSec) * int64(time.Second),
+			Timeout:     int64(hc.TimeoutSec) * int64(time.Second),
+			Retries:     hc.Retries,
+			StartPeriod: int64(hc.StartPeriodSec) * int64(time.Second),
+		}
 	}
 	raw, err := marshalJSON(body)
 	if err != nil {

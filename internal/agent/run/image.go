@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"time"
@@ -41,7 +42,7 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 			values[i] = ""
 		}
 	}()
-	tmo := imageTimeout(task.TimeoutSec)
+	tmo := imageBudget(task, req.Spec)
 	deadline := a.now().Add(tmo)
 	tctx, cancel := context.WithTimeout(ctx, tmo)
 	defer cancel()
@@ -63,6 +64,26 @@ func imageTimeout(sec int) time.Duration {
 		sec = maxImageTimeoutSec
 	}
 	return time.Duration(sec) * time.Second
+}
+
+// imageBudget is the deadline for one image task, measured from the start.
+// A service deploy or rollback whose spec has healthcheck waits at least
+// start_period_sec + interval_sec*(retries+1), and at least the frame
+// timeout from imageTimeout. The service spec's own timeout_sec stays 0.
+func imageBudget(task protocol.Task, spec *images.ImageSpec) time.Duration {
+	tmo := imageTimeout(task.TimeoutSec)
+	if task.Kind != "image_deploy" && task.Kind != "image_rollback" {
+		return tmo
+	}
+	if spec == nil || spec.Kind != "service" || spec.Healthcheck == nil {
+		return tmo
+	}
+	hc := spec.Healthcheck
+	floor := time.Duration(hc.StartPeriodSec+hc.IntervalSec*(hc.Retries+1)) * time.Second
+	if floor > tmo {
+		return floor
+	}
+	return tmo
 }
 
 func redactValues(req tasks.ImageReq) []string {
@@ -268,11 +289,99 @@ type healthStop struct {
 }
 
 func (a *agent) waitHealthy(ctx context.Context, deadline time.Time, req tasks.ImageReq, need time.Duration) healthStop {
+	if req.Spec != nil && req.Spec.Kind == "service" && req.Spec.Healthcheck != nil {
+		return a.waitDocker(ctx, deadline, req)
+	}
 	checks := a.checksForEntry(req.Entry, hostPortsOf(req.Spec))
 	if len(checks) == 0 {
 		return a.waitStable(ctx, deadline, req.Project, req.Entry, need)
 	}
 	return a.waitProbes(ctx, deadline, req.Project, req.Entry, checks)
+}
+
+// waitDocker polls container_list for the new container. healthy with the
+// configured checks passing is success. starting and a null health keep
+// waiting. unhealthy, or the deadline, is not healthy, so the caller rolls
+// back. A list or sleep error rolls back only when the task deadline passed
+// inside that call. Any other error, including a parent cancel, is returned
+// and the caller does not roll back.
+func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.ImageReq) healthStop {
+	name, ok := images.ContainerName(req.Project, req.Entry)
+	if !ok {
+		return healthStop{err: errHelper}
+	}
+	checks := a.checksForEntry(req.Entry, hostPortsOf(req.Spec))
+	last := missingStatus()
+	for {
+		if a.expired(ctx, deadline) {
+			return healthStop{last: last}
+		}
+		items, _, err := a.listContainers(ctx)
+		if err != nil {
+			return a.waitFail(ctx, deadline, err, last)
+		}
+		if it, found := findListed(items, name); found {
+			last = statusFromList(it)
+			switch healthOf(it) {
+			case "unhealthy":
+				return healthStop{last: last}
+			case "healthy":
+				if len(checks) == 0 || a.probesOK(ctx, checks) {
+					return healthStop{healthy: true, last: last}
+				}
+			}
+		}
+		if err := a.sleep(ctx, imagePoll); err != nil {
+			return a.waitFail(ctx, deadline, err, last)
+		}
+	}
+}
+
+func healthOf(it images.ContainerInfo) string {
+	if it.Health == nil {
+		return ""
+	}
+	return *it.Health
+}
+
+func findListed(items []images.ContainerInfo, name string) (images.ContainerInfo, bool) {
+	for _, it := range items {
+		n := it.Name
+		if strings.HasPrefix(n, "/") {
+			n = n[1:]
+		}
+		if n == name {
+			return it, true
+		}
+	}
+	return images.ContainerInfo{}, false
+}
+
+func statusFromList(it images.ContainerInfo) images.ImageStatus {
+	st := missingStatus()
+	if knownState(it.State) {
+		st.State = it.State
+	}
+	name := it.Name
+	if strings.HasPrefix(name, "/") {
+		name = name[1:]
+	}
+	if name != "" && !strings.ContainsAny(name, "\r\n\x00/") {
+		st.Container = &name
+	}
+	if it.Digest != nil && images.ValidDigest(*it.Digest) {
+		d := *it.Digest
+		st.Digest = &d
+	}
+	seen := map[int]bool{}
+	for _, p := range it.Ports {
+		if p.HostPort < 1 || p.HostPort > 65535 || seen[p.HostPort] {
+			continue
+		}
+		seen[p.HostPort] = true
+		st.Ports = append(st.Ports, p.HostPort)
+	}
+	return st
 }
 
 func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, entry string, need time.Duration) healthStop {
@@ -285,7 +394,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 		}
 		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
-			return healthStop{err: err, last: last}
+			return a.waitFail(ctx, deadline, err, last)
 		}
 		if code != "" {
 			return healthStop{code: code, last: last}
@@ -307,7 +416,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 			watching = false
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
-			return healthStop{err: err, last: last}
+			return a.waitFail(ctx, deadline, err, last)
 		}
 	}
 }
@@ -320,7 +429,7 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 		}
 		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
-			return healthStop{err: err, last: last}
+			return a.waitFail(ctx, deadline, err, last)
 		}
 		if code != "" {
 			return healthStop{code: code, last: last}
@@ -333,7 +442,7 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 			return healthStop{healthy: true, last: last}
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
-			return healthStop{err: err, last: last}
+			return a.waitFail(ctx, deadline, err, last)
 		}
 	}
 }
@@ -654,6 +763,29 @@ func (a *agent) machineHost() string {
 
 func (a *agent) expired(ctx context.Context, deadline time.Time) bool {
 	if ctx.Err() != nil {
+		return true
+	}
+	return !a.now().Before(deadline)
+}
+
+// waitFail turns a helper or sleep error into a health stop. The task
+// deadline, including one that fires inside the call, rolls back. A parent
+// cancel and any other error stay on the stop so the caller does not.
+func (a *agent) waitFail(ctx context.Context, deadline time.Time, err error, last images.ImageStatus) healthStop {
+	if a.deadlineMiss(ctx, deadline) {
+		return healthStop{last: last}
+	}
+	return healthStop{err: err, last: last}
+}
+
+// deadlineMiss is true when the task deadline has passed. DeadlineExceeded
+// is that deadline even if the fake clock has not reached it. context.Canceled
+// is a parent cancel and is not a deadline.
+func (a *agent) deadlineMiss(ctx context.Context, deadline time.Time) bool {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return true
 	}
 	return !a.now().Before(deadline)

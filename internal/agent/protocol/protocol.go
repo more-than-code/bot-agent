@@ -101,6 +101,11 @@ type Programs struct {
 	Docker     bool     `json:"docker"`
 	// Files is true when this agent and its helper implement v1.5 managed files.
 	Files bool `json:"files"`
+	// DockerHealth is true when this agent emits Docker health samples.
+	// Healthcheck is true when it accepts ImageSpec healthcheck.
+	// Both are sent whenever the programs object is sent.
+	DockerHealth bool `json:"docker_health"`
+	Healthcheck  bool `json:"healthcheck"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.
@@ -148,6 +153,8 @@ type Config struct {
 	MetricsIntervalSec int           `json:"metrics_interval_sec"`
 	ProcessIntervalSec int           `json:"process_interval_sec"`
 	HealthChecks       []HealthCheck `json:"health_checks"`
+	// DockerHealth gates Docker health samples. Absent is false.
+	DockerHealth bool `json:"docker_health"`
 }
 
 // Enroll is the first frame on an unauthenticated connection.

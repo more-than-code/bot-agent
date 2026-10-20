@@ -48,6 +48,10 @@ func TestImageCheckOrder(t *testing.T) {
 		{"logs 2000", on, task(host, "image_logs", nil, live, []byte(`{"project":"acme","entry":"web","lines":2000}`)), ""},
 		{"start ok", on, task(host, "image_start", nil, live, []byte(`{"project":"acme","entry":"web"}`)), ""},
 		{"deploy ok", on, task(host, "image_deploy", nil, live, good), ""},
+		{"healthcheck ok", on, task(host, "image_deploy", nil, live, withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0}`)), ""},
+		{"healthcheck unknown key", off, task(host, "image_deploy", nil, live, withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0,"extra":1}`)), "bad_spec"},
+		{"healthcheck interval", on, task(host, "image_deploy", nil, live, withHealthcheck(good, `{"test":["wget"],"interval_sec":4,"timeout_sec":1,"retries":1,"start_period_sec":0}`)), "bad_spec"},
+		{"healthcheck on job", on, task(host, "image_deploy", nil, live, withHealthcheck(deployImage("job", "ghcr.io/acme/web:1"), `{"test":["echo","secret-argv"],"interval_sec":5,"timeout_sec":1,"retries":1,"start_period_sec":0}`)), "bad_spec"},
 		{"rollback ok", on, task(host, "image_rollback", nil, live, rollbackSpec(imgDigest)), ""},
 		{"rollback omits digest", on, task(host, "image_rollback", nil, live, deploySpec(false, "")), "bad_spec"},
 		{"rollback null digest", on, task(host, "image_rollback", nil, live, nullDigestSpec()), "bad_spec"},
@@ -101,6 +105,10 @@ func rollbackSpec(digest string) []byte {
 
 func withSecretKeys(spec []byte, keys string) []byte {
 	return []byte(strings.TrimSuffix(string(spec), "}") + `,"secret_keys":` + keys + `}`)
+}
+
+func withHealthcheck(spec []byte, hc string) []byte {
+	return []byte(strings.Replace(string(spec), `"healthy_after_sec":5`, `"healthy_after_sec":5,"healthcheck":`+hc, 1))
 }
 
 func withDigest(spec []byte) []byte {

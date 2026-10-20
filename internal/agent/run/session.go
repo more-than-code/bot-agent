@@ -87,6 +87,9 @@ func (a *agent) serverError(raw []byte) error {
 }
 
 func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
+	// This connection has not applied hello_ok. Drop the previous
+	// connection's gate so the discovery below cannot queue samples.
+	a.clearDockerGate()
 	disc, complete := a.discover(ctx)
 	services := []protocol.Discovered{}
 	if complete {
@@ -369,6 +372,9 @@ func (a *agent) sendMetrics(ctx context.Context, w *writer, host, procs bool, he
 		samples = append(samples, *health...)
 		*health = nil
 	}
+	if extra := a.takeDockerSamples(); len(extra) > 0 {
+		samples = append(samples, extra...)
+	}
 	return a.emitMetrics(ctx, w.SendRaw, samples, now)
 }
 
@@ -424,7 +430,84 @@ func (a *agent) discover(ctx context.Context) (discover.Result, bool) {
 	a.disc = res
 	a.services = res.Services
 	a.mu.Unlock()
+	a.queueDockerHealth(res)
 	return res, true
+}
+
+const maxDockerPending = 1000
+
+// queueDockerHealth records one sample per container service whose health is
+// healthy or unhealthy. starting and a null health emit nothing. The queue
+// is drained by sendMetrics so this does not block on the session loop.
+func (a *agent) queueDockerHealth(res discover.Result) {
+	a.mu.Lock()
+	on := a.dockerHealth
+	a.mu.Unlock()
+	if !on || len(res.ContainerHealth) == 0 {
+		return
+	}
+	now := a.now()
+	var samples []protocol.Sample
+	for _, svc := range res.Services {
+		if svc.Kind != "container" {
+			continue
+		}
+		h, ok := res.ContainerHealth[svc.Name]
+		if !ok {
+			continue
+		}
+		result := ""
+		switch h {
+		case "healthy":
+			result = "success"
+		case "unhealthy":
+			result = "unhealthy"
+		default:
+			continue
+		}
+		samples = append(samples, protocol.NewSample("health", now, map[string]string{
+			"service": svc.Name, "protocol": "docker",
+		}, map[string]any{
+			"result": result, "http_status": nil, "latency_ms": nil,
+		}))
+	}
+	if len(samples) == 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.dockerHealth {
+		return
+	}
+	room := maxDockerPending - len(a.dockerPending)
+	if room <= 0 {
+		return
+	}
+	if len(samples) > room {
+		samples = samples[:room]
+	}
+	a.dockerPending = append(a.dockerPending, samples...)
+}
+
+func (a *agent) takeDockerSamples() []protocol.Sample {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.dockerHealth {
+		a.dockerPending = nil
+		return nil
+	}
+	out := a.dockerPending
+	a.dockerPending = nil
+	return out
+}
+
+// clearDockerGate runs at the start of a connection, before hello_ok.
+// Samples stay off until that frame's config.docker_health is applied.
+func (a *agent) clearDockerGate() {
+	a.mu.Lock()
+	a.dockerHealth = false
+	a.dockerPending = nil
+	a.mu.Unlock()
 }
 
 func (a *agent) maybeServices(ctx context.Context, w *writer, now time.Time) error {

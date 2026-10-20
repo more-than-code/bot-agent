@@ -1,5 +1,7 @@
 package images
 
+import "strings"
+
 // Port is one published port. HostIp is chosen by the helper, not this struct.
 type Port struct {
 	Host      int  `json:"host"`
@@ -34,6 +36,20 @@ type ImageSpec struct {
 	HealthyAfterSec int               `json:"healthy_after_sec"`
 	MemoryMB        *int              `json:"memory_mb"`
 	TimeoutSec      int               `json:"timeout_sec"`
+	// Healthcheck is api-v1 v1.11 item 7. Nil means the key was absent.
+	// The API applies defaults; this process rejects an out-of-range number
+	// and does not fill those defaults. A job cannot carry one.
+	Healthcheck *Healthcheck `json:"healthcheck,omitempty"`
+}
+
+// Healthcheck is the catalog check for a service container.
+// Test is the argv only. The helper prepends CMD.
+type Healthcheck struct {
+	Test           []string `json:"test"`
+	IntervalSec    int      `json:"interval_sec"`
+	TimeoutSec     int      `json:"timeout_sec"`
+	Retries        int      `json:"retries"`
+	StartPeriodSec int      `json:"start_period_sec"`
 }
 
 // Validate applies the host-side half of "Writing an image entry" rules 2–11.
@@ -83,6 +99,9 @@ func (s *ImageSpec) Validate() string {
 	if s.MemoryMB != nil && (*s.MemoryMB < 16 || *s.MemoryMB > 65536) {
 		return "memory_mb"
 	}
+	if field := checkHealthcheck(s); field != "" {
+		return field
+	}
 	if s.Kind == "job" {
 		s.Restart = "no"
 		if s.HealthyAfterSec != 0 {
@@ -107,6 +126,37 @@ func (s *ImageSpec) Validate() string {
 		s.HealthyAfterSec = 30
 	} else if s.HealthyAfterSec < 5 || s.HealthyAfterSec > 600 {
 		return "healthy_after_sec"
+	}
+	return ""
+}
+
+func checkHealthcheck(s *ImageSpec) string {
+	h := s.Healthcheck
+	if h == nil {
+		return ""
+	}
+	if s.Kind == "job" {
+		return "healthcheck"
+	}
+	if len(h.Test) < 1 || len(h.Test) > 32 {
+		return "healthcheck"
+	}
+	for _, arg := range h.Test {
+		if len(arg) < 1 || len(arg) > 1024 || strings.IndexByte(arg, 0) >= 0 {
+			return "healthcheck"
+		}
+	}
+	if h.IntervalSec < 5 || h.IntervalSec > 300 {
+		return "interval_sec"
+	}
+	if h.TimeoutSec < 1 || h.TimeoutSec > 60 || h.TimeoutSec >= h.IntervalSec {
+		return "timeout_sec"
+	}
+	if h.Retries < 1 || h.Retries > 10 {
+		return "retries"
+	}
+	if h.StartPeriodSec < 0 || h.StartPeriodSec > 600 {
+		return "start_period_sec"
 	}
 	return ""
 }

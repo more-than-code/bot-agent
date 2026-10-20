@@ -81,6 +81,30 @@ func TestValidateMetrics(t *testing.T) {
 	if err := ValidateAgent([]byte(strings.Replace(health, `"port":"8080"`, `"port":8080`, 1))); err == nil {
 		t.Fatal("accepted numeric port tag")
 	}
+	docker := `{"v":1,"type":"metrics","batch_id":"11111111-1111-4111-8111-111111111111","samples":[{"m":"health","t":"` + ts + `","tags":{"service":"web","protocol":"docker"},"f":{"result":"success","http_status":null,"latency_ms":null}}]}`
+	if err := ValidateAgent([]byte(docker)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAgent([]byte(strings.Replace(docker, `"result":"success"`, `"result":"unhealthy"`, 1))); err != nil {
+		t.Fatal(err)
+	}
+	rejected := []string{
+		strings.Replace(docker, `"protocol":"docker"`, `"protocol":"docker","check_id":"live"`, 1),
+		strings.Replace(docker, `"protocol":"docker"`, `"protocol":"docker","port":"80"`, 1),
+		strings.Replace(docker, `"http_status":null`, `"http_status":200`, 1),
+		strings.Replace(docker, `"latency_ms":null`, `"latency_ms":1.5`, 1),
+		strings.Replace(docker, `"result":"success"`, `"result":"timeout"`, 1),
+		strings.Replace(health, `"latency_ms":1.5`, `"latency_ms":null`, 1),
+		strings.Replace(health, `"result":"success"`, `"result":"unhealthy"`, 1),
+		strings.Replace(health, `"port":"8080"`, `"port":"0"`, 1),
+		strings.Replace(health, `"check_id":"live",`, ``, 1),
+		strings.Replace(health, `"protocol":"http"`, `"protocol":"udp"`, 1),
+	}
+	for _, raw := range rejected {
+		if err := ValidateAgent([]byte(raw)); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
 }
 
 func TestValidateHelloAndReject(t *testing.T) {

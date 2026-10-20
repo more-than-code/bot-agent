@@ -252,12 +252,16 @@ type agent struct {
 	idLogOnce    atomic.Bool
 	healthCh     chan protocol.Sample
 	healthCancel context.CancelFunc
-	pending      pendingTasks
-	inflight     inflight
-	taskSlots    chan struct{}
-	taskMu       sync.Mutex
-	taskRunning  int
-	taskWaiting  int
+	// dockerHealth is config.docker_health. Docker health samples are queued
+	// only while it is true. dockerPending is drained into the next metrics batch.
+	dockerHealth  bool
+	dockerPending []protocol.Sample
+	pending       pendingTasks
+	inflight      inflight
+	taskSlots     chan struct{}
+	taskMu        sync.Mutex
+	taskRunning   int
+	taskWaiting   int
 }
 
 type writer struct {

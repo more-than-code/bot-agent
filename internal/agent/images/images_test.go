@@ -178,6 +178,81 @@ func TestSpecValidate(t *testing.T) {
 	}
 }
 
+func TestHealthcheckValidate(t *testing.T) {
+	good := func() ImageSpec {
+		return ImageSpec{
+			Kind: "service", Image: "ghcr.io/joe-and-his-friends/app:1",
+			Healthcheck: &Healthcheck{
+				Test: []string{"wget", "ok\n"}, IntervalSec: 30, TimeoutSec: 5, Retries: 3, StartPeriodSec: 0,
+			},
+		}
+	}
+	s := good()
+	if s.Validate() != "" || s.Restart != "unless-stopped" || s.HealthyAfterSec != 30 || s.TimeoutSec != 0 {
+		t.Fatalf("%q %+v", s.Validate(), s)
+	}
+	if s.Healthcheck.IntervalSec != 30 || s.Healthcheck.TimeoutSec != 5 || s.Healthcheck.Retries != 3 {
+		t.Fatal("defaults were written onto healthcheck")
+	}
+	bare := ImageSpec{Kind: "service", Image: "ghcr.io/joe-and-his-friends/app:1"}
+	if bare.Validate() != "" || bare.Healthcheck != nil {
+		t.Fatal("nil healthcheck")
+	}
+	job := ImageSpec{
+		Kind: "job", Image: "ghcr.io/joe-and-his-friends/app:1",
+		Healthcheck: &Healthcheck{Test: []string{"echo", "secret-argv"}, IntervalSec: 0},
+	}
+	if got := job.Validate(); got != "healthcheck" || strings.Contains(got, "secret-argv") {
+		t.Fatalf("job %q", got)
+	}
+	bad := []struct {
+		field string
+		fn    func(*Healthcheck)
+	}{
+		{"healthcheck", func(h *Healthcheck) { h.Test = nil }},
+		{"healthcheck", func(h *Healthcheck) { h.Test = []string{} }},
+		{"healthcheck", func(h *Healthcheck) { h.Test = []string{""} }},
+		{"healthcheck", func(h *Healthcheck) { h.Test = []string{"a\x00b"} }},
+		{"healthcheck", func(h *Healthcheck) { h.Test = []string{strings.Repeat("a", 1025)} }},
+		{"healthcheck", func(h *Healthcheck) {
+			h.Test = make([]string, 33)
+			for i := range h.Test {
+				h.Test[i] = "a"
+			}
+		}},
+		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 0 }},
+		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 4 }},
+		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 301 }},
+		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 0 }},
+		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 61 }},
+		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 30 }},
+		{"retries", func(h *Healthcheck) { h.Retries = 0 }},
+		{"retries", func(h *Healthcheck) { h.Retries = 11 }},
+		{"start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = -1 }},
+		{"start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = 601 }},
+	}
+	for _, tc := range bad {
+		s := good()
+		tc.fn(s.Healthcheck)
+		if got := s.Validate(); got != tc.field {
+			t.Fatalf("%s got %q", tc.field, got)
+		}
+	}
+	s = good()
+	s.TimeoutSec = 10
+	if s.Validate() != "timeout_sec" {
+		t.Fatal("service timeout")
+	}
+	var decoded ImageSpec
+	raw := `{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","healthcheck":{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0}}`
+	if Decode([]byte(raw), &decoded) != nil || decoded.Healthcheck == nil || decoded.Healthcheck.Retries != 3 {
+		t.Fatalf("%+v", decoded.Healthcheck)
+	}
+	if Decode([]byte(`{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","healthcheck":{"test":["wget"],"extra":1}}`), &ImageSpec{}) == nil {
+		t.Fatal("unknown healthcheck key")
+	}
+}
+
 func TestMergedEnvLimit(t *testing.T) {
 	env := map[string]string{}
 	for i := 0; i < 8*256+64+64; i++ {

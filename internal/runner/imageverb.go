@@ -1042,6 +1042,7 @@ func projectRows(rows []listed) images.ListResponse {
 			Ports:  published(c.Ports),
 			Digest: repoDigest(c.Image),
 			Labels: keepLabels(c.Labels),
+			Health: c.Health,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {

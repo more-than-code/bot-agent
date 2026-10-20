@@ -20,8 +20,12 @@ import (
 type Result struct {
 	Services []protocol.Discovered
 	Unmapped int
-	byPID    map[int]string
-	byUnit   map[string]string
+	// ContainerHealth is the helper health of a container service chosen in
+	// this pass, keyed by the discovered name. It is not a wire field.
+	// Values are healthy, unhealthy, or starting. A null health is absent.
+	ContainerHealth map[string]string
+	byPID           map[int]string
+	byUnit          map[string]string
 }
 
 // ServiceFor returns the discovered service name for pid, or for any

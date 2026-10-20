@@ -8,6 +8,40 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
+func TestContainerHealthRecorded(t *testing.T) {
+	const host = "0123456789abcdef"
+	healthy := "healthy"
+	unhealthy := "unhealthy"
+	starting := "starting"
+	other := "none"
+	items := []images.ContainerInfo{
+		{
+			ID: "1", Name: "acme-web", State: "running", Health: &healthy,
+			Labels: ownedLabels(host, "acme", "web"),
+		},
+		{
+			ID: "2", Name: "acme-web-prev", State: "exited", Health: &unhealthy,
+			Labels: ownedLabels(host, "acme", "web"),
+		},
+		{ID: "3", Name: "redis", State: "running", Health: &starting},
+		{ID: "4", Name: "idle", State: "running"},
+		{ID: "5", Name: "odd", State: "running", Health: &other},
+	}
+	out := ApplyContainers(Result{}, items, host, []string{"acme"})
+	if out.ContainerHealth["web"] != "healthy" || out.ContainerHealth["redis"] != "starting" {
+		t.Fatalf("%v", out.ContainerHealth)
+	}
+	if _, ok := out.ContainerHealth["acme-web-prev"]; ok {
+		t.Fatal("prev health recorded")
+	}
+	if _, ok := out.ContainerHealth["idle"]; ok {
+		t.Fatal("null health recorded")
+	}
+	if _, ok := out.ContainerHealth["odd"]; ok {
+		t.Fatal("non-enum health recorded")
+	}
+}
+
 func TestApplyContainersOwnedOtherAndPorts(t *testing.T) {
 	const host = "0123456789abcdef"
 	digest := "sha256:" + strings.Repeat("ab", 32)

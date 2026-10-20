@@ -695,6 +695,7 @@ const (
 	kindInt
 	kindString
 	kindNullInt
+	kindNullFloat
 )
 
 var measurementFields = map[string]map[string]fieldKind{
@@ -716,7 +717,7 @@ var measurementFields = map[string]map[string]fieldKind{
 	},
 	"temp":    {"celsius": kindFloat},
 	"process": {"cpu_usage": kindFloat, "memory_rss": kindInt, "memory_usage": kindFloat, "num_threads": kindInt, "started_at": kindString},
-	"health":  {"result": kindString, "http_status": kindNullInt, "latency_ms": kindFloat},
+	"health":  {"result": kindString, "http_status": kindNullInt, "latency_ms": kindNullFloat},
 }
 
 var requiredFields = map[string][]string{
@@ -740,7 +741,9 @@ var measurementTags = map[string]map[string]bool{
 	"system":  {},
 	"temp":    {"sensor": true},
 	"process": {"pid": true, "process_name": true, "user": true, "cmdline": true, "service": false},
-	"health":  {"service": true, "check_id": true, "protocol": true, "port": true},
+	// check_id and port are required for http and tcp and forbidden for docker.
+	// checkHealth applies that split. service and protocol are always required.
+	"health": {"service": true, "check_id": false, "protocol": true, "port": false},
 }
 
 func checkMetrics(raw []byte) error {
@@ -826,10 +829,8 @@ func checkSample(m, ts string, tags, fields map[string]json.RawMessage) error {
 		}
 	}
 	if m == "health" {
-		switch unquote(fields["result"]) {
-		case "success", "status_mismatch", "timeout", "connection_refused", "error":
-		default:
-			return fmt.Errorf("health result")
+		if err := checkHealth(tags, fields); err != nil {
+			return err
 		}
 	}
 	if m == "process" {
@@ -860,17 +861,55 @@ func checkTagValues(m string, tags map[string]json.RawMessage) error {
 		if iface == "" || iface == "lo" {
 			return fmt.Errorf("interface %q", iface)
 		}
-	case "health":
-		p := unquote(tags["protocol"])
-		if p != "http" && p != "tcp" {
-			return fmt.Errorf("protocol")
+	}
+	return nil
+}
+
+func checkHealth(tags, fields map[string]json.RawMessage) error {
+	switch unquote(tags["protocol"]) {
+	case "http", "tcp":
+		if _, ok := tags["check_id"]; !ok {
+			return fmt.Errorf("missing tag check_id")
 		}
-		n, err := strconv.Atoi(unquote(tags["port"]))
+		rawPort, ok := tags["port"]
+		if !ok {
+			return fmt.Errorf("missing tag port")
+		}
+		n, err := strconv.Atoi(unquote(rawPort))
 		if err != nil || n < 1 || n > 65535 {
 			return fmt.Errorf("port")
 		}
+		if isNull(fields["latency_ms"]) {
+			return fmt.Errorf("latency_ms")
+		}
+		switch unquote(fields["result"]) {
+		case "success", "status_mismatch", "timeout", "connection_refused", "error":
+		default:
+			return fmt.Errorf("health result")
+		}
+	case "docker":
+		if _, ok := tags["check_id"]; ok {
+			return fmt.Errorf("tag check_id")
+		}
+		if _, ok := tags["port"]; ok {
+			return fmt.Errorf("tag port")
+		}
+		if !isNull(fields["http_status"]) || !isNull(fields["latency_ms"]) {
+			return fmt.Errorf("docker health fields")
+		}
+		switch unquote(fields["result"]) {
+		case "success", "unhealthy":
+		default:
+			return fmt.Errorf("health result")
+		}
+	default:
+		return fmt.Errorf("protocol")
 	}
 	return nil
+}
+
+func isNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 func wantString(raw json.RawMessage) error {
@@ -895,6 +934,8 @@ func checkFieldType(kind fieldKind, raw json.RawMessage) error {
 			return nil
 		}
 		return wantInt(raw)
+	case kindNullFloat:
+		return wantNumberOrNull(raw)
 	default:
 		return fmt.Errorf("kind")
 	}

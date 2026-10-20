@@ -61,6 +61,9 @@ type listed struct {
 	Image  string
 	Labels map[string]string
 	Ports  []portView
+	// Health is healthy, unhealthy, starting, or nil. It is not the Engine
+	// state. nil means the list row did not say.
+	Health *string
 }
 
 type inspected struct {
@@ -527,7 +530,11 @@ func parseList(body []byte) ([]listed, error) {
 		Names  []string          `json:"Names"`
 		Image  string            `json:"Image"`
 		State  string            `json:"State"`
+		Status string            `json:"Status"`
 		Labels map[string]string `json:"Labels"`
+		// Health is a raw value. API v1.47 does not document this list field.
+		// API v1.52 adds an object; a non-object must not fail the list.
+		Health json.RawMessage `json:"Health"`
 		Ports  []struct {
 			IP          string `json:"IP"`
 			PrivatePort int    `json:"PrivatePort"`
@@ -549,6 +556,7 @@ func parseList(body []byte) ([]listed, error) {
 		}
 		row := listed{
 			ID: item.ID, Names: names, State: item.State, Image: item.Image, Labels: item.Labels,
+			Health: containerHealth(item.Health, item.Status),
 		}
 		for _, p := range item.Ports {
 			if p.Type != "" && p.Type != "tcp" {
@@ -627,6 +635,56 @@ func containerPort(key string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// containerHealth reads one list row. When Health is a JSON object, its
+// Status is the answer and the text suffix is not consulted: none, empty,
+// unknown, or a bad object is null. That object is the API v1.52 list
+// field; /v1.47 omits it. Anything else uses the Status suffix Docker's
+// health.String() appends: "(healthy)", "(unhealthy)", "(health: starting)".
+func containerHealth(raw json.RawMessage, status string) *string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		// encoding/json matches field names case-insensitively. The Engine
+		// key is Status, so look that key up and do not accept status.
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(trimmed, &obj) != nil {
+			return nil
+		}
+		rawStatus, ok := obj["Status"]
+		if !ok {
+			return nil
+		}
+		var s string
+		if json.Unmarshal(rawStatus, &s) != nil {
+			return nil
+		}
+		return healthCode(s)
+	}
+	return healthFromStatus(status)
+}
+
+func healthCode(s string) *string {
+	switch s {
+	case "healthy", "unhealthy", "starting":
+		v := s
+		return &v
+	default:
+		return nil
+	}
+}
+
+func healthFromStatus(status string) *string {
+	switch {
+	case strings.HasSuffix(status, "(unhealthy)"):
+		return healthCode("unhealthy")
+	case strings.HasSuffix(status, "(healthy)"):
+		return healthCode("healthy")
+	case strings.HasSuffix(status, "(health: starting)"):
+		return healthCode("starting")
+	default:
+		return nil
+	}
 }
 
 func plainNames(names []string) []string {

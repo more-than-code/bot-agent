@@ -174,6 +174,8 @@ type PublishedPort struct {
 }
 
 // ContainerInfo is one container_list row. Labels contain only dev.deploybot.*.
+// Health is healthy, unhealthy, starting, or null. The key is always sent:
+// an old helper that omits it decodes as null.
 type ContainerInfo struct {
 	ID     string            `json:"id"`
 	Name   string            `json:"name"`
@@ -181,6 +183,7 @@ type ContainerInfo struct {
 	Ports  []PublishedPort   `json:"ports"`
 	Digest *string           `json:"digest"`
 	Labels map[string]string `json:"labels"`
+	Health *string           `json:"health"`
 }
 
 // ListResponse is container_list. Truncated is true when rows past the

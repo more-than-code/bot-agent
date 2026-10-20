@@ -32,6 +32,12 @@ func (a *agent) apply(cfg protocol.Config, services []protocol.Discovered) {
 		}
 	}
 	a.configured = append([]protocol.HealthCheck(nil), clamped.HealthChecks...)
+	a.mu.Lock()
+	a.dockerHealth = clamped.DockerHealth
+	if !a.dockerHealth {
+		a.dockerPending = nil
+	}
+	a.mu.Unlock()
 	a.setActive(services)
 }
 
