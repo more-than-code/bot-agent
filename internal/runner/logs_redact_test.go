@@ -42,6 +42,85 @@ func TestLogsExactBeforeCut(t *testing.T) {
 	}
 }
 
+func TestLogsRedactEnvPreview(t *testing.T) {
+	e := newImgEnv(t, imagePolicy)
+	e.fake.add("mohiguide-web", "running", "ghcr.io/joe-and-his-friends/app@"+digestA, e.labels("web"))
+	const (
+		long  = "sekret-env-VALUE-9f3"
+		short = "abcd1234"
+		file  = "file-piece-xyz123"
+	)
+	longB64 := base64.StdEncoding.EncodeToString([]byte(long))
+	var logged strings.Builder
+	e.sys.Logf = func(f string, args ...any) {
+		logged.WriteString(f)
+	}
+	e.fake.logBody = append(frame(1, "long "+long+"\n"), frame(1, "b64 "+longB64+"\n")...)
+	e.fake.logBody = append(e.fake.logBody, frame(1, "short "+short+"\n")...)
+	e.fake.logBody = append(e.fake.logBody, frame(1, "file "+file+"\n")...)
+	raw := e.call(images.VerbLogs, mustJSON(t, images.LogsRequest{
+		Project: "mohiguide", Entry: "web", Lines: 20,
+		Redact:    []string{file},
+		RedactEnv: []string{long, short},
+	}))
+	var logs images.LogsResponse
+	if err := json.Unmarshal(raw, &logs); err != nil || len(logs.Lines) != 4 {
+		t.Fatalf("%s", raw)
+	}
+	blob := string(raw) + logged.String()
+	longPreview := "sekr\u2026"
+	shortPreview := "\u2022\u2022\u2022\u2022"
+	for _, frag := range []string{long, short, file, longB64} {
+		if strings.Contains(blob, frag) {
+			t.Fatalf("kept %q in %s", frag, blob)
+		}
+	}
+	for _, want := range []string{"long " + longPreview, "b64 " + longPreview, "short " + shortPreview, "file [REDACTED]"} {
+		if !strings.Contains(blob, want) {
+			t.Fatalf("missing %q in %s", want, blob)
+		}
+	}
+	if strings.Contains(blob, `"redact"`) || strings.Contains(blob, `"redact_env"`) {
+		t.Fatal("redact list returned")
+	}
+}
+
+func TestLogsRedactEnvBounds(t *testing.T) {
+	e := newImgEnv(t, imagePolicy)
+	e.fake.add("mohiguide-web", "running", "ghcr.io/joe-and-his-friends/app@"+digestA, e.labels("web"))
+	e.fake.logBody = frame(1, "hello\n")
+	cases := [][]string{
+		{"short"},
+		{strings.Repeat("a", 4097)},
+		{"sec\x00ret"},
+	}
+	many := make([]string, images.MaxRedactCount+1)
+	for i := range many {
+		many[i] = strings.Repeat("d", 6) + itoa(i)
+	}
+	cases = append(cases, many)
+	bulk := make([]string, 129)
+	for i := range bulk {
+		bulk[i] = strings.Repeat("e", images.MaxRedactBytes)
+	}
+	cases = append(cases, bulk)
+	for _, redactEnv := range cases {
+		raw := e.call(images.VerbLogs, mustJSON(t, images.LogsRequest{
+			Project: "mohiguide", Entry: "web", Lines: 5,
+			Redact:    []string{"abcdef"},
+			RedactEnv: redactEnv,
+		}))
+		if imgCode(t, raw) != "bad_spec" {
+			t.Fatal(string(raw))
+		}
+	}
+	for _, call := range e.fake.Calls() {
+		if strings.HasSuffix(call.Path, "/logs") {
+			t.Fatal("docker logs ran")
+		}
+	}
+}
+
 func TestLogsRedactRejectedBeforeDocker(t *testing.T) {
 	e := newImgEnv(t, imagePolicy)
 	e.fake.add("mohiguide-web", "running", "ghcr.io/joe-and-his-friends/app@"+digestA, e.labels("web"))

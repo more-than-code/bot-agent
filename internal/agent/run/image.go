@@ -33,13 +33,23 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 	if code != "" {
 		return a.imageRejected(task)
 	}
-	ex := redact.NewExact(req.SecretValues()...)
-	values := redactValues(req)
+	envVals, fileVals := req.SecretValues()
+	ex := redact.Merge(redact.NewExact(fileVals...), redact.NewExactEnv(envVals...))
+	secrets := logSecrets{env: clipRedact(envVals), file: clipRedact(fileVals)}
 	defer func() {
 		scrubTask(task.Spec, &req)
 		ex.Clear()
-		for i := range values {
-			values[i] = ""
+		for i := range secrets.env {
+			secrets.env[i] = ""
+		}
+		for i := range secrets.file {
+			secrets.file[i] = ""
+		}
+		for i := range envVals {
+			envVals[i] = ""
+		}
+		for i := range fileVals {
+			fileVals[i] = ""
 		}
 	}()
 	tmo := imageBudget(task, req.Spec)
@@ -48,7 +58,7 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 	defer cancel()
 	switch task.Kind {
 	case "image_deploy", "image_rollback":
-		return a.deployImage(tctx, task, req, deadline, ex, values)
+		return a.deployImage(tctx, task, req, deadline, ex, secrets)
 	case "image_logs":
 		return a.logsImage(tctx, task, req, ex)
 	default:
@@ -86,10 +96,18 @@ func imageBudget(task protocol.Task, spec *images.ImageSpec) time.Duration {
 	return tmo
 }
 
-func redactValues(req tasks.ImageReq) []string {
+// logSecrets is the clipped container_logs lists for one task.
+// env is previewed. file is the registry token and secret-file pieces.
+// Each list has the v1.5 caps on its own.
+type logSecrets struct {
+	env  []string
+	file []string
+}
+
+func clipRedact(in []string) []string {
 	var out []string
 	total := 0
-	for _, v := range req.SecretValues() {
+	for _, v := range in {
 		n := len(v)
 		if n < images.MinRedactBytes || n > images.MaxRedactBytes || strings.IndexByte(v, 0) >= 0 {
 			continue
@@ -104,7 +122,7 @@ func redactValues(req tasks.ImageReq) []string {
 	return out
 }
 
-func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, values []string) protocol.TaskResult {
+func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	ref, err := images.Parse(req.Spec.Image)
 	if err != nil {
 		return a.deployResult(task, "forbidden_spec", "", nil, missingStatus(), nil, ex)
@@ -114,7 +132,7 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	// and deploy would report unchanged and leave the old files parked.
 	// Jobs have no -prev generation.
 	if task.Kind == "image_rollback" && req.Spec.Kind == "service" {
-		if res, done := a.rollbackKept(ctx, task, req, deadline, ex, values); done {
+		if res, done := a.rollbackKept(ctx, task, req, deadline, ex, secrets); done {
 			return res
 		}
 	}
@@ -124,24 +142,24 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	}
 	digest, code, err := a.pullImage(ctx, req, pullRef)
 	if err != nil {
-		return a.deployResult(task, "failed", "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, "failed", "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if task.Kind == "image_rollback" || req.Spec.Kind == "service" {
-		return a.deployService(ctx, task, req, deadline, digest, ex, values)
+		return a.deployService(ctx, task, req, deadline, digest, ex, secrets)
 	}
-	return a.deployJob(ctx, task, req, deadline, digest, ex, values)
+	return a.deployJob(ctx, task, req, deadline, digest, ex, secrets)
 }
 
 // rollbackKept swaps -prev back when its digest equals the task digest.
 // done is false when this rollback must pull and deploy. A status failure
 // does not fall through: the kept digest is unknown, and deploying would
 // hide that. force does not matter; the swap is not the unchanged short-circuit.
-func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, values []string) (protocol.TaskResult, bool) {
+func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, secrets logSecrets) (protocol.TaskResult, bool) {
 	tail := func() []string {
-		return a.tailImage(ctx, req.Project, req.Entry, ex, values)
+		return a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	}
 	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
@@ -177,23 +195,30 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 	return a.deployResult(task, "succeeded", digest, nil, w.last, tail(), ex), true
 }
 
-func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, values []string) protocol.TaskResult {
+func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
-		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	st, hash, filesHash := resp.Status, resp.SpecHash, resp.FilesHash
-	if !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files)) {
-		return a.deployResult(task, "unchanged", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+	same := !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files))
+	if same {
+		ok, herr := a.unchangedHealthy(ctx, task.Kind, req)
+		if herr != nil {
+			return a.deployResult(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		}
+		if ok {
+			return a.deployResult(task, "unchanged", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		}
 	}
 	if code, err = a.deployContainer(ctx, req, digest); err != nil {
-		return a.deployResult(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, outcomeFor(code), digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	w := a.waitHealthy(ctx, deadline, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
@@ -201,13 +226,27 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		if w.code != "" {
 			outcome = outcomeFor(w.code)
 		}
-		return a.deployResult(task, outcome, digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, outcome, digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if w.healthy {
-		return a.deployResult(task, "succeeded", digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, values), ex)
+		return a.deployResult(task, "succeeded", digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+	}
+	// st is the status from before container_deploy. Roll back only when
+	// that container was running. Rollback Starts whatever deploy parked,
+	// so an exited or other non-running container would come back up.
+	// Stop the new container and leave the parked one on -prev.
+	// image_rollback still rolls back.
+	if task.Kind != "image_rollback" && st.State != "running" {
+		a.stopContainer(ctx, req.Project, req.Entry)
+		lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
+		last := w.last
+		if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
+			last = again.Status
+		}
+		return a.deployResult(task, "failed", digest, nil, last, lines, ex)
 	}
 	rcode, rerr := a.rollbackContainer(ctx, req.Project, req.Entry)
-	lines := a.tailImage(ctx, req.Project, req.Entry, ex, values)
+	lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	last := w.last
 	if rerr != nil || rcode != "" {
 		return a.deployResult(task, "rollback_failed", digest, nil, last, lines, ex)
@@ -218,9 +257,9 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	return a.deployResult(task, "rolled_back", digest, nil, last, lines, ex)
 }
 
-func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, values []string) protocol.TaskResult {
+func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	tail := func() []string {
-		return a.tailImage(ctx, req.Project, req.Entry, ex, values)
+		return a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	}
 	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
@@ -301,10 +340,11 @@ func (a *agent) waitHealthy(ctx context.Context, deadline time.Time, req tasks.I
 
 // waitDocker polls container_list for the new container. healthy with the
 // configured checks passing is success. starting and a null health keep
-// waiting. unhealthy, or the deadline, is not healthy, so the caller rolls
-// back. A list or sleep error rolls back only when the task deadline passed
-// inside that call. Any other error, including a parent cancel, is returned
-// and the caller does not roll back.
+// waiting. unhealthy, or the deadline, is not healthy. The caller rolls
+// back only when the pre-deploy container was running, and stops the new
+// container for every other state. A list or sleep error takes
+// that path only when the task deadline passed inside that call. Any other
+// error, including a parent cancel, is returned and the caller does neither.
 func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.ImageReq) healthStop {
 	name, ok := images.ContainerName(req.Project, req.Entry)
 	if !ok {
@@ -342,6 +382,27 @@ func healthOf(it images.ContainerInfo) string {
 		return ""
 	}
 	return *it.Health
+}
+
+// unchangedHealthy is the extra conjunct for a service deploy that already
+// matches digest, spec_hash, and files_hash. image_rollback keeps today's
+// rule. A healthcheck needs container_list health "healthy". That is one
+// list call, and only from this function. A miss or a null health is not
+// unchanged. A list error is returned so the caller does not deploy.
+func (a *agent) unchangedHealthy(ctx context.Context, kind string, req tasks.ImageReq) (bool, error) {
+	if kind == "image_rollback" || req.Spec == nil || req.Spec.Healthcheck == nil {
+		return true, nil
+	}
+	name, ok := images.ContainerName(req.Project, req.Entry)
+	if !ok {
+		return false, nil
+	}
+	items, _, err := a.listContainers(ctx)
+	if err != nil {
+		return false, err
+	}
+	it, found := findListed(items, name)
+	return found && healthOf(it) == "healthy", nil
 }
 
 func findListed(items []images.ContainerInfo, name string) (images.ContainerInfo, bool) {
@@ -609,11 +670,14 @@ func (a *agent) stopContainer(ctx context.Context, project, entry string) {
 	_, _ = a.callImage(ctx, images.VerbStop, body, &resp)
 }
 
-func (a *agent) tailImage(ctx context.Context, project, entry string, ex redact.Exact, values []string) []string {
+func (a *agent) tailImage(ctx context.Context, project, entry string, ex redact.Exact, secrets logSecrets) []string {
 	if ctx.Err() != nil {
 		return []string{}
 	}
-	body := images.Encode(images.LogsRequest{Project: project, Entry: entry, Lines: tailLines, Redact: values})
+	body := images.Encode(images.LogsRequest{
+		Project: project, Entry: entry, Lines: tailLines,
+		Redact: secrets.file, RedactEnv: secrets.env,
+	})
 	var resp images.LogsResponse
 	code, err := a.callImage(ctx, images.VerbLogs, body, &resp)
 	if err != nil || code != "" || resp.Lines == nil {

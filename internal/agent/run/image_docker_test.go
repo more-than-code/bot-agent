@@ -31,9 +31,10 @@ func TestDockerDeployWait(t *testing.T) {
 	t.Run("unhealthy", func(t *testing.T) {
 		a, h, clock, seq := dockerRun(t, []string{"unhealthy"})
 		res := mustImage(t, a, "image_deploy", dockerSpec(3031, hcFast, true), 120)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if clock.sleeps() != 0 || seq.listN != 1 || seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d lists %d rolls %d %v", clock.sleeps(), seq.listN, seq.rollbacks, h.Calls())
+		m := assertDeploy(t, res, "failed", "failed")
+		st, _ := m["status"].(map[string]any)
+		if clock.sleeps() != 0 || seq.listN != 1 || seq.rollbacks != 0 || seq.stops != 1 || st["state"] != "exited" {
+			t.Fatalf("sleeps %d lists %d rolls %d stops %d status %v calls %v", clock.sleeps(), seq.listN, seq.rollbacks, seq.stops, st, h.Calls())
 		}
 	})
 
@@ -51,9 +52,9 @@ func TestDockerDeployWait(t *testing.T) {
 		a, _, clock, seq := dockerRun(t, []string{"starting"})
 		start := clock.now()
 		res := mustImage(t, a, "image_deploy", dockerSpec(3031, hcFast, true), 4)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if clock.sleeps() != 5 || !clock.now().Equal(start.Add(10*time.Second)) || seq.listN != 5 || seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d now %s lists %d rolls %d", clock.sleeps(), clock.now(), seq.listN, seq.rollbacks)
+		assertDeploy(t, res, "failed", "failed")
+		if clock.sleeps() != 5 || !clock.now().Equal(start.Add(10*time.Second)) || seq.listN != 5 || seq.stops != 1 || seq.rollbacks != 0 {
+			t.Fatalf("sleeps %d now %s lists %d stops %d rolls %d", clock.sleeps(), clock.now(), seq.listN, seq.stops, seq.rollbacks)
 		}
 	})
 
@@ -61,9 +62,9 @@ func TestDockerDeployWait(t *testing.T) {
 		a, _, clock, seq := dockerRun(t, []string{"starting"})
 		start := clock.now()
 		res := mustImage(t, a, "image_deploy", dockerSpec(3031, hcFast, true), 20)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if clock.sleeps() != 10 || !clock.now().Equal(start.Add(20*time.Second)) || seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d now %s rolls %d", clock.sleeps(), clock.now(), seq.rollbacks)
+		assertDeploy(t, res, "failed", "failed")
+		if clock.sleeps() != 10 || !clock.now().Equal(start.Add(20*time.Second)) || seq.stops != 1 || seq.rollbacks != 0 {
+			t.Fatalf("sleeps %d now %s stops %d rolls %d", clock.sleeps(), clock.now(), seq.stops, seq.rollbacks)
 		}
 	})
 
@@ -72,9 +73,9 @@ func TestDockerDeployWait(t *testing.T) {
 		a, _, clock, seq := dockerRun(t, []string{"starting"})
 		start := clock.now()
 		res := mustImage(t, a, "image_deploy", dockerSpec(3031, hc, true), 4)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if clock.sleeps() != 8 || !clock.now().Equal(start.Add(16*time.Second)) || seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d now %s", clock.sleeps(), clock.now())
+		assertDeploy(t, res, "failed", "failed")
+		if clock.sleeps() != 8 || !clock.now().Equal(start.Add(16*time.Second)) || seq.stops != 1 || seq.rollbacks != 0 {
+			t.Fatalf("sleeps %d now %s stops %d", clock.sleeps(), clock.now(), seq.stops)
 		}
 	})
 
@@ -99,9 +100,9 @@ func TestDockerDeployWait(t *testing.T) {
 			ID: "up", Service: "web", Protocol: "tcp", Port: 1, IntervalSec: 60,
 		}}
 		res := mustImage(t, a, "image_deploy", dockerSpec(1, hcFast, true), 4)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if clock.sleeps() != 5 || !clock.now().Equal(start.Add(10*time.Second)) || seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d now %s rolls %d", clock.sleeps(), clock.now(), seq.rollbacks)
+		assertDeploy(t, res, "failed", "failed")
+		if clock.sleeps() != 5 || !clock.now().Equal(start.Add(10*time.Second)) || seq.stops != 1 || seq.rollbacks != 0 {
+			t.Fatalf("sleeps %d now %s stops %d rolls %d", clock.sleeps(), clock.now(), seq.stops, seq.rollbacks)
 		}
 	})
 
@@ -185,17 +186,17 @@ func TestDockerDeadlineDuringWait(t *testing.T) {
 
 	t.Run("sleep while starting", func(t *testing.T) {
 		h, res := run(t, false)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if !h.sleptLive || h.sleeps != 1 || h.seq.listN != 1 || h.seq.rollbacks != 1 {
-			t.Fatalf("sleeps %d live %v lists %d rolls %d", h.sleeps, h.sleptLive, h.seq.listN, h.seq.rollbacks)
+		assertDeploy(t, res, "failed", "failed")
+		if !h.sleptLive || h.sleeps != 1 || h.seq.listN != 1 || h.seq.rollbacks != 0 || h.seq.stops != 1 {
+			t.Fatalf("sleeps %d live %v lists %d rolls %d stops %d", h.sleeps, h.sleptLive, h.seq.listN, h.seq.rollbacks, h.seq.stops)
 		}
 	})
 
 	t.Run("list", func(t *testing.T) {
 		h, res := run(t, true)
-		assertDeploy(t, res, "rolled_back", "failed")
-		if !h.listedLive || h.lists != 1 || h.sleeps != 0 || h.seq.rollbacks != 1 {
-			t.Fatalf("lists %d live %v sleeps %d rolls %d", h.lists, h.listedLive, h.sleeps, h.seq.rollbacks)
+		assertDeploy(t, res, "failed", "failed")
+		if !h.listedLive || h.lists != 1 || h.sleeps != 0 || h.seq.rollbacks != 0 || h.seq.stops != 1 {
+			t.Fatalf("lists %d live %v sleeps %d rolls %d stops %d", h.lists, h.listedLive, h.sleeps, h.seq.rollbacks, h.seq.stops)
 		}
 	})
 }
@@ -302,6 +303,7 @@ type dockerSeq struct {
 	pullRef   string
 	deployed  bool
 	rollbacks int
+	stops     int
 }
 
 func (s *dockerSeq) call(verb string, body []byte) ([]byte, error) {
@@ -315,7 +317,9 @@ func (s *dockerSeq) call(verb string, body []byte) ([]byte, error) {
 		return images.Encode(images.PullResponse{Digest: imgDigest, ImageID: "sha256:image"}), nil
 	case images.VerbStatus:
 		st := missingStatus()
-		if s.deployed {
+		if s.stops > 0 {
+			st = exitedStatus(0)
+		} else if s.deployed {
 			st = runningStatus(0)
 		}
 		return images.Encode(images.StatusResult{Status: st, SpecHash: imgHash, Prev: s.prev}), nil
@@ -328,6 +332,9 @@ func (s *dockerSeq) call(verb string, body []byte) ([]byte, error) {
 		}
 		s.rollbacks++
 		return images.Encode(images.IDResponse{ContainerID: "prev"}), nil
+	case images.VerbStop:
+		s.stops++
+		return images.Encode(images.ActionResult{Status: exitedStatus(0)}), nil
 	case images.VerbLogs:
 		return images.Encode(images.LogsResponse{Container: "acme-web", Lines: []string{}, Truncated: false}), nil
 	case images.VerbList:

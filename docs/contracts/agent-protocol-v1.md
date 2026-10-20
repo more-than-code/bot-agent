@@ -410,3 +410,14 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; d
 6. **ImageSpec `healthcheck`** *(rev 2, approved 2026-10-20)*: the agent advertises `hello.programs.healthcheck: true`. A task's ImageSpec may carry `healthcheck` (api-v1 v1.11 item 7); the helper's `container_deploy` passes it to the Engine create body as `Healthcheck {Test: ["CMD", argv…], Interval, Timeout, Retries, StartPeriod}`.
 7. **Deploy wait** *(rev 2)*: for a service whose spec has `healthcheck`, after `container_deploy` the agent polls `container_list` every 2 s: `healthy` (and any configured TCP/HTTP checks passing) → `succeeded`; `starting` keeps waiting; `unhealthy`, or the wait limit (`max(timeout_sec, start_period_sec + interval_sec × (retries + 1))`) → `container_rollback` → `rolled_back` / `rollback_failed`. `image_rollback` waits on the restored container the same way. Without `healthcheck` the v1.5 rule is unchanged.
 
+## v1.7 secret previews in task output (2026-10-20, approved spec `docs/spec-env-editing.md` rev 1; no wire change)
+
+1. In image task output (log tails, error text) the agent replaces an env secret value from the task (raw, base64 and JSON-escaped forms, values of at least 6 bytes as before) with `preview(v)`: the first 4 runes followed by `…` when `v` has at least 16 runes, otherwise `••••`.
+2. Secret-file pieces keep `[REDACTED]`. The keyword rule is unchanged.
+3. The task frame is unchanged. An agent before v1.7 keeps writing `[REDACTED]`; the API accepts both.
+
+## v1.6.1 health-aware unchanged, first-deploy failure (2026-10-20, `docs/spec-docker-health.md` rev 3 §10, approved 2026-10-21; no wire change)
+
+1. **Unchanged** (amends rule 11 for service deploys): when the task's ImageSpec has `healthcheck`, `unchanged` also requires the current container's `container_list` health to be `healthy`; otherwise the agent deploys and waits per v1.6 item 7. Without `healthcheck`, rule 11 is unchanged.
+2. **Nothing good to roll back to:** a service deploy whose wait fails, when the container that was current before the deploy was not `running` (`missing`, `exited`, `created`, `dead`), does not call `container_rollback`. The agent calls `container_stop` on the new container (it is kept) and reports outcome `failed`, with that container's status and the last ≤ 50 redacted log lines. When it was `running`, v1.6 item 7 applies (`rolled_back` / `rollback_failed`). A parked older container stays on `-prev` and is not started. *(Amended 2026-10-21 from the w28 spec review.)*
+3. `image_rollback` and jobs are unchanged.

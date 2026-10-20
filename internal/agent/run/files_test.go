@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/redact"
@@ -101,6 +102,84 @@ func TestSecretFileRedactedInTail(t *testing.T) {
 	}
 	if len(sent.Files) != 2 || sent.Files[0].Content != doc || sent.Files[1].Content != plain || sent.Files[0].Name != "key.json" {
 		t.Fatalf("deploy files %+v", sent.Files)
+	}
+}
+
+func TestDeployTailPreviewsEnvAndRedactsFile(t *testing.T) {
+	const (
+		long  = "sekret-env-VALUE-9f3"
+		short = "abcd1234"
+		file  = "file-piece-xyz123"
+		plain = "visible-plain"
+	)
+	if utf8.RuneCountInString(long) != 20 || utf8.RuneCountInString(short) != 8 || len(file) < 6 {
+		t.Fatalf("fixtures %d %d", utf8.RuneCountInString(long), utf8.RuneCountInString(short))
+	}
+	longPreview := redact.SecretPreview(long)
+	shortPreview := redact.SecretPreview(short)
+	if longPreview != "sekr\u2026" || shortPreview != "\u2022\u2022\u2022\u2022" {
+		t.Fatalf("previews %q %q", longPreview, shortPreview)
+	}
+	body := map[string]any{
+		"project": "acme",
+		"entry":   "web",
+		"spec": map[string]any{
+			"kind":              "service",
+			"image":             "ghcr.io/acme/web:1",
+			"ports":             []map[string]any{{"host": 3031, "container": 3031, "public": false}},
+			"healthy_after_sec": 5,
+			"files":             []images.SpecFile{{File: "key.txt", Target: "/etc/key.txt"}},
+		},
+		"env":           map[string]string{"LONG": long, "SHORT": short, "DB_NAME": plain},
+		"secret_keys":   []string{"LONG", "SHORT"},
+		"registry_auth": nil,
+		"force":         true,
+		"spec_hash":     imgHash,
+		"files": []images.TaskFile{{
+			Name: "key.txt", Target: "/etc/key.txt", Content: file, Secret: true,
+		}},
+	}
+	spec, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _, _, seq := imageRun(t)
+	seq.pre = missingStatus()
+	seq.post = runningStatus(0)
+	seq.logs = []string{"long " + long, "short " + short, "file " + file, "plain " + plain}
+	res := mustImage(t, a, "image_deploy", spec, 120)
+	m := assertDeploy(t, res, "succeeded", "succeeded")
+	var text strings.Builder
+	for _, line := range m["lines"].([]any) {
+		text.WriteString(line.(string))
+		text.WriteByte('\n')
+	}
+	got := text.String()
+	for _, secret := range []string{long, short, file} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("kept %q in %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "long "+longPreview) || !strings.Contains(got, "short "+shortPreview) || !strings.Contains(got, "file [REDACTED]") || !strings.Contains(got, "plain "+plain) {
+		t.Fatalf("tail %s", got)
+	}
+	if len(seq.logReqs) != 1 {
+		t.Fatalf("log calls %d", len(seq.logReqs))
+	}
+	req := seq.logReqs[0]
+	envGot := map[string]bool{}
+	for _, v := range req.RedactEnv {
+		envGot[v] = true
+	}
+	if !envGot[long] || !envGot[short] || envGot[plain] || envGot[file] {
+		t.Fatalf("redact_env %v", req.RedactEnv)
+	}
+	fileGot := map[string]bool{}
+	for _, v := range req.Redact {
+		fileGot[v] = true
+	}
+	if !fileGot[file] || fileGot[long] || fileGot[short] || fileGot[plain] {
+		t.Fatalf("redact %v", req.Redact)
 	}
 }
 
@@ -204,7 +283,7 @@ func TestSecretKeysLeaveStatus(t *testing.T) {
 		key   = "s3cret-value-1"
 	)
 	logs := []string{"db " + plain + " ready", "key " + key}
-	run := func(t *testing.T, present bool, keys []string) (container, lines string, redactList []string) {
+	run := func(t *testing.T, present bool, keys []string) (container, lines string, req images.LogsRequest) {
 		t.Helper()
 		a, _, _, seq := imageRun(t)
 		a.policy.Projects = []string{"acme", "mohiguide"}
@@ -226,10 +305,10 @@ func TestSecretKeysLeaveStatus(t *testing.T) {
 		if len(seq.logReqs) != 1 {
 			t.Fatalf("log calls %d", len(seq.logReqs))
 		}
-		return container, b.String(), seq.logReqs[0].Redact
+		return container, b.String(), seq.logReqs[0]
 	}
 	t.Run("listed", func(t *testing.T) {
-		container, lines, list := run(t, true, []string{"API_KEY"})
+		container, lines, req := run(t, true, []string{"API_KEY"})
 		if container != "mohiguide-web" {
 			t.Fatalf("container %q", container)
 		}
@@ -237,33 +316,45 @@ func TestSecretKeysLeaveStatus(t *testing.T) {
 			t.Fatalf("lines %q", lines)
 		}
 		got := map[string]bool{}
-		for _, v := range list {
+		for _, v := range req.RedactEnv {
 			got[v] = true
 		}
 		if got[plain] || !got[key] {
-			t.Fatalf("redact %v", list)
+			t.Fatalf("redact_env %v", req.RedactEnv)
+		}
+		for _, v := range req.Redact {
+			if v == plain || v == key {
+				t.Fatalf("redact %v", req.Redact)
+			}
 		}
 	})
 	t.Run("absent", func(t *testing.T) {
-		container, lines, _ := run(t, false, nil)
+		container, lines, req := run(t, false, nil)
 		if container != "mohiguide-web" {
 			t.Fatalf("container %q", container)
 		}
 		if strings.Contains(lines, plain) || strings.Contains(lines, key) {
 			t.Fatalf("lines %q", lines)
 		}
+		got := map[string]bool{}
+		for _, v := range req.RedactEnv {
+			got[v] = true
+		}
+		if !got[plain] || !got[key] {
+			t.Fatalf("redact_env %v", req.RedactEnv)
+		}
 	})
 	t.Run("empty", func(t *testing.T) {
-		container, lines, list := run(t, true, []string{})
+		container, lines, req := run(t, true, []string{})
 		if container != "mohiguide-web" {
 			t.Fatalf("container %q", container)
 		}
 		if !strings.Contains(lines, plain) || !strings.Contains(lines, key) {
 			t.Fatalf("lines %q", lines)
 		}
-		for _, v := range list {
+		for _, v := range append(append([]string{}, req.Redact...), req.RedactEnv...) {
 			if v == plain || v == key {
-				t.Fatalf("redact %v", list)
+				t.Fatalf("redact %v env %v", req.Redact, req.RedactEnv)
 			}
 		}
 	})

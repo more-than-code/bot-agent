@@ -10,48 +10,103 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
-// Exact is the per-task set of secret values. It redacts each value of at
+// redactedMarker replaces a registry token or a secret-file piece.
+// An env secret uses SecretPreview of the raw value instead.
+const redactedMarker = "[REDACTED]"
+
+// needle is one exact form and the text that replaces it.
+type needle struct {
+	form string
+	repl string
+}
+
+// Exact is the per-task set of secret values. It replaces each value of at
 // least 6 bytes, plus its base64 and JSON-escaped forms, before the v1.0.1
-// regex. The set is not a secrecy boundary: a value can still be printed in
+// regex. NewExact uses [REDACTED]. NewExactEnv uses the preview of the raw
+// value. The set is not a secrecy boundary: a value can still be printed in
 // some other encoding.
 type Exact struct {
-	needles []string
+	needles []needle
 }
 
 // NewExact builds the set. Values shorter than 6 bytes are left out. The
 // same bytes are also stored as standard and URL base64, padded and raw, and
-// as a JSON string body with HTML escaping off and on.
+// as a JSON string body with HTML escaping off and on. Every form is
+// replaced with [REDACTED].
 func NewExact(values ...string) Exact {
-	seen := map[string]struct{}{}
-	var needles []string
-	add := func(s string) {
-		if s == "" {
+	return exactValues(func(string) string { return redactedMarker }, values)
+}
+
+// NewExactEnv is NewExact for env secret values. Every form of a value is
+// replaced with SecretPreview of that raw value.
+func NewExactEnv(values ...string) Exact {
+	return exactValues(SecretPreview, values)
+}
+
+// Merge joins sets. Forms are longest first. The same form keeps
+// [REDACTED] when either set uses it; otherwise the earlier set wins.
+func Merge(parts ...Exact) Exact {
+	replOf := map[string]string{}
+	var forms []string
+	for _, part := range parts {
+		for _, n := range part.needles {
+			if n.form == "" {
+				continue
+			}
+			prev, ok := replOf[n.form]
+			if !ok {
+				replOf[n.form] = n.repl
+				forms = append(forms, n.form)
+				continue
+			}
+			if prev != redactedMarker && n.repl == redactedMarker {
+				replOf[n.form] = redactedMarker
+			}
+		}
+	}
+	return sortedExact(forms, replOf)
+}
+
+func exactValues(replacement func(string) string, values []string) Exact {
+	replOf := map[string]string{}
+	var forms []string
+	add := func(form, repl string) {
+		if form == "" {
 			return
 		}
-		if _, ok := seen[s]; ok {
+		if _, ok := replOf[form]; ok {
 			return
 		}
-		seen[s] = struct{}{}
-		needles = append(needles, s)
+		replOf[form] = repl
+		forms = append(forms, form)
 	}
 	for _, v := range values {
 		if len(v) < 6 {
 			continue
 		}
-		add(v)
-		add(base64.StdEncoding.EncodeToString([]byte(v)))
-		add(base64.RawStdEncoding.EncodeToString([]byte(v)))
-		add(base64.URLEncoding.EncodeToString([]byte(v)))
-		add(base64.RawURLEncoding.EncodeToString([]byte(v)))
-		add(jsonBody(v, false))
-		add(jsonBody(v, true))
+		repl := replacement(v)
+		add(v, repl)
+		add(base64.StdEncoding.EncodeToString([]byte(v)), repl)
+		add(base64.RawStdEncoding.EncodeToString([]byte(v)), repl)
+		add(base64.URLEncoding.EncodeToString([]byte(v)), repl)
+		add(base64.RawURLEncoding.EncodeToString([]byte(v)), repl)
+		add(jsonBody(v, false), repl)
+		add(jsonBody(v, true), repl)
 	}
-	sort.Slice(needles, func(i, j int) bool {
-		if len(needles[i]) != len(needles[j]) {
-			return len(needles[i]) > len(needles[j])
+	return sortedExact(forms, replOf)
+}
+
+func sortedExact(forms []string, replOf map[string]string) Exact {
+	sort.Slice(forms, func(i, j int) bool {
+		if len(forms[i]) != len(forms[j]) {
+			return len(forms[i]) > len(forms[j])
 		}
-		return needles[i] < needles[j]
+		return forms[i] < forms[j]
 	})
+	needles := make([]needle, len(forms))
+	for i, form := range forms {
+		needles[i] = needle{form: form, repl: replOf[form]}
+	}
 	return Exact{needles: needles}
 }
 
@@ -59,7 +114,8 @@ func NewExact(values ...string) Exact {
 // also has to drop every other copy of the values.
 func (e *Exact) Clear() {
 	for i := range e.needles {
-		e.needles[i] = ""
+		e.needles[i].form = ""
+		e.needles[i].repl = ""
 	}
 	e.needles = nil
 }
@@ -99,10 +155,10 @@ func (e Exact) Payload(v map[string]any) map[string]any {
 
 func (e Exact) redact(s string) string {
 	for _, n := range e.needles {
-		if n == "" {
+		if n.form == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, n, "[REDACTED]")
+		s = strings.ReplaceAll(s, n.form, n.repl)
 	}
 	return apply(s)
 }

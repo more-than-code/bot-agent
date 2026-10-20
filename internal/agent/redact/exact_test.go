@@ -116,6 +116,70 @@ func TestExactValueForms(t *testing.T) {
 	}
 }
 
+func TestExactEnvPreviewAndFileRedacted(t *testing.T) {
+	const (
+		envLong  = "sekret-env-VALUE-9f3"
+		envShort = "abcd1234"
+		envJSON  = "ab<cd-0123456789"
+		fileVal  = "file-piece-xyz123"
+		short    = "abcde"
+	)
+	if len(envLong) < 6 || len(envShort) < 6 || len(envJSON) < 6 || len(fileVal) < 6 || len(short) >= 6 {
+		t.Fatal("fixtures")
+	}
+	longPreview := SecretPreview(envLong)
+	shortPreview := SecretPreview(envShort)
+	jsonPreview := SecretPreview(envJSON)
+	if longPreview != "sekr\u2026" || shortPreview != "\u2022\u2022\u2022\u2022" || jsonPreview != "ab<c\u2026" {
+		t.Fatalf("previews %q %q %q", longPreview, shortPreview, jsonPreview)
+	}
+	ex := Merge(NewExact(fileVal, short), NewExactEnv(envLong, envShort, envJSON, short))
+	for _, form := range formsOf(envLong) {
+		assertForm(t, ex, form, longPreview)
+	}
+	for _, form := range formsOf(envShort) {
+		assertForm(t, ex, form, shortPreview)
+	}
+	for _, form := range formsOf(envJSON) {
+		assertForm(t, ex, form, jsonPreview)
+	}
+	for _, form := range formsOf(fileVal) {
+		assertForm(t, ex, form, "[REDACTED]")
+	}
+	if got := ex.Text("note " + short + " end"); got != "note "+short+" end" {
+		t.Fatalf("short value changed: %q", got)
+	}
+	if got := ex.Text("password=" + envLong); got != "password=[REDACTED]" {
+		t.Fatalf("keyword after preview: %q", got)
+	}
+	if got := Merge(NewExact(envLong), NewExactEnv(envLong)).Text("x " + envLong); got != "x [REDACTED]" {
+		t.Fatalf("file wins %q", got)
+	}
+	if got := Merge(NewExactEnv(envLong), NewExact(envLong)).Text("x " + envLong); got != "x [REDACTED]" {
+		t.Fatalf("file wins second %q", got)
+	}
+}
+
+func formsOf(v string) []string {
+	return []string{
+		v,
+		b64(base64.StdEncoding, v),
+		b64(base64.RawStdEncoding, v),
+		b64(base64.URLEncoding, v),
+		b64(base64.RawURLEncoding, v),
+		jsonBodyOf(v, false),
+		jsonBodyOf(v, true),
+	}
+}
+
+func assertForm(t *testing.T, ex Exact, form, want string) {
+	t.Helper()
+	got := ex.Text("x " + form + " y")
+	if got != "x "+want+" y" {
+		t.Fatalf("form %q → %q, want %q", form, got, "x "+want+" y")
+	}
+}
+
 func TestExactBeforeRegex(t *testing.T) {
 	space := "correct horse"
 	urlSecret := "p@ssword extra"

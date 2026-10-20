@@ -72,7 +72,9 @@ func TestImageSequences(t *testing.T) {
 
 	t.Run("restart rolls back", func(t *testing.T) {
 		a, h, clock, seq := imageRun(t)
-		seq.pre = missingStatus()
+		// The container before deploy was running, so a failed wait still rolls back.
+		seq.pre = runningStatus(0)
+		seq.preHash = strings.Repeat("ab", 32)
 		seq.post = runningStatus(1)
 		res := mustImage(t, a, "image_deploy", serviceSpec(false, 5, 3031), 120)
 		assertDeploy(t, res, "rolled_back", "failed")
@@ -84,7 +86,8 @@ func TestImageSequences(t *testing.T) {
 
 	t.Run("exited rolls back", func(t *testing.T) {
 		a, _, clock, seq := imageRun(t)
-		seq.pre = missingStatus()
+		seq.pre = runningStatus(0)
+		seq.preHash = strings.Repeat("ab", 32)
 		seq.post = exitedStatus(1)
 		res := mustImage(t, a, "image_deploy", serviceSpec(false, 30, 3031), 120)
 		assertDeploy(t, res, "rolled_back", "failed")
@@ -95,7 +98,8 @@ func TestImageSequences(t *testing.T) {
 
 	t.Run("rollback failed", func(t *testing.T) {
 		a, h, clock, seq := imageRun(t)
-		seq.pre = missingStatus()
+		seq.pre = runningStatus(0)
+		seq.preHash = strings.Repeat("ab", 32)
 		seq.post = exitedStatus(1)
 		seq.rollback = "conflict"
 		res := mustImage(t, a, "image_deploy", serviceSpec(false, 5, 3031), 120)
@@ -263,7 +267,8 @@ func TestImageHealthWait(t *testing.T) {
 	t.Run("refused probes wait out the task", func(t *testing.T) {
 		a, _, clock, seq := imageRun(t)
 		start := clock.now()
-		seq.pre = missingStatus()
+		seq.pre = runningStatus(0)
+		seq.preHash = strings.Repeat("ab", 32)
 		seq.post = runningStatus(0)
 		a.configured = []protocol.HealthCheck{{
 			ID: "up", Service: "web", Protocol: "tcp", Port: 3031, IntervalSec: 60,
@@ -829,25 +834,34 @@ func TestContainerListFailureSkipsFrame(t *testing.T) {
 }
 
 type imageSeq struct {
-	pullCode   string
-	pullShape  string
-	pullRef    string
-	pullBody   []byte
-	deployBody []byte
-	pre        images.ImageStatus
-	preHash    string
-	preFiles   string
-	post       images.ImageStatus
-	postHash   string
-	postFiles  string
-	deployed   bool
-	rollback   string
-	stopErr    bool
-	logs       []string
-	linesReq   int
-	waitErr    bool
-	waitCode   string
-	logReqs    []images.LogsRequest
+	pullCode       string
+	pullShape      string
+	pullRef        string
+	pullBody       []byte
+	deployBody     []byte
+	pre            images.ImageStatus
+	preHash        string
+	preFiles       string
+	post           images.ImageStatus
+	postHash       string
+	postFiles      string
+	deployed       bool
+	rollback       string
+	stopErr        bool
+	logs           []string
+	linesReq       int
+	waitErr        bool
+	waitCode       string
+	logReqs        []images.LogsRequest
+	rollbackStarts int
+	health         *string
+	listN          int
+	listErr        bool
+	listEmpty      bool
+	stops          int
+	stopped        images.ImageStatus
+	stoppedSet     bool
+	prev           *images.PrevView
 }
 
 func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
@@ -870,7 +884,9 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 		return images.Encode(images.PullResponse{Digest: imgDigest, ImageID: "sha256:image"}), nil
 	case images.VerbStatus:
 		st, hash, files := s.pre, s.preHash, s.preFiles
-		if s.deployed {
+		if s.stops > 0 && s.stoppedSet {
+			st = s.stopped
+		} else if s.deployed {
 			if s.waitErr {
 				return nil, errors.New("status")
 			}
@@ -879,7 +895,7 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 			}
 			st, hash, files = s.post, s.postHash, s.postFiles
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: files}), nil
+		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: files, Prev: s.prev}), nil
 	case images.VerbDeploy:
 		s.deployed = true
 		s.deployBody = cp
@@ -887,6 +903,8 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 	case images.VerbRemove:
 		return images.Encode(images.ActionResult{Status: missingStatus()}), nil
 	case images.VerbRollback:
+		// The helper renames -prev onto the current name and Starts it.
+		s.rollbackStarts++
 		if err := readRollback(cp); err != nil {
 			return nil, err
 		}
@@ -895,10 +913,26 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 		}
 		return images.Encode(images.IDResponse{ContainerID: "prev"}), nil
 	case images.VerbStop:
+		s.stops++
 		if s.stopErr {
 			return nil, errors.New("stop")
 		}
 		return images.Encode(images.ActionResult{Status: missingStatus()}), nil
+	case images.VerbList:
+		s.listN++
+		if s.listErr {
+			return nil, errHelper
+		}
+		if s.listEmpty {
+			return images.Encode(images.ListResponse{Items: []images.ContainerInfo{}}), nil
+		}
+		d := imgDigest
+		item := images.ContainerInfo{ID: "abc", Name: "/acme-web", State: "running", Digest: &d}
+		if s.health != nil {
+			v := *s.health
+			item.Health = &v
+		}
+		return images.Encode(images.ListResponse{Items: []images.ContainerInfo{item}}), nil
 	case images.VerbLogs:
 		var req images.LogsRequest
 		if err := json.Unmarshal(cp, &req); err != nil {

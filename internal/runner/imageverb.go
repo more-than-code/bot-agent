@@ -710,7 +710,7 @@ func prevView(s slot) *images.PrevView {
 
 func doLogsCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
 	var req images.LogsRequest
-	if images.Decode(in, &req) != nil || !images.ValidEntry(req.Entry) || req.Lines < 1 || req.Lines > 2000 || !images.ValidRedact(req.Redact) {
+	if images.Decode(in, &req) != nil || !images.ValidEntry(req.Entry) || req.Lines < 1 || req.Lines > 2000 || !images.ValidRedact(req.Redact) || !images.ValidRedact(req.RedactEnv) {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
 	if code := checkProject(pol, req.Project); code != "" {
@@ -733,7 +733,7 @@ func doLogsCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byt
 			return imgErr(sys, engReason(err))
 		}
 		text, cutDemux := demux(raw)
-		ex := redact.NewExact(req.Redact...)
+		ex := redact.Merge(redact.NewExact(req.Redact...), redact.NewExactEnv(req.RedactEnv...))
 		lines, cutJournal := redact.JournalTask(splitLines(text), ex)
 		ex.Clear()
 		if lines == nil {

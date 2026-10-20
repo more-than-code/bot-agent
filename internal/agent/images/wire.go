@@ -95,13 +95,17 @@ const (
 )
 
 // LogsRequest is container_logs. Lines is 1..2000.
-// Redact is the task's exact values. The helper removes them from each raw
-// line and does not log or return the list. Omit it when there are none.
+// Redact is the registry token and secret-file pieces. The helper replaces
+// each form with [REDACTED]. RedactEnv is the env secret values. The helper
+// replaces each form with the preview of the raw value. Omit a list when it
+// is empty. Both lists use the same limits. The helper does not log or
+// return either list. An older helper rejects redact_env as an unknown field.
 type LogsRequest struct {
-	Project string   `json:"project"`
-	Entry   string   `json:"entry"`
-	Lines   int      `json:"lines"`
-	Redact  []string `json:"redact,omitempty"`
+	Project   string   `json:"project"`
+	Entry     string   `json:"entry"`
+	Lines     int      `json:"lines"`
+	Redact    []string `json:"redact,omitempty"`
+	RedactEnv []string `json:"redact_env,omitempty"`
 }
 
 // ValidRedact reports whether redact is absent or within the v1.5 limits.

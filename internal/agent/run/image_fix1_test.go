@@ -88,7 +88,8 @@ func TestImageHTTPChecks(t *testing.T) {
 	t.Run("500", func(t *testing.T) {
 		port := httpProbe(t, http.StatusInternalServerError)
 		a, _, clock, seq := imageRun(t)
-		seq.pre = missingStatus()
+		seq.pre = runningStatus(0)
+		seq.preHash = strings.Repeat("ab", 32)
 		seq.post = runningStatus(0)
 		a.configured = []protocol.HealthCheck{{
 			ID: "up", Service: "web", Protocol: "http", Port: port, Path: "/health",
@@ -120,7 +121,8 @@ func TestImagePausedWaitsOutTheTask(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			a, h, clock, seq := imageRun(t)
 			start := clock.now()
-			seq.pre = missingStatus()
+			seq.pre = runningStatus(0)
+			seq.preHash = strings.Repeat("ab", 32)
 			seq.post = stateStatus(state)
 			res := mustImage(t, a, "image_deploy", serviceSpec(false, 5, 3031), 120)
 			assertDeploy(t, res, "rolled_back", "failed")
@@ -190,11 +192,16 @@ func TestDeployTailRedactsSpaceAndURL(t *testing.T) {
 		t.Fatalf("log calls %d", len(seq.logReqs))
 	}
 	got := map[string]bool{}
-	for _, v := range seq.logReqs[0].Redact {
+	for _, v := range seq.logReqs[0].RedactEnv {
 		got[v] = true
 	}
 	if !got[space] || !got[urlSecret] {
-		t.Fatalf("redact %v", seq.logReqs[0].Redact)
+		t.Fatalf("redact_env %v", seq.logReqs[0].RedactEnv)
+	}
+	for _, v := range seq.logReqs[0].Redact {
+		if v == space || v == urlSecret {
+			t.Fatalf("redact %v", seq.logReqs[0].Redact)
+		}
 	}
 	if strings.Contains(blob, `"redact"`) {
 		t.Fatal("redact list in the result")

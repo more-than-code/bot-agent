@@ -32,29 +32,33 @@ type ImageReq struct {
 	SecretKeys []string
 }
 
-// SecretValues is the exact set for this task. With SecretKeys set, only
-// those env values join; otherwise every env value does. The registry token
-// and the secret-file items always join. The set lives only for the task.
-func (r ImageReq) SecretValues() []string {
-	vals := make([]string, 0, len(r.Env)+1)
+// SecretValues splits the exact set for this task. env is the env secret
+// values: every env value when SecretKeys is nil, otherwise only the listed
+// keys. file is the registry token and the secret-file pieces. Env values
+// are previewed. The token and file pieces stay [REDACTED]. Both slices
+// live only for the task.
+func (r ImageReq) SecretValues() (env, file []string) {
 	if r.SecretKeys == nil {
+		env = make([]string, 0, len(r.Env))
 		for _, v := range r.Env {
-			vals = append(vals, v)
+			env = append(env, v)
 		}
 	} else {
+		env = make([]string, 0, len(r.SecretKeys))
 		for _, k := range r.SecretKeys {
-			vals = append(vals, r.Env[k])
+			env = append(env, r.Env[k])
 		}
 	}
+	file = make([]string, 0, 1)
 	if r.Auth != nil {
-		vals = append(vals, r.Auth.Token)
+		file = append(file, r.Auth.Token)
 	}
 	for _, f := range r.Files {
 		if f.Secret {
-			vals = append(vals, redact.FileSecrets(f.Content)...)
+			file = append(file, redact.FileSecrets(f.Content)...)
 		}
 	}
-	return vals
+	return env, file
 }
 
 // ImageKind reports the eight v1.4 task kinds.

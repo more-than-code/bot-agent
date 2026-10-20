@@ -173,19 +173,17 @@ func TestSecretValuesFollowsKeys(t *testing.T) {
 		}
 		return false
 	}
-	absent := parse([]byte(body))
-	if !has(absent.SecretValues(), plain) || !has(absent.SecretValues(), key) || !has(absent.SecretValues(), token) || !has(absent.SecretValues(), file) {
-		t.Fatalf("absent %q", absent.SecretValues())
+	absentEnv, absentFile := parse([]byte(body)).SecretValues()
+	if !has(absentEnv, plain) || !has(absentEnv, key) || has(absentFile, plain) || has(absentFile, key) || !has(absentFile, token) || !has(absentFile, file) {
+		t.Fatalf("absent env %q file %q", absentEnv, absentFile)
 	}
-	listed := parse(withSecretKeys([]byte(body), `["API_KEY"]`))
-	got := listed.SecretValues()
-	if has(got, plain) || !has(got, key) || !has(got, token) || !has(got, file) {
-		t.Fatalf("listed %q", got)
+	listedEnv, listedFile := parse(withSecretKeys([]byte(body), `["API_KEY"]`)).SecretValues()
+	if has(listedEnv, plain) || !has(listedEnv, key) || has(listedFile, plain) || has(listedFile, key) || !has(listedFile, token) || !has(listedFile, file) {
+		t.Fatalf("listed env %q file %q", listedEnv, listedFile)
 	}
-	empty := parse(withSecretKeys([]byte(body), `[]`))
-	got = empty.SecretValues()
-	if has(got, plain) || has(got, key) || !has(got, token) || !has(got, file) {
-		t.Fatalf("empty %q", got)
+	emptyEnv, emptyFile := parse(withSecretKeys([]byte(body), `[]`)).SecretValues()
+	if has(emptyEnv, plain) || has(emptyEnv, key) || len(emptyEnv) != 0 || has(emptyFile, plain) || has(emptyFile, key) || !has(emptyFile, token) || !has(emptyFile, file) {
+		t.Fatalf("empty env %q file %q", emptyEnv, emptyFile)
 	}
 	if _, code := ParseImage(task(host, "image_deploy", nil, live, withSecretKeys([]byte(body), `["NOPE"]`)), pol); code != "bad_spec" {
 		t.Fatalf("missing key %s", code)
