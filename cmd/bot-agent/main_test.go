@@ -15,21 +15,21 @@ func TestVersion(t *testing.T) {
 	if err := dispatch([]string{"version"}, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if buf.String() != "0.2.3\n" {
+	if buf.String() != "0.2.4\n" {
 		t.Fatalf("%q", buf.String())
 	}
 	buf.Reset()
 	if err := dispatch([]string{"--version"}, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if buf.String() != "0.2.3\n" {
+	if buf.String() != "0.2.4\n" {
 		t.Fatalf("%q", buf.String())
 	}
 	buf.Reset()
 	if err := dispatch([]string{"-version"}, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if buf.String() != "0.2.3\n" {
+	if buf.String() != "0.2.4\n" {
 		t.Fatalf("%q", buf.String())
 	}
 	if err := dispatch([]string{"version", "extra"}, &buf); err == nil {
