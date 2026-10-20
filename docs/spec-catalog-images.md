@@ -308,7 +308,7 @@ run/stop/restart/logs/status reuse the wave 1 routes and dispatch by kind. Check
 
 ## 7. Rollback
 
-- **Per host:** set `images = []` (or remove `projects`) in `runner.toml`, then the helper refuses image verbs. Or revert the helper unit's `ReadWritePaths=/var/run/docker.sock`. Containers deploybot created keep running under their restart policy; remove them by hand if wanted.
+- **Per host:** set `images = []` (or remove `projects`) in `runner.toml`, then the helper refuses image verbs. Or revert the helper unit's `ReadWritePaths=/var/run/docker.sock`. Containers Deploybot created keep running under their restart policy; remove them by hand if wanted.
 - **API, console and MCP:** revert the commits; image entries become `not_implemented` again. Migration 0009 has a down script that drops the encrypted data, so take a dump first.
 - **mohiguide:** the pilot is shadow-only. Remove the `mohiguide-webadmin` container and volume; swag never pointed at them.
 
@@ -378,7 +378,7 @@ These rules are normative and take precedence over the earlier text where they a
    - `HostConfig.PidsLimit = 1024`;
    - an optional `memory_mb` in the entry spec → `HostConfig.Memory` (no default limit; the console suggests one). Swap equals memory, so no extra swap.
    - Anonymous volumes from image `VOLUME` lines are removed with the container: `container_remove` and the `-prev` cleanup pass `v=1`, which Docker applies to anonymous volumes only. Named volumes are never removed.
-   - `max_containers` is enforced by the helper, counting live containers, `-prev` containers and job containers with deploybot labels.
+   - `max_containers` is enforced by the helper, counting live containers, `-prev` containers and job containers with Deploybot labels.
 6. **User:** parsed as the Engine does (`user`, `uid`, `user:group`, `uid:gid`). Refused: uid 0, gid 0, `root` in either position, and leading-zero numerics. Allowed: `^[a-z_][a-z0-9_-]{0,31}$` names or positive uids/gids.
 7. **Encryption:** every ciphertext has a fresh random 96-bit nonce stored beside it, AES-GCM associated data = `project_id | set or registry | key`, and decryption fails closed. The key, nonces and plaintext are never logged.
 8. **Env:**
@@ -386,7 +386,7 @@ These rules are normative and take precedence over the earlier text where they a
    - **`secret_env`:** references resolve only within the entry's own project. The set name follows `^[a-z0-9][a-z0-9-]{0,47}$` and is split at the first `.`.
    - **Previews, the MCP D25 plan, the history and audit** show key names and secret/plain flags only, never values. That includes the console `docker run` preview, which shows `-e KEY` for set and secret keys.
 9. **Honesty about leaks (§3.4 addendum):** redaction of stdout/logs is a best-effort filter, not a boundary. Anyone allowed to `deploy` can choose a command or image that prints a value in another encoding or sends it over the network. Containers keep outbound network access, which apps such as mo-services need for FCM.
-10. **Network scope (decision 3 clarified):** in 2a only deploybot-created containers of one project share `deploybot-<slug>`. Compose containers (swag and the others) are **not** attached, so name resolution between swag and a deploybot container only works once both run under deploybot (the full move). The helper never connects a container to any network other than its project's. Docker's inter-bridge isolation is assumed (the default iptables setup); the live check confirms it on pi3 and mohiguide.
+10. **Network scope (decision 3 clarified):** in 2a only Deploybot-created containers of one project share `deploybot-<slug>`. Compose containers (swag and the others) are **not** attached, so name resolution between swag and a Deploybot container only works once both run under Deploybot (the full move). The helper never connects a container to any network other than its project's. Docker's inter-bridge isolation is assumed (the default iptables setup); the live check confirms it on pi3 and mohiguide.
 11. **Shared hosts:** the approval covers the spec, the env-set names and the key names, but not values. A guest project can change secret values without a new approval; that is accepted and documented (the host owner approves *what runs*, not the guest's credentials).
 
 ## 13. Changes during implementation (all approved by Joe, 2026-10-15/16)

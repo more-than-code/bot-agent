@@ -7,7 +7,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
-// Owned is one running deploybot program reported by the helper.
+// Owned is one running Deploybot program reported by the helper.
 type Owned struct {
 	Unit    string
 	Project string

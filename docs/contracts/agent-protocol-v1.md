@@ -177,7 +177,7 @@ Supersedes the "whenever its discovered set changes (checked every 60 s)" senten
 
 ### Host policy
 
-`/etc/bot-agent/runner.toml`, written by the host's administrator, never by deploybot:
+`/etc/bot-agent/runner.toml`, written by the host's administrator, never by Deploybot:
 
 ```toml
 enabled = true
@@ -400,7 +400,7 @@ A content-only change could not be rolled back: `image_rollback` redeployed the 
 
 ## v1.6 Docker health status (2026-10-18, approved spec `docs/spec-docker-health.md` rev 1; additive, gated)
 
-Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; deploybot checks remain the fallback (api-v1 v1.11).
+Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; Deploybot checks remain the fallback (api-v1 v1.11).
 
 1. **`container_list`** items gain `"health": "healthy"|"unhealthy"|"starting"|null`. The helper takes it from the Engine's structured `Health.Status` when present, otherwise from the `Status` text suffix `(healthy)`, `(unhealthy)` or `(health: starting)`; any other value, or no suffix, is `null`. No new verb, call or privilege.
 2. **Gate:** `hello.programs` gains `"docker_health": true` from an agent that implements this section. The server sends `config.docker_health: true` only to a host that advertised it (an older agent refuses unknown config keys); an older server never sends it. `config_update` carries it the same way. Without `config.docker_health: true` the agent emits no docker samples.
