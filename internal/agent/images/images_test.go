@@ -253,6 +253,88 @@ func TestHealthcheckValidate(t *testing.T) {
 	}
 }
 
+func TestLoggingValidate(t *testing.T) {
+	good := func(kind string) ImageSpec {
+		s := ImageSpec{
+			Kind: kind, Image: "ghcr.io/joe-and-his-friends/app:1",
+			Logging: &Logging{MaxSizeMB: 5, MaxFiles: 2},
+		}
+		if kind == "job" {
+			s.TimeoutSec = 10
+		}
+		return s
+	}
+	for _, kind := range []string{"service", "job"} {
+		s := good(kind)
+		if s.Validate() != "" {
+			t.Fatalf("%s %s", kind, s.Validate())
+		}
+		if s.Logging.MaxSizeMB != 5 || s.Logging.MaxFiles != 2 {
+			t.Fatal("defaults were written onto logging")
+		}
+		n, k, ok := LogLimit(s)
+		if !ok || n != 5 || k != 2 {
+			t.Fatalf("limit %d %d %v", n, k, ok)
+		}
+	}
+	bare := ImageSpec{Kind: "service", Image: "ghcr.io/joe-and-his-friends/app:1"}
+	if bare.Validate() != "" || bare.Logging != nil {
+		t.Fatal("nil logging")
+	}
+	n, k, ok := LogLimit(bare)
+	if !ok || n != 10 || k != 3 {
+		t.Fatalf("default %d %d %v", n, k, ok)
+	}
+	bad := []struct {
+		field string
+		fn    func(*Logging)
+	}{
+		{"logging.max_size_mb", func(l *Logging) { l.MaxSizeMB = 0 }},
+		{"logging.max_size_mb", func(l *Logging) { l.MaxSizeMB = 101 }},
+		{"logging.max_size_mb", func(l *Logging) { l.MaxSizeMB = -1 }},
+		{"logging.max_files", func(l *Logging) { l.MaxFiles = 0 }},
+		{"logging.max_files", func(l *Logging) { l.MaxFiles = 11 }},
+	}
+	for _, kind := range []string{"service", "job"} {
+		for _, tc := range bad {
+			s := good(kind)
+			tc.fn(s.Logging)
+			if got := s.Validate(); got != tc.field {
+				t.Fatalf("%s %s got %q", kind, tc.field, got)
+			}
+			if _, _, ok := LogLimit(s); ok {
+				t.Fatalf("%s %s accepted", kind, tc.field)
+			}
+		}
+	}
+	edges := []Logging{{MaxSizeMB: 1, MaxFiles: 1}, {MaxSizeMB: 100, MaxFiles: 10}}
+	for _, l := range edges {
+		s := good("service")
+		s.Logging = &l
+		if s.Validate() != "" {
+			t.Fatalf("%+v", l)
+		}
+	}
+	var decoded ImageSpec
+	raw := `{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","logging":{"max_size_mb":10,"max_files":3}}`
+	if Decode([]byte(raw), &decoded) != nil || decoded.Logging == nil || decoded.Logging.MaxSizeMB != 10 || decoded.Logging.MaxFiles != 3 {
+		t.Fatalf("%+v", decoded.Logging)
+	}
+	if Decode([]byte(`{"kind":"job","image":"ghcr.io/joe-and-his-friends/app:1","logging":null}`), &decoded) != nil || decoded.Logging != nil {
+		t.Fatal("null logging")
+	}
+	for _, raw := range []string{
+		`{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","logging":{"max_size_mb":10,"max_files":3,"extra":1}}`,
+		`{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","logging":{"max_size_mb":10.5,"max_files":3}}`,
+		`{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","logging":{"max_size_mb":"10","max_files":3}}`,
+		`{"kind":"service","image":"ghcr.io/joe-and-his-friends/app:1","logging":[]}`,
+	} {
+		if Decode([]byte(raw), &ImageSpec{}) == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+}
+
 func TestMergedEnvLimit(t *testing.T) {
 	env := map[string]string{}
 	for i := 0; i < 8*256+64+64; i++ {

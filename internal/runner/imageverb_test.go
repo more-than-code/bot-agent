@@ -753,7 +753,8 @@ func TestGoldenCreateBody(t *testing.T) {
 			],
 			"RestartPolicy":{"Name":"unless-stopped"},
 			"NetworkMode":"deploybot-mohiguide","CgroupnsMode":"private","PidsLimit":1024,
-			"Memory":67108864,"MemorySwap":67108864
+			"Memory":67108864,"MemorySwap":67108864,
+			"LogConfig":{"Type":"json-file","Config":{"max-size":"10m","max-file":"3"}}
 		},
 		"NetworkingConfig":{"EndpointsConfig":{"deploybot-mohiguide":{"Aliases":["web"]}}}
 	}`
@@ -797,7 +798,8 @@ func TestGoldenCreateBody(t *testing.T) {
 		},
 		"HostConfig":{
 			"RestartPolicy":{"Name":"no"},
-			"NetworkMode":"deploybot-mohiguide","CgroupnsMode":"private","PidsLimit":1024
+			"NetworkMode":"deploybot-mohiguide","CgroupnsMode":"private","PidsLimit":1024,
+			"LogConfig":{"Type":"json-file","Config":{"max-size":"10m","max-file":"3"}}
 		},
 		"NetworkingConfig":{"EndpointsConfig":{"deploybot-mohiguide":{"Aliases":["job"]}}}
 	}`

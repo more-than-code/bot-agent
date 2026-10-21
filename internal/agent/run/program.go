@@ -55,6 +55,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	p.Files = true
 	p.DockerHealth = true
 	p.Healthcheck = true
+	p.Logging = true
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

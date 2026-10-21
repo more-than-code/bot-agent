@@ -32,6 +32,20 @@ type restartBody struct {
 	Name string `json:"Name"`
 }
 
+// logConfigBody is the Engine HostConfig.LogConfig. Docker fixes it at
+// create, so every container_deploy sets it. Type is always json-file:
+// a daemon default of journald or local would make entry_logs miss lines.
+// Config values are strings, "<n>m" and "<k>".
+type logOptBody struct {
+	MaxSize string `json:"max-size"`
+	MaxFile string `json:"max-file"`
+}
+
+type logConfigBody struct {
+	Type   string     `json:"Type"`
+	Config logOptBody `json:"Config"`
+}
+
 type hostConfigBody struct {
 	PortBindings  map[string][]portBind `json:"PortBindings,omitempty"`
 	Mounts        []mountBody           `json:"Mounts,omitempty"`
@@ -41,6 +55,7 @@ type hostConfigBody struct {
 	PidsLimit     int64                 `json:"PidsLimit"`
 	Memory        int64                 `json:"Memory,omitempty"`
 	MemorySwap    int64                 `json:"MemorySwap,omitempty"`
+	LogConfig     logConfigBody         `json:"LogConfig"`
 }
 
 type endpointBody struct {
@@ -93,6 +108,10 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 	if !ok {
 		return nil, programs.ReasonBadSpec
 	}
+	sizeMB, logFiles, ok := images.LogLimit(spec)
+	if !ok {
+		return nil, programs.ReasonBadSpec
+	}
 	restart := spec.Restart
 	if spec.Kind == "job" {
 		restart = "no"
@@ -105,6 +124,13 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 			NetworkMode:   net,
 			CgroupnsMode:  "private",
 			PidsLimit:     1024,
+			LogConfig: logConfigBody{
+				Type: "json-file",
+				Config: logOptBody{
+					MaxSize: strconv.Itoa(sizeMB) + "m",
+					MaxFile: strconv.Itoa(logFiles),
+				},
+			},
 		},
 		NetworkingConfig: networkConfigBody{
 			EndpointsConfig: map[string]endpointBody{

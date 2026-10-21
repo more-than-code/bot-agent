@@ -103,9 +103,11 @@ type Programs struct {
 	Files bool `json:"files"`
 	// DockerHealth is true when this agent emits Docker health samples.
 	// Healthcheck is true when it accepts ImageSpec healthcheck.
-	// Both are sent whenever the programs object is sent.
+	// Logging is true when it caps container logs (agent-protocol v1.8).
+	// These three are sent whenever the programs object is sent.
 	DockerHealth bool `json:"docker_health"`
 	Healthcheck  bool `json:"healthcheck"`
+	Logging      bool `json:"logging"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.

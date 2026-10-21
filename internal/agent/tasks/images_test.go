@@ -52,6 +52,15 @@ func TestImageCheckOrder(t *testing.T) {
 		{"healthcheck unknown key", off, task(host, "image_deploy", nil, live, withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0,"extra":1}`)), "bad_spec"},
 		{"healthcheck interval", on, task(host, "image_deploy", nil, live, withHealthcheck(good, `{"test":["wget"],"interval_sec":4,"timeout_sec":1,"retries":1,"start_period_sec":0}`)), "bad_spec"},
 		{"healthcheck on job", on, task(host, "image_deploy", nil, live, withHealthcheck(deployImage("job", "ghcr.io/acme/web:1"), `{"test":["echo","secret-argv"],"interval_sec":5,"timeout_sec":1,"retries":1,"start_period_sec":0}`)), "bad_spec"},
+		{"logging ok", on, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5,"max_files":2}`)), ""},
+		{"logging on job", on, task(host, "image_deploy", nil, live, withLogging(jobTaskSpec(), `{"max_size_mb":1,"max_files":10}`)), ""},
+		{"logging null", on, task(host, "image_deploy", nil, live, withLogging(good, `null`)), ""},
+		{"logging unknown key", off, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5,"max_files":2,"extra":1}`)), "bad_spec"},
+		{"logging size", on, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":101,"max_files":2}`)), "bad_spec"},
+		{"logging files", on, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5,"max_files":0}`)), "bad_spec"},
+		{"logging one key", on, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5}`)), "bad_spec"},
+		{"logging fraction", off, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5.5,"max_files":2}`)), "bad_spec"},
+		{"logs logging key", off, task(host, "image_logs", nil, live, []byte(`{"project":"acme","entry":"web","lines":20,"logging":{"max_size_mb":10,"max_files":3}}`)), "bad_spec"},
 		{"rollback ok", on, task(host, "image_rollback", nil, live, rollbackSpec(imgDigest)), ""},
 		{"rollback omits digest", on, task(host, "image_rollback", nil, live, deploySpec(false, "")), "bad_spec"},
 		{"rollback null digest", on, task(host, "image_rollback", nil, live, nullDigestSpec()), "bad_spec"},
@@ -109,6 +118,14 @@ func withSecretKeys(spec []byte, keys string) []byte {
 
 func withHealthcheck(spec []byte, hc string) []byte {
 	return []byte(strings.Replace(string(spec), `"healthy_after_sec":5`, `"healthy_after_sec":5,"healthcheck":`+hc, 1))
+}
+
+func withLogging(spec []byte, logging string) []byte {
+	return []byte(strings.Replace(string(spec), `"kind":"`, `"logging":`+logging+`,"kind":"`, 1))
+}
+
+func jobTaskSpec() []byte {
+	return []byte(`{"project":"acme","entry":"web","spec":{"kind":"job","image":"ghcr.io/acme/web:1","timeout_sec":10},"env":{},"registry_auth":null,"force":false,"spec_hash":"` + imgHash + `"}`)
 }
 
 func withDigest(spec []byte) []byte {

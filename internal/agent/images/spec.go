@@ -40,6 +40,26 @@ type ImageSpec struct {
 	// The API applies defaults; this process rejects an out-of-range number
 	// and does not fill those defaults. A job cannot carry one.
 	Healthcheck *Healthcheck `json:"healthcheck,omitempty"`
+	// Logging is api-v1 v1.14. Nil means absent or null: the create uses
+	// 10 MB and 3 files. Both keys are required when the object is present.
+	// A job may carry one. This process does not fill defaults onto the object.
+	Logging *Logging `json:"logging,omitempty"`
+}
+
+// Log file bounds for ImageSpec logging (agent-protocol v1.8).
+const (
+	logSizeDefault  = 10
+	logFilesDefault = 3
+	logSizeMin      = 1
+	logSizeMax      = 100
+	logFilesMin     = 1
+	logFilesMax     = 10
+)
+
+// Logging is the optional json-file cap. Both integers are required.
+type Logging struct {
+	MaxSizeMB int `json:"max_size_mb"`
+	MaxFiles  int `json:"max_files"`
 }
 
 // Healthcheck is the catalog check for a service container.
@@ -102,6 +122,9 @@ func (s *ImageSpec) Validate() string {
 	if field := checkHealthcheck(s); field != "" {
 		return field
 	}
+	if field := checkLogging(s); field != "" {
+		return field
+	}
 	if s.Kind == "job" {
 		s.Restart = "no"
 		if s.HealthyAfterSec != 0 {
@@ -128,6 +151,32 @@ func (s *ImageSpec) Validate() string {
 		return "healthy_after_sec"
 	}
 	return ""
+}
+
+func checkLogging(s *ImageSpec) string {
+	l := s.Logging
+	if l == nil {
+		return ""
+	}
+	if l.MaxSizeMB < logSizeMin || l.MaxSizeMB > logSizeMax {
+		return "logging.max_size_mb"
+	}
+	if l.MaxFiles < logFilesMin || l.MaxFiles > logFilesMax {
+		return "logging.max_files"
+	}
+	return ""
+}
+
+// LogLimit is the json-file cap for one create. A nil logging object is
+// 10 MB and 3 files. ok is false when logging is set and a bound fails.
+func LogLimit(s ImageSpec) (sizeMB, files int, ok bool) {
+	if checkLogging(&s) != "" {
+		return 0, 0, false
+	}
+	if s.Logging == nil {
+		return logSizeDefault, logFilesDefault, true
+	}
+	return s.Logging.MaxSizeMB, s.Logging.MaxFiles, true
 }
 
 func checkHealthcheck(s *ImageSpec) string {
