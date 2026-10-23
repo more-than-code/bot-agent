@@ -619,56 +619,26 @@ func assertOwner(t *testing.T, path string, uid, gid int, match bool) {
 	}
 }
 
+// v1.9 rev 3: a failed rollback of a running container puts both
+// containers and both slots back and starts the original again.
 func TestRollbackStartFailureRestoresPair(t *testing.T) {
 	e, root := twoFileDeploys(t)
+	orig := currentID(e)
 	e.fake.startFail = true
 	before := len(e.fake.Calls())
-	if imgCode(t, e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))) != programs.ReasonDocker {
-		t.Fatal("rollback")
-	}
-	started := false
-	for _, c := range e.fake.Calls()[before:] {
-		if strings.Contains(c.Path, "/start") {
-			started = true
-		}
-	}
-	if !started {
-		t.Fatal("start was not attempted")
-	}
-	names := containerNames(e)
-	if names["mohiguide-web"] || !names["mohiguide-web-prev"] {
-		t.Fatalf("containers %v", names)
-	}
-	if got := readFile(t, filepath.Join(root, "mohiguide-web-prev", "app.conf")); got != "v1" {
-		t.Fatalf("prev slot %s", got)
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web")); !os.IsNotExist(err) {
-		t.Fatal("current slot still present")
-	}
+	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
+	assertRestored(t, e, raw, before, orig, false)
+	assertSlotsRestored(t, root)
 }
 
 func TestRollbackRenameFailureRestoresSlot(t *testing.T) {
 	e, root := twoFileDeploys(t)
+	orig := currentID(e)
 	e.fake.renameFail = true
 	before := len(e.fake.Calls())
-	if imgCode(t, e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))) != programs.ReasonDocker {
-		t.Fatal("rollback")
-	}
-	for _, c := range e.fake.Calls()[before:] {
-		if strings.Contains(c.Path, "/start") {
-			t.Fatal("started after a failed rename")
-		}
-	}
-	names := containerNames(e)
-	if names["mohiguide-web"] || !names["mohiguide-web-prev"] {
-		t.Fatalf("containers %v", names)
-	}
-	if got := readFile(t, filepath.Join(root, "mohiguide-web-prev", "app.conf")); got != "v1" {
-		t.Fatalf("prev slot %s", got)
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web")); !os.IsNotExist(err) {
-		t.Fatal("current slot still present")
-	}
+	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
+	assertRestored(t, e, raw, before, orig, true)
+	assertSlotsRestored(t, root)
 }
 
 func TestStoreOpenErrors(t *testing.T) {

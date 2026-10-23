@@ -16,6 +16,7 @@ var (
 	deploybotUnitRE = regexp.MustCompile(`^deploybot-[a-z0-9-]{1,64}-[a-z0-9-]{1,48}\.service$`)
 	policyHashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	digestRE        = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	uuidRE          = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
 // ValidateAgent reports why an agent→server frame violates the contract.
@@ -72,9 +73,43 @@ func ValidateAgent(raw []byte) error {
 		return nil
 	case "task_result":
 		return checkTaskResult(raw)
+	case "auto_action":
+		var f AutoAction
+		if err := dec.Decode(&f); err != nil {
+			return err
+		}
+		return checkAutoAction(f)
 	default:
 		return fmt.Errorf("type %q", env.Type)
 	}
+}
+
+// checkAutoAction is agent-protocol v1.9 item 5.
+func checkAutoAction(f AutoAction) error {
+	if !uuidRE.MatchString(f.ID) {
+		return fmt.Errorf("auto_action id")
+	}
+	if _, err := ParseTime(f.T); err != nil {
+		return err
+	}
+	if !projectSlugRE.MatchString(f.Project) || !entrySlugRE.MatchString(f.Entry) || f.Container != f.Project+"-"+f.Entry {
+		return fmt.Errorf("auto_action target")
+	}
+	switch f.Action {
+	case "restart", "rollback", "gave_up":
+	default:
+		return fmt.Errorf("auto_action action")
+	}
+	if f.Result != "ok" && f.Result != "error" {
+		return fmt.Errorf("auto_action result")
+	}
+	if f.Reason == "" || len(f.Reason) > 200 || !utf8.ValidString(f.Reason) {
+		return fmt.Errorf("auto_action reason")
+	}
+	if f.Digest != nil && !digestRE.MatchString(*f.Digest) {
+		return fmt.Errorf("auto_action digest")
+	}
+	return nil
 }
 
 func checkEnroll(f Enroll) error {
@@ -264,7 +299,7 @@ func validImageEntry(s string) bool {
 	if !entrySlugRE.MatchString(s) {
 		return false
 	}
-	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev")
+	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev") && !strings.HasSuffix(s, "-old")
 }
 
 func rejectCode(c string) bool {

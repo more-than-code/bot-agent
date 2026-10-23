@@ -15,20 +15,17 @@ import (
 
 func TestRollbackRenameAppliedKeepsSlot(t *testing.T) {
 	e, root := twoFileDeploys(t)
-	landNextRename(e, 1, nil, nil)
+	orig := currentID(e)
+	landNextRename(e, 1, nil, nil) // the original's park on -old lands, then errors
 	before := len(e.fake.Calls())
 	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
-	assertRenameRefusal(t, e, raw, before)
-	if slotFile(t, root, "mohiguide-web") != "v1" {
-		t.Fatal("current slot")
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web-prev")); !os.IsNotExist(err) {
-		t.Fatal("prev slot still present")
-	}
+	assertRestored(t, e, raw, before, orig, true)
+	assertSlotsRestored(t, root)
 }
 
 func TestRollbackRenameAppliedOnCancel(t *testing.T) {
 	e, root := twoFileDeploys(t)
+	orig := currentID(e)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	hit := make(chan struct{})
@@ -47,71 +44,36 @@ func TestRollbackRenameAppliedOnCancel(t *testing.T) {
 	if ctx.Err() == nil {
 		t.Fatal("context still live")
 	}
-	assertRenameRefusal(t, e, raw, before)
-	if slotFile(t, root, "mohiguide-web") != "v1" {
-		t.Fatal("current slot")
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web-prev")); !os.IsNotExist(err) {
-		t.Fatal("prev slot still present")
-	}
-	lists := 0
-	for _, c := range e.fake.Calls()[before:] {
-		if c.Path == "/v1.47/containers/json" {
-			lists++
-		}
-	}
-	if lists < 2 {
-		t.Fatalf("reconcile list %d", lists)
-	}
+	// The caller is gone, but the restore still runs on its own context.
+	assertRestored(t, e, raw, before, orig, true)
+	assertSlotsRestored(t, root)
 }
 
 func TestRollbackRenameAppliedListUnknown(t *testing.T) {
 	e, root := twoFileDeploys(t)
+	orig := currentID(e)
 	landNextRename(e, 1, nil, nil)
 	e.fake.mu.Lock()
-	e.fake.listFailAfter = e.fake.listN + 2
+	// loadPair and the leftover check list; the restore's list fails.
+	e.fake.listFailAfter = e.fake.listN + 3
 	e.fake.mu.Unlock()
 	before := len(e.fake.Calls())
 	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
-	assertRenameRefusal(t, e, raw, before)
-	// The list could not place the container. The slot stays where the
-	// rollback had already moved it, which is the name the rename landed on.
-	if slotFile(t, root, "mohiguide-web") != "v1" {
-		t.Fatal("current slot")
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web-prev")); !os.IsNotExist(err) {
-		t.Fatal("prev slot still present")
-	}
+	// Without a list the restore renames blind and still starts the original.
+	assertRestored(t, e, raw, before, orig, true)
+	assertSlotsRestored(t, root)
 }
 
 func TestRollbackStartRenameAppliedMovesSlot(t *testing.T) {
 	e, root := twoFileDeploys(t)
+	orig := currentID(e)
 	e.fake.startFail = true
-	landNextRename(e, 2, nil, nil)
+	landNextRename(e, 2, nil, nil) // -prev's rename onto the current name lands, then errors
 	before := len(e.fake.Calls())
 	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
-	if imgCode(t, raw) != programs.ReasonDocker || bytes.Contains(raw, []byte("container_id")) {
-		t.Fatalf("rollback %s", raw)
-	}
-	started := false
-	for _, c := range e.fake.Calls()[before:] {
-		if strings.Contains(c.Path, "/start") {
-			started = true
-		}
-	}
-	if !started {
-		t.Fatal("start was not attempted")
-	}
-	names := containerNames(e)
-	if names["mohiguide-web"] || !names["mohiguide-web-prev"] {
-		t.Fatalf("containers %v", names)
-	}
-	if slotFile(t, root, "mohiguide-web-prev") != "v1" {
-		t.Fatal("prev slot")
-	}
-	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web")); !os.IsNotExist(err) {
-		t.Fatal("current slot still present")
-	}
+	// Every start fails in this fake, so the original is put back but stays stopped.
+	assertRestored(t, e, raw, before, orig, false)
+	assertSlotsRestored(t, root)
 }
 
 func TestParkRenameAppliedMovesSlot(t *testing.T) {
@@ -147,19 +109,55 @@ func landNextRename(e *imgEnv, nth int, hit, wait chan struct{}) {
 	e.fake.mu.Unlock()
 }
 
-func assertRenameRefusal(t *testing.T, e *imgEnv, raw []byte, before int) {
+// assertRestored is a failed container_rollback under v1.9 rev 3: the
+// refusal is docker_unavailable, the original is back on <name> and
+// -prev on <name>-prev, and the original was started again. running is
+// whether that start could succeed in the fake.
+func assertRestored(t *testing.T, e *imgEnv, raw []byte, before int, origID string, running bool) {
 	t.Helper()
 	if imgCode(t, raw) != programs.ReasonDocker || bytes.Contains(raw, []byte("container_id")) {
 		t.Fatalf("rollback %s", raw)
 	}
+	var origStarted bool
 	for _, c := range e.fake.Calls()[before:] {
-		if strings.Contains(c.Path, "/start") {
-			t.Fatal("started after a failed rename")
+		if strings.HasSuffix(c.Path, "/"+origID+"/start") {
+			origStarted = true
 		}
 	}
-	names := containerNames(e)
-	if !names["mohiguide-web"] || names["mohiguide-web-prev"] {
-		t.Fatalf("containers %v", names)
+	if !origStarted {
+		t.Fatal("the original was not started again")
+	}
+	e.fake.mu.Lock()
+	defer e.fake.mu.Unlock()
+	orig := e.fake.byID[origID]
+	if orig == nil || orig.name != "mohiguide-web" {
+		t.Fatalf("original %+v", orig)
+	}
+	if _, ok := e.fake.ctrs["mohiguide-web-prev"]; !ok {
+		t.Fatalf("no -prev: %v", e.fake.ctrs)
+	}
+	if _, ok := e.fake.ctrs["mohiguide-web-old"]; ok {
+		t.Fatal("-old left behind")
+	}
+	if running && orig.state != "running" {
+		t.Fatalf("original %s", orig.state)
+	}
+}
+
+func currentID(e *imgEnv) string {
+	e.fake.mu.Lock()
+	defer e.fake.mu.Unlock()
+	return e.fake.ctrs["mohiguide-web"].id
+}
+
+// assertSlotsRestored: the original's files on the current slot, -prev's on -prev.
+func assertSlotsRestored(t *testing.T, root string) {
+	t.Helper()
+	if slotFile(t, root, "mohiguide-web") != "v2" || slotFile(t, root, "mohiguide-web-prev") != "v1" {
+		t.Fatal("slots not restored")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "mohiguide-web.new")); !os.IsNotExist(err) {
+		t.Fatal(".new slot left behind")
 	}
 }
 

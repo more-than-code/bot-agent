@@ -64,6 +64,8 @@ type Options struct {
 	// MachineID is the file whose contents feed the container host label.
 	// Empty means /etc/machine-id. Tests set a fixture path.
 	MachineID string
+	// SuperviseEvery is the health supervisor poll. Zero means 15s.
+	SuperviseEvery time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -90,6 +92,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.DiscoverEvery <= 0 {
 		o.DiscoverEvery = 60 * time.Second
+	}
+	if o.SuperviseEvery <= 0 {
+		o.SuperviseEvery = superviseEvery
 	}
 	if o.ServicesRefreshEvery <= 0 {
 		o.ServicesRefreshEvery = 300 * time.Second
@@ -174,6 +179,9 @@ func Run(ctx context.Context, opt Options) error {
 		bo:        conn.NewBackoff(),
 		healthCh:  make(chan protocol.Sample, 128),
 		taskSlots: make(chan struct{}, maxRunningTasks),
+	}
+	if pol.ImagesEnabled() {
+		go a.supervise(ctx)
 	}
 	for {
 		if ctx.Err() != nil {
@@ -262,6 +270,14 @@ type agent struct {
 	taskMu        sync.Mutex
 	taskRunning   int
 	taskWaiting   int
+	// entries is the per-entry image lock; super and autoq are the v1.9
+	// health supervisor state and its unacked auto_action frames.
+	entries entryLocks
+	super   supervisor
+	autoq   autoQueue
+	// autoSent is the auto_action ids sent on the current connection.
+	// Only the session goroutine touches it.
+	autoSent map[string]bool
 }
 
 type writer struct {

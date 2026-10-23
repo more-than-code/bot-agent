@@ -104,10 +104,13 @@ type Programs struct {
 	// DockerHealth is true when this agent emits Docker health samples.
 	// Healthcheck is true when it accepts ImageSpec healthcheck.
 	// Logging is true when it caps container logs (agent-protocol v1.8).
-	// These three are sent whenever the programs object is sent.
+	// HealthPolicy is true when it applies ImageSpec health_policy and
+	// sends auto_action (agent-protocol v1.9).
+	// These are sent whenever the programs object is sent.
 	DockerHealth bool `json:"docker_health"`
 	Healthcheck  bool `json:"healthcheck"`
 	Logging      bool `json:"logging"`
+	HealthPolicy bool `json:"health_policy"`
 }
 
 // NormalizePorts makes a nil port list encode as [] rather than null.
@@ -272,6 +275,30 @@ type TaskAck struct {
 	V      int    `json:"v"`
 	Type   string `json:"type"`
 	TaskID string `json:"task_id"`
+}
+
+// AutoAction is one supervisor action or gave_up (agent-protocol v1.9
+// item 5). Digest is the image of the container running after the action,
+// or null.
+type AutoAction struct {
+	V         int     `json:"v"`
+	Type      string  `json:"type"`
+	ID        string  `json:"id"`
+	T         string  `json:"t"`
+	Project   string  `json:"project"`
+	Entry     string  `json:"entry"`
+	Container string  `json:"container"`
+	Action    string  `json:"action"`
+	Reason    string  `json:"reason"`
+	Result    string  `json:"result"`
+	Digest    *string `json:"digest"`
+}
+
+// AutoActionAck stops resending an auto_action.
+type AutoActionAck struct {
+	V    int    `json:"v"`
+	Type string `json:"type"`
+	ID   string `json:"id"`
 }
 
 // ConfigUpdate replaces the running config.

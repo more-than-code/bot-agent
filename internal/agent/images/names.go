@@ -16,6 +16,14 @@ const (
 	LabelEntry     = "dev.deploybot.entry"
 	LabelSpecHash  = "dev.deploybot.spec_hash"
 	LabelFilesHash = "dev.deploybot.files_hash"
+	// Health policy labels (agent-protocol v1.9 item 3). Set only on a
+	// service whose on_unhealthy is not none. Values are decimal strings.
+	LabelOnUnhealthy       = "dev.deploybot.on_unhealthy"
+	LabelUnhealthyAfterSec = "dev.deploybot.unhealthy_after_sec"
+	LabelMaxActionsPerHour = "dev.deploybot.max_actions_per_hour"
+	// StopGraceSec is the helper's container stop grace (Engine stop t=).
+	// Agent-side budgets for a stop must be longer (agent-protocol v1.9 rev 3).
+	StopGraceSec = 30
 	// OwnerValue is the only owner the helper writes. It is not taken from the request.
 	OwnerValue = "bot-agent"
 )
@@ -33,12 +41,13 @@ func ValidProject(s string) bool {
 }
 
 // ValidEntry is the catalog entry rule plus the rollback-slot ban.
-// A name ending in "-" or "-prev" would make the prev slot ambiguous.
+// A name ending in "-", "-prev" or "-old" would make the prev slot or the
+// rollback's parked original ambiguous (v1.9 rev 3b).
 func ValidEntry(s string) bool {
 	if !entryRE.MatchString(s) {
 		return false
 	}
-	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev")
+	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev") && !strings.HasSuffix(s, "-old")
 }
 
 // ValidVolume is the short volume name. The host volume is project-name.

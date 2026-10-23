@@ -188,6 +188,9 @@ type ContainerInfo struct {
 	Digest *string           `json:"digest"`
 	Labels map[string]string `json:"labels"`
 	Health *string           `json:"health"`
+	// Policy is v1.9: the policy labels of an owned container, or null.
+	// The key is always sent; an old helper that omits it decodes as null.
+	Policy *ContainerPolicy `json:"policy"`
 }
 
 // ListResponse is container_list. Truncated is true when rows past the

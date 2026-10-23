@@ -79,7 +79,7 @@ func TestNamesAndUser(t *testing.T) {
 	if _, ok := PrevName("mohiguide", "web"); !ok {
 		t.Fatal("prev")
 	}
-	for _, entry := range []string{"web-prev", "web-", "../x", "web?x", "web x", "%2F", "Bad"} {
+	for _, entry := range []string{"web-prev", "web-old", "web-", "../x", "web?x", "web x", "%2F", "Bad"} {
 		if _, ok := ContainerName("mohiguide", entry); ok {
 			t.Fatalf("entry accepted %s", entry)
 		}
@@ -371,3 +371,15 @@ func TestWireDecode(t *testing.T) {
 }
 
 const digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestValidEntryReservedSuffixes(t *testing.T) {
+	cases := map[string]bool{
+		"web": true, "old": true, "webold": true, "web-older": true, "prev": true,
+		"web-old": false, "web-prev": false, "web-": false, "a-old": false,
+	}
+	for entry, want := range cases {
+		if got := ValidEntry(entry); got != want {
+			t.Fatalf("%s: got %v", entry, got)
+		}
+	}
+}

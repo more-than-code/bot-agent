@@ -56,6 +56,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	p.DockerHealth = true
 	p.Healthcheck = true
 	p.Logging = true
+	p.HealthPolicy = true
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

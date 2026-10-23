@@ -337,7 +337,8 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		n, cur, prev, code := loadPair(ctx, eng, req.Project, req.Entry, host)
+		// The leftover -old goes before the count, so fits no longer sees it.
+		n, cur, prev, code := loadPairClearing(ctx, sys, eng, req.Project, req.Entry, host)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -381,9 +382,10 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 		return imgErr(sys, code)
 	}
 	defer closeStore(st)
-	// Label check already ran. A bad slot stops here, before any delete
-	// and before any container is stopped. Leftover cleanup is only of
-	// slots that passed that check.
+	// Label check already ran. loadPairClearing has already removed an
+	// owned leftover -old and its .new slot. Otherwise a bad slot stops
+	// here, before any other delete and before any container is stopped.
+	// Leftover cleanup is only of slots that passed that check.
 	if st != nil {
 		if err := st.preflight(curName, prevName, newName); err != nil {
 			return imgErr(sys, storeCode(err))
@@ -512,7 +514,7 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 		return imgErr(sys, code)
 	}
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		_, cur, prev, code := loadPair(ctx, eng, req.Project, req.Entry, host)
+		_, cur, prev, code := loadPairClearing(ctx, sys, eng, req.Project, req.Entry, host)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -531,11 +533,16 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 			return imgErr(sys, code)
 		}
 		defer closeStore(st)
-		// A bad slot refuses the rollback before the current container is removed.
+		// loadPairClearing has already removed an owned leftover -old and its
+		// .new slot. Otherwise a bad slot refuses the rollback before the
+		// current container is stopped or removed.
 		if st != nil {
 			if err := st.preflight(curName, prevName); err != nil {
 				return imgErr(sys, storeCode(err))
 			}
+		}
+		if isRunning(cur) {
+			return rollbackRunning(ctx, sys, eng, st, req, host, cur, prev)
 		}
 		// Remove the current container before its slot. A failed remove
 		// leaves that container on the slot it was started with.
@@ -589,13 +596,130 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 	})
 }
 
+// rollbackRunning is container_rollback when the current container is
+// running (agent-protocol v1.9 rev 3). The original is parked on
+// <name>-old with its files on the .new slot, not removed, until -prev has
+// started. From the stop on, the steps run on finishCtx. If any step fails,
+// restoreOriginal puts both containers and slots back and starts the
+// original, so the rollback never leaves the entry with nothing running.
+// The result is still an error when a step failed or the caller has gone.
+func rollbackRunning(ctx context.Context, sys Sys, eng engine, st *store, req images.EntryRequest, host string, cur, prev slot) []byte {
+	curName, prevName, newName, _ := slotNames(req.Project, req.Entry)
+	oldName := curName + "-old" // loadPairClearing has removed a leftover
+	if st != nil {
+		if err := st.preflight(newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+		if err := st.removeIfSafe(newName); err != nil {
+			return imgErr(sys, storeCode(err))
+		}
+	}
+	fctx, cancel := finishCtx(ctx)
+	defer cancel()
+	// Which slot moves happened, so a restore undoes exactly those.
+	var curParked, prevMoved bool
+	fail := func(reason string) []byte {
+		// A fresh context: the stop may have used up all of fctx.
+		rctx, rcancel := recoverCtx(ctx)
+		defer rcancel()
+		restoreOriginal(rctx, sys, eng, st, req, cur.id, prev.id, curParked, prevMoved)
+		return imgErr(sys, reason)
+	}
+	if err := eng.Stop(fctx, cur.id); err != nil {
+		return fail(engReason(err))
+	}
+	if err := eng.Rename(fctx, cur.id, oldName); err != nil {
+		return fail(engReason(err))
+	}
+	if st != nil {
+		var err error
+		if curParked, err = st.renameMoved(curName, newName); err != nil {
+			return fail(storeCode(err))
+		}
+		if prevMoved, err = st.renameMoved(prevName, curName); err != nil {
+			return fail(storeCode(err))
+		}
+	}
+	if err := eng.Rename(fctx, prev.id, curName); err != nil {
+		return fail(engReason(err))
+	}
+	if err := eng.Start(fctx, prev.id); err != nil {
+		return fail(engReason(err))
+	}
+	// -prev is up. The original and its files are no longer needed. A
+	// failed remove leaves <name>-old, which the next rollback removes.
+	if err := eng.Remove(fctx, cur.id); err != nil {
+		logf(sys, "bot-agent-runner: rollback could not remove the old container")
+	} else if st != nil {
+		if err := st.removeIfSafe(newName); err != nil {
+			logf(sys, "bot-agent-runner: rollback could not remove the old file slot")
+		}
+	}
+	if ctx.Err() != nil {
+		return imgErr(sys, programs.ReasonDocker)
+	}
+	return images.Encode(images.IDResponse{ContainerID: prev.id})
+}
+
+// restoreOriginal undoes rollbackRunning from wherever it stopped. A
+// failed rename may have landed, so names come from a fresh list: -prev
+// goes back to <name>-prev and the original to <name>. The original's
+// files come back from the .new slot, and the original is started by id.
+// The start is attempted whatever else failed.
+func restoreOriginal(ctx context.Context, sys Sys, eng engine, st *store, req images.EntryRequest, curID, prevID string, curParked, prevMoved bool) {
+	curName, prevName, newName, _ := slotNames(req.Project, req.Entry)
+	// Without a list, both renames are tried; one that changes nothing
+	// only returns an error.
+	rows, err := eng.List(ctx)
+	if err != nil || nameOf(rows, prevID) == curName {
+		if rerr := eng.Rename(ctx, prevID, prevName); rerr != nil && err == nil {
+			logf(sys, "bot-agent-runner: rollback could not rename the prev container back")
+		}
+	}
+	if err != nil || nameOf(rows, curID) != curName {
+		if rerr := eng.Rename(ctx, curID, curName); rerr != nil && err == nil {
+			logf(sys, "bot-agent-runner: rollback could not rename the original container back")
+		}
+	}
+	if st != nil {
+		if prevMoved {
+			if err := st.rename(curName, prevName); err != nil {
+				logf(sys, "bot-agent-runner: rollback could not restore the prev file slot")
+			}
+		}
+		if curParked {
+			if err := st.rename(newName, curName); err != nil {
+				logf(sys, "bot-agent-runner: rollback could not restore the current file slot")
+			}
+		}
+	}
+	if err := eng.Start(ctx, curID); err != nil {
+		logf(sys, "bot-agent-runner: rollback could not restart the original container")
+	}
+}
+
+func logf(sys Sys, msg string) {
+	if sys.Logf != nil {
+		sys.Logf("%s", msg)
+	}
+}
+
+func nameOf(rows []listed, id string) string {
+	for _, c := range rows {
+		if c.ID == id && len(c.Names) > 0 {
+			return c.Names[0]
+		}
+	}
+	return ""
+}
+
 func doRemove(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
 	req, code := decodeEntry(in, pol)
 	if code != "" {
 		return imgErr(sys, code)
 	}
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		_, cur, _, code := loadPair(ctx, eng, req.Project, req.Entry, host)
+		_, cur, _, code := loadPairClearing(ctx, sys, eng, req.Project, req.Entry, host)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -662,11 +786,23 @@ func doRestartCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []
 		if !cur.found {
 			return encodeAction(missingStatus()), ""
 		}
-		if err := stopRunning(ctx, eng, cur); err != nil {
+		// v1.9 rev 3: once the stop is issued, the start follows on its own
+		// bounded context even if the caller has gone. Starting a container
+		// that is still running is a no-op, so a failed stop starts it too.
+		fctx, cancel := finishCtx(ctx)
+		defer cancel()
+		stopErr := stopRunning(fctx, eng, cur)
+		// A fresh context: the stop may have used up all of fctx.
+		rctx, rcancel := recoverCtx(ctx)
+		defer rcancel()
+		if err := eng.Start(rctx, cur.id); err != nil {
 			return nil, engReason(err)
 		}
-		if err := eng.Start(ctx, cur.id); err != nil {
-			return nil, engReason(err)
+		if stopErr != nil {
+			return nil, engReason(stopErr)
+		}
+		if ctx.Err() != nil {
+			return nil, programs.ReasonDocker
 		}
 		return nil, ""
 	})
@@ -798,6 +934,58 @@ func loadPair(ctx context.Context, eng engine, project, entry, host string) (int
 	if err != nil {
 		return 0, slot{}, slot{}, engReason(err)
 	}
+	return pairFrom(rows, project, entry, host)
+}
+
+// loadPairClearing is loadPair for deploy, rollback and remove. From the
+// same list it first removes a leftover <name>-old that this host's helper
+// owns for the entry, with its .new file slot (agent-protocol v1.9 rev 3b),
+// and leaves it out of the count, so it frees its max_containers slot. A
+// container on that name with other labels is a conflict and is not touched.
+func loadPairClearing(ctx context.Context, sys Sys, eng engine, project, entry, host string) (int, slot, slot, string) {
+	rows, err := eng.List(ctx)
+	if err != nil {
+		return 0, slot{}, slot{}, engReason(err)
+	}
+	curName, _, newName, ok := slotNames(project, entry)
+	if !ok {
+		return 0, slot{}, slot{}, programs.ReasonBadSpec
+	}
+	old, code := take(rows, curName+"-old", project, entry, host)
+	if code != "" {
+		return 0, slot{}, slot{}, code
+	}
+	if old.found {
+		if err := stopRemove(ctx, eng, old); err != nil {
+			return 0, slot{}, slot{}, engReason(err)
+		}
+		if code := removeSlot(sys, newName); code != "" {
+			return 0, slot{}, slot{}, code
+		}
+		kept := rows[:0:0]
+		for _, c := range rows {
+			if c.ID != old.id {
+				kept = append(kept, c)
+			}
+		}
+		rows = kept
+	}
+	return pairFrom(rows, project, entry, host)
+}
+
+func removeSlot(sys Sys, name string) string {
+	st, code := openEntryStore(sys, false)
+	if code != "" || st == nil {
+		return code
+	}
+	defer closeStore(st)
+	if err := st.removeIfSafe(name); err != nil {
+		return storeCode(err)
+	}
+	return ""
+}
+
+func pairFrom(rows []listed, project, entry, host string) (int, slot, slot, string) {
 	curName, ok1 := images.ContainerName(project, entry)
 	prevName, ok2 := images.PrevName(project, entry)
 	if !ok1 || !ok2 {
@@ -819,7 +1007,7 @@ func take(rows []listed, name, project, entry, host string) (slot, string) {
 	if !ok {
 		return slot{}, ""
 	}
-	if !labelsOwn(c.Labels, project, entry, host) {
+	if !images.OwnsLabels(c.Labels, project, entry, host) {
 		return slot{}, programs.ReasonConflict
 	}
 	return slot{found: true, id: c.ID, state: c.State, image: c.Image, labels: c.Labels}, ""
@@ -836,13 +1024,6 @@ func findExact(rows []listed, name string) (listed, bool) {
 	return listed{}, false
 }
 
-func labelsOwn(labels map[string]string, project, entry, host string) bool {
-	return labels[images.LabelOwner] == images.OwnerValue &&
-		labels[images.LabelHost] == host &&
-		labels[images.LabelProject] == project &&
-		labels[images.LabelEntry] == entry
-}
-
 func countOwned(rows []listed) int {
 	n := 0
 	for _, c := range rows {
@@ -853,14 +1034,38 @@ func countOwned(rows []listed) int {
 	return n
 }
 
+// isRunning is a container that a stop would act on.
+func isRunning(sl slot) bool {
+	return sl.found && (sl.state == "running" || sl.state == "restarting" || sl.state == "paused")
+}
+
 func stopRunning(ctx context.Context, eng engine, sl slot) error {
-	if !sl.found {
-		return nil
-	}
-	if sl.state != "running" && sl.state != "restarting" && sl.state != "paused" {
+	if !isRunning(sl) {
 		return nil
 	}
 	return eng.Stop(ctx, sl.id)
+}
+
+// finishBudget bounds the stop and the steps after it. recoverBudget is the
+// fresh context for the start after a restart's stop and for a rollback's
+// restore; it is not derived from the finish context, so a stop that used
+// it all up still starts the original (agent-protocol v1.9 rev 3b). They
+// are variables only so tests can shrink them.
+var (
+	finishBudget  = 60 * time.Second
+	recoverBudget = 20 * time.Second
+)
+
+// finishCtx is detached from the caller's cancellation (the socket-close
+// watcher cancels the verb context when the agent gives up) and bounded by
+// finishBudget, so a stopped container is always started again
+// (agent-protocol v1.9 rev 3).
+func finishCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishBudget)
+}
+
+func recoverCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), recoverBudget)
 }
 
 func stopRemove(ctx context.Context, eng engine, sl slot) error {
@@ -1043,6 +1248,7 @@ func projectRows(rows []listed) images.ListResponse {
 			Digest: repoDigest(c.Image),
 			Labels: keepLabels(c.Labels),
 			Health: c.Health,
+			Policy: listPolicy(c.Labels),
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -1062,6 +1268,15 @@ func projectRows(rows []listed) images.ListResponse {
 		truncated = true
 	}
 	return images.ListResponse{Items: items, Truncated: truncated}
+}
+
+// listPolicy is the v1.9 policy object. Only a container with the owner
+// label gets one; an invalid label value makes it null.
+func listPolicy(labels map[string]string) *images.ContainerPolicy {
+	if labels[images.LabelOwner] != images.OwnerValue {
+		return nil
+	}
+	return images.PolicyFromLabels(labels)
 }
 
 func knownState(s string) string {

@@ -56,6 +56,19 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 	deadline := a.now().Add(tmo)
 	tctx, cancel := context.WithTimeout(ctx, tmo)
 	defer cancel()
+	// The supervisor skips an entry while any image task holds this lock.
+	// A task that finds a supervisor action running waits for it within
+	// its own timeout. A deploy or rollback clears that entry's supervisor
+	// counters when it finishes, before the lock is released.
+	lk := a.entries.get(req.Project, req.Entry)
+	if err := lk.rLock(tctx); err != nil {
+		return a.lockTimeout(task, ex)
+	}
+	defer lk.rUnlock()
+	if task.Kind == "image_deploy" || task.Kind == "image_rollback" {
+		project, entry := req.Project, req.Entry
+		defer a.super.reset(project, entry)
+	}
 	switch task.Kind {
 	case "image_deploy", "image_rollback":
 		return a.deployImage(tctx, task, req, deadline, ex, secrets)
@@ -231,19 +244,24 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if w.healthy {
 		return a.deployResult(task, "succeeded", digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
+	// v1.9: on_deploy_failure picks the branch for image_deploy. rollback
+	// (the default) is the v1.6.1 rule below. image_rollback is unchanged.
+	onFail := images.DeployFailRollback
+	if task.Kind == "image_deploy" {
+		onFail = req.Spec.Health().OnDeployFailure
+	}
+	if onFail == images.DeployFailKeep {
+		// The new container stays running; -prev stays parked.
+		return a.failedAfterWait(ctx, task, req, digest, w.last, ex, secrets)
+	}
 	// st is the status from before container_deploy. Roll back only when
 	// that container was running. Rollback Starts whatever deploy parked,
 	// so an exited or other non-running container would come back up.
 	// Stop the new container and leave the parked one on -prev.
-	// image_rollback still rolls back.
-	if task.Kind != "image_rollback" && st.State != "running" {
+	// image_rollback still rolls back. on_deploy_failure stop always stops.
+	if onFail == images.DeployFailStop || (task.Kind != "image_rollback" && st.State != "running") {
 		a.stopContainer(ctx, req.Project, req.Entry)
-		lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
-		last := w.last
-		if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
-			last = again.Status
-		}
-		return a.deployResult(task, "failed", digest, nil, last, lines, ex)
+		return a.failedAfterWait(ctx, task, req, digest, w.last, ex, secrets)
 	}
 	rcode, rerr := a.rollbackContainer(ctx, req.Project, req.Entry)
 	lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
@@ -255,6 +273,16 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		last = again.Status
 	}
 	return a.deployResult(task, "rolled_back", digest, nil, last, lines, ex)
+}
+
+// failedAfterWait reports outcome failed with the container's status now
+// and its last log lines. It does not roll back.
+func (a *agent) failedAfterWait(ctx context.Context, task protocol.Task, req tasks.ImageReq, digest string, last images.ImageStatus, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
+	lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
+	if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
+		last = again.Status
+	}
+	return a.deployResult(task, "failed", digest, nil, last, lines, ex)
 }
 
 func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
@@ -901,6 +929,19 @@ func (a *agent) logsResult(task protocol.Task, outcome, container string, lines 
 		"container": container, "lines": redacted, "truncated": truncated || cut,
 	})
 	return imageTaskResult(task, outcome, payload)
+}
+
+// lockTimeout is outcome failed for a task whose timeout ended while a
+// supervisor action held its entry. Nothing was sent to the helper.
+func (a *agent) lockTimeout(task protocol.Task, ex redact.Exact) protocol.TaskResult {
+	switch task.Kind {
+	case "image_deploy", "image_rollback":
+		return a.deployResult(task, "failed", "", nil, missingStatus(), nil, ex)
+	case "image_logs":
+		return a.logsResult(task, "failed", "", nil, false, ex)
+	default:
+		return a.statusResult(task, "failed", missingStatus(), ex)
+	}
 }
 
 func (a *agent) imageRejected(task protocol.Task) protocol.TaskResult {

@@ -91,6 +91,19 @@ type fakeDocker struct {
 	badDigest    bool
 	renameFail   bool
 	startFail    bool
+	// startFailID fails only that container's start. stopDelay holds each
+	// stop's reply (outside the lock) after the stop has applied, like a
+	// container that ignores SIGTERM until the grace runs out; the client
+	// may give up first. stopFail applies the stop and then replies 500.
+	// removeFailID fails only that container's delete.
+	startFailID string
+	// renameFailFrom fails every rename whose 1-based count is at least it.
+	// startHook runs on each start, before it applies.
+	renameFailFrom int
+	startHook      func(id string)
+	stopDelay      time.Duration
+	stopFail       bool
+	removeFailID   string
 	// renameLand is the 1-based rename that is applied and then rejected.
 	// Zero lets every rename finish. renameFail still rejects before applying.
 	renameLand int
@@ -363,7 +376,10 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 			http.NotFound(w, r)
 			return
 		}
-		if f.startFail {
+		if f.startHook != nil {
+			f.startHook(c.id)
+		}
+		if f.startFail || (f.startFailID != "" && c.id == f.startFailID) {
 			http.Error(w, "start failed", http.StatusInternalServerError)
 			return
 		}
@@ -379,13 +395,23 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		c.state = "exited"
+		if d := f.stopDelay; d > 0 {
+			f.mu.Unlock()
+			time.Sleep(d)
+			f.mu.Lock()
+		}
+		if f.stopFail {
+			http.Error(w, "stop failed", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case op == "rename" && r.Method == http.MethodPost:
 		if c == nil {
 			http.NotFound(w, r)
 			return
 		}
-		if f.renameFail {
+		if f.renameFail || (f.renameFailFrom > 0 && f.renameN+1 >= f.renameFailFrom) {
+			f.renameN++
 			http.Error(w, "rename failed", http.StatusInternalServerError)
 			return
 		}
@@ -422,6 +448,10 @@ func (f *fakeDocker) serveContainer(w http.ResponseWriter, r *http.Request, rest
 	case op == "" && r.Method == http.MethodDelete:
 		if c == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if f.removeFailID != "" && c.id == f.removeFailID {
+			http.Error(w, "remove failed", http.StatusInternalServerError)
 			return
 		}
 		delete(f.ctrs, c.name)
@@ -1222,12 +1252,15 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	if json.Unmarshal(raw, &id) != nil || id.ContainerID != prev {
 		t.Fatalf("id %s want %s", raw, prev)
 	}
+	// v1.9 rev 3: a running original is parked on -old and removed only
+	// after -prev has started.
 	assertCalls(t, e.fake, []string{
 		"GET /v1.47/containers/json?all=1",
 		"POST /v1.47/containers/" + cur + "/stop?t=30",
-		"DELETE /v1.47/containers/" + cur + "?v=1",
+		"POST /v1.47/containers/" + cur + "/rename?name=mohiguide-web-old",
 		"POST /v1.47/containers/" + prev + "/rename?name=mohiguide-web",
 		"POST /v1.47/containers/" + prev + "/start?",
+		"DELETE /v1.47/containers/" + cur + "?v=1",
 	})
 
 	e = newImgEnv(t, imagePolicy)

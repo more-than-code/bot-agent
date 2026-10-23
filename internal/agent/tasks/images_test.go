@@ -61,6 +61,17 @@ func TestImageCheckOrder(t *testing.T) {
 		{"logging one key", on, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5}`)), "bad_spec"},
 		{"logging fraction", off, task(host, "image_deploy", nil, live, withLogging(good, `{"max_size_mb":5.5,"max_files":2}`)), "bad_spec"},
 		{"logs logging key", off, task(host, "image_logs", nil, live, []byte(`{"project":"acme","entry":"web","lines":20,"logging":{"max_size_mb":10,"max_files":3}}`)), "bad_spec"},
+		{"health_policy ok", on, task(host, "image_deploy", nil, live, withHealthPolicy(withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0}`), `{"on_deploy_failure":"stop","on_unhealthy":"restart","unhealthy_after_sec":45,"max_actions_per_hour":3}`)), ""},
+		{"health_policy partial", on, task(host, "image_deploy", nil, live, withHealthPolicy(withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0}`), `{"on_unhealthy":"rollback"}`)), ""},
+		{"health_policy action without healthcheck", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"on_unhealthy":"restart"}`)), "bad_spec"},
+		{"health_policy keep with action", on, task(host, "image_deploy", nil, live, withHealthPolicy(withHealthcheck(good, `{"test":["wget"],"interval_sec":30,"timeout_sec":5,"retries":3,"start_period_sec":0}`), `{"on_deploy_failure":"keep","on_unhealthy":"restart"}`)), "bad_spec"},
+		{"health_policy keep alone", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"on_deploy_failure":"keep"}`)), ""},
+		{"health_policy null", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `null`)), ""},
+		{"health_policy unknown key", off, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"on_unhealthy":"restart","extra":1}`)), "bad_spec"},
+		{"health_policy bad enum", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"on_deploy_failure":"retry"}`)), "bad_spec"},
+		{"health_policy after range", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"unhealthy_after_sec":10}`)), "bad_spec"},
+		{"health_policy actions range", on, task(host, "image_deploy", nil, live, withHealthPolicy(good, `{"max_actions_per_hour":11}`)), "bad_spec"},
+		{"health_policy on job", on, task(host, "image_deploy", nil, live, withHealthPolicy(jobTaskSpec(), `{}`)), "bad_spec"},
 		{"rollback ok", on, task(host, "image_rollback", nil, live, rollbackSpec(imgDigest)), ""},
 		{"rollback omits digest", on, task(host, "image_rollback", nil, live, deploySpec(false, "")), "bad_spec"},
 		{"rollback null digest", on, task(host, "image_rollback", nil, live, nullDigestSpec()), "bad_spec"},
@@ -122,6 +133,10 @@ func withHealthcheck(spec []byte, hc string) []byte {
 
 func withLogging(spec []byte, logging string) []byte {
 	return []byte(strings.Replace(string(spec), `"kind":"`, `"logging":`+logging+`,"kind":"`, 1))
+}
+
+func withHealthPolicy(spec []byte, hp string) []byte {
+	return []byte(strings.Replace(string(spec), `"kind":"`, `"health_policy":`+hp+`,"kind":"`, 1))
 }
 
 func jobTaskSpec() []byte {

@@ -44,6 +44,44 @@ type ImageSpec struct {
 	// 10 MB and 3 files. Both keys are required when the object is present.
 	// A job may carry one. This process does not fill defaults onto the object.
 	Logging *Logging `json:"logging,omitempty"`
+	// HealthPolicy is api-v1 v1.15 (agent-protocol v1.9). Nil means absent
+	// or null. Each key is optional; Health fills the defaults. Services only.
+	HealthPolicy *HealthPolicy `json:"health_policy,omitempty"`
+}
+
+// HealthPolicy is the optional per-service failure rule. A nil key is the
+// default: rollback, none, 45 and 3. Pointers keep an explicit 0 or "" apart
+// from an absent key, so those are refused rather than defaulted.
+type HealthPolicy struct {
+	OnDeployFailure   *string `json:"on_deploy_failure,omitempty"`
+	OnUnhealthy       *string `json:"on_unhealthy,omitempty"`
+	UnhealthyAfterSec *int    `json:"unhealthy_after_sec,omitempty"`
+	MaxActionsPerHour *int    `json:"max_actions_per_hour,omitempty"`
+}
+
+// Health policy values and bounds (agent-protocol v1.9 item 1).
+const (
+	DeployFailRollback = "rollback"
+	DeployFailStop     = "stop"
+	DeployFailKeep     = "keep"
+	UnhealthyNone      = "none"
+	UnhealthyRestart   = "restart"
+	UnhealthyRollback  = "rollback"
+
+	unhealthyAfterDefault = 45
+	unhealthyAfterMin     = 15
+	unhealthyAfterMax     = 600
+	actionsDefault        = 3
+	actionsMin            = 1
+	actionsMax            = 10
+)
+
+// Policy is a health policy with every default filled in.
+type Policy struct {
+	OnDeployFailure   string
+	OnUnhealthy       string
+	UnhealthyAfterSec int
+	MaxActionsPerHour int
 }
 
 // Log file bounds for ImageSpec logging (agent-protocol v1.8).
@@ -125,6 +163,9 @@ func (s *ImageSpec) Validate() string {
 	if field := checkLogging(s); field != "" {
 		return field
 	}
+	if field := checkHealthPolicy(s); field != "" {
+		return field
+	}
 	if s.Kind == "job" {
 		s.Restart = "no"
 		if s.HealthyAfterSec != 0 {
@@ -177,6 +218,76 @@ func LogLimit(s ImageSpec) (sizeMB, files int, ok bool) {
 		return logSizeDefault, logFilesDefault, true
 	}
 	return s.Logging.MaxSizeMB, s.Logging.MaxFiles, true
+}
+
+func checkHealthPolicy(s *ImageSpec) string {
+	h := s.HealthPolicy
+	if h == nil {
+		return ""
+	}
+	if s.Kind == "job" {
+		return "health_policy"
+	}
+	if v := h.OnDeployFailure; v != nil && *v != DeployFailRollback && *v != DeployFailStop && *v != DeployFailKeep {
+		return "health_policy.on_deploy_failure"
+	}
+	if v := h.OnUnhealthy; v != nil && !validOnUnhealthy(*v) {
+		return "health_policy.on_unhealthy"
+	}
+	if v := h.UnhealthyAfterSec; v != nil && !validUnhealthyAfter(*v) {
+		return "health_policy.unhealthy_after_sec"
+	}
+	if v := h.MaxActionsPerHour; v != nil && !validActions(*v) {
+		return "health_policy.max_actions_per_hour"
+	}
+	// v1.9 rev 2: an action needs the catalog healthcheck (an image's own
+	// HEALTHCHECK is not enough), and a container kept after a failed
+	// deploy is never supervised.
+	if p := s.Health(); p.OnUnhealthy != UnhealthyNone {
+		if s.Healthcheck == nil {
+			return "health_policy.on_unhealthy"
+		}
+		if p.OnDeployFailure == DeployFailKeep {
+			return "health_policy"
+		}
+	}
+	return ""
+}
+
+func validOnUnhealthy(v string) bool {
+	return v == UnhealthyNone || v == UnhealthyRestart || v == UnhealthyRollback
+}
+
+func validUnhealthyAfter(n int) bool { return n >= unhealthyAfterMin && n <= unhealthyAfterMax }
+
+func validActions(n int) bool { return n >= actionsMin && n <= actionsMax }
+
+// Health is the spec's policy with defaults filled in. It does not validate;
+// call Validate first. A job, or a spec without the field, is all defaults.
+func (s ImageSpec) Health() Policy {
+	p := Policy{
+		OnDeployFailure:   DeployFailRollback,
+		OnUnhealthy:       UnhealthyNone,
+		UnhealthyAfterSec: unhealthyAfterDefault,
+		MaxActionsPerHour: actionsDefault,
+	}
+	h := s.HealthPolicy
+	if h == nil || s.Kind == "job" {
+		return p
+	}
+	if h.OnDeployFailure != nil {
+		p.OnDeployFailure = *h.OnDeployFailure
+	}
+	if h.OnUnhealthy != nil {
+		p.OnUnhealthy = *h.OnUnhealthy
+	}
+	if h.UnhealthyAfterSec != nil {
+		p.UnhealthyAfterSec = *h.UnhealthyAfterSec
+	}
+	if h.MaxActionsPerHour != nil {
+		p.MaxActionsPerHour = *h.MaxActionsPerHour
+	}
+	return p
 }
 
 func checkHealthcheck(s *ImageSpec) string {

@@ -203,7 +203,7 @@ func (e *engineClient) Start(ctx context.Context, id string) error {
 
 func (e *engineClient) Stop(ctx context.Context, id string) error {
 	q := url.Values{}
-	q.Set("t", "30")
+	q.Set("t", strconv.Itoa(images.StopGraceSec))
 	return e.emptyAction(ctx, http.MethodPost, id, "/stop", q, http.StatusNoContent, http.StatusNotModified)
 }
 

@@ -45,6 +45,8 @@ type Server struct {
 	redirectHits int
 	dropOnce     int
 	skipTaskAck  int
+	skipAutoAck  int
+	autoAcks     []string
 	ackMetrics   bool
 	taskAcks     []string
 	w            *wsWriter
@@ -117,6 +119,20 @@ func (s *Server) SkipNextTaskAck() {
 	s.mu.Lock()
 	s.skipTaskAck++
 	s.mu.Unlock()
+}
+
+// SkipNextAutoAck closes the socket after the next auto_action, without an ack.
+func (s *Server) SkipNextAutoAck() {
+	s.mu.Lock()
+	s.skipAutoAck++
+	s.mu.Unlock()
+}
+
+// AutoAcks is the auto_action ids acknowledged so far, in order.
+func (s *Server) AutoAcks() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.autoAcks...)
 }
 
 // SetAckMetrics turns metrics acknowledgements on or off.
@@ -399,6 +415,26 @@ func (s *Server) serveSession(w *wsWriter) {
 			if err := w.write(ctx, protocol.TaskAck{V: protocol.Version, Type: "task_ack", TaskID: head.TaskID}); err == nil {
 				s.mu.Lock()
 				s.taskAcks = append(s.taskAcks, head.TaskID)
+				s.mu.Unlock()
+			}
+		case "auto_action":
+			var head struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(raw, &head)
+			s.mu.Lock()
+			skip := s.skipAutoAck > 0
+			if skip {
+				s.skipAutoAck--
+			}
+			s.mu.Unlock()
+			if skip {
+				_ = w.c.Close(websocket.StatusGoingAway, "")
+				return
+			}
+			if err := w.write(ctx, protocol.AutoActionAck{V: protocol.Version, Type: "auto_action_ack", ID: head.ID}); err == nil {
+				s.mu.Lock()
+				s.autoAcks = append(s.autoAcks, head.ID)
 				s.mu.Unlock()
 			}
 		default:

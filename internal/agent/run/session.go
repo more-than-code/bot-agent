@@ -167,6 +167,10 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	if err := a.replay(sess, w); err != nil {
 		return err
 	}
+	a.autoSent = map[string]bool{}
+	if err := a.sendAuto(sess, w, a.autoSent); err != nil {
+		return err
+	}
 	return a.loop(sess, w, events, errCh)
 }
 
@@ -225,6 +229,14 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 				if soon := now.Add(a.procEvery); nextProc.After(soon) {
 					nextProc = soon
 				}
+			}
+		case <-a.autoq.wake():
+			stop()
+			if a.autoSent == nil {
+				a.autoSent = map[string]bool{}
+			}
+			if err := a.sendAuto(ctx, w, a.autoSent); err != nil {
+				return err
 			}
 		case s := <-a.healthCh:
 			stop()
@@ -305,6 +317,9 @@ func (a *agent) onEvent(ctx context.Context, w *writer, ev incoming) (bool, erro
 			return false, nil
 		}
 		a.pending.ack(ack.TaskID)
+		return false, nil
+	case "auto_action_ack":
+		a.onAutoAck(ev.raw)
 		return false, nil
 	case "task":
 		a.handleTask(ctx, w, ev.raw)

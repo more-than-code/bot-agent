@@ -202,6 +202,11 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 		body.HostConfig.Memory = mem
 		body.HostConfig.MemorySwap = mem
 	}
+	// v1.9: a service with an on_unhealthy action carries its policy, so
+	// the agent's supervisor can read it back after a restart.
+	for k, v := range images.PolicyLabels(spec) {
+		body.Labels[k] = v
+	}
 	if spec.Healthcheck != nil {
 		hc := spec.Healthcheck
 		body.Healthcheck = &healthcheckBody{
