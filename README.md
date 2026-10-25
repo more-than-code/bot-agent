@@ -169,3 +169,7 @@ Trust boundary, from the catalog spec §3:
 ## Legacy Telegraf Migration Tools
 
 For environments transitioning from Telegraf-based metrics to `bot-agent`, legacy Telegraf configuration generation utilities and schema helpers are maintained under `cmd/render-telegraf` and `internal/render`.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE). You may use, change and self-host bot-agent, including commercially.
