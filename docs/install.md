@@ -2,6 +2,8 @@
 
 This guide is for a project admin adding a Linux host to Deploybot. You download a release bundle, run `install.sh` from that directory, and type the join token at a hidden prompt.
 
+Run every command in this guide on the host you are adding, in a terminal on that host or an `ssh -t <host>` session. Do not run them on your own computer.
+
 The installer copies files only from the bundle. It does not download anything. No command here takes the token as an argument, in a file, or on a pipe. Do not print `/etc/bot-agent/env`. That file holds the host credential.
 
 ## What you need
