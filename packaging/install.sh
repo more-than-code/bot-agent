@@ -65,12 +65,14 @@ trap 'exit 143' TERM
 usage() {
   cat >&2 <<'EOF'
 usage: install.sh check|install|enroll|upgrade|rollback|remove [flags]
-  check
-  install [--runner] [--runner-config FILE] [--insecure-dev]
+  check [--runner] [--runner-config FILE | --project SLUG --image PATTERN... [--enable]]
+  install [--runner] [--runner-config FILE | --project SLUG --image PATTERN... [--enable]] [--insecure-dev]
   enroll --server URL [--runner] [--insecure-dev]
   upgrade [--force] [--runner] [--insecure-dev]
   rollback
   remove [--purge] [--remove-workloads]
+  --project SLUG, --image PATTERN (1-20), --enable: need --runner; write
+              /etc/bot-agent/runner.toml for these images in this project
   --dry-run   print every file to write or delete; change nothing
   --root DIR  test-only prefix for every filesystem path
 EOF
@@ -102,6 +104,13 @@ INSECURE=0
 SERVER=
 RUNNER_CONFIG=
 RUNNER_CONFIG_ORIG=
+RUNNER_CONFIG_LABEL=--runner-config
+PROJECT=
+IMAGES=
+IMAGE_N=0
+ENABLE=0
+GEN_POLICY=0
+LAST_POLICY_CHECK=
 MUTATED=0
 WANT_RUNNER=0
 VER=
@@ -124,6 +133,27 @@ if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_ENROLL_WAIT:-}
   esac
   ENROLL_WAIT=$BOT_AGENT_ENROLL_WAIT
 fi
+
+# Policy values are checked here, before any file is written, so nothing
+# outside this grammar can reach the generated runner.toml. Explicit letter
+# lists, because a range like a-z can match uppercase in some locales.
+valid_slug() {
+  case "$1" in
+    ''|[!abcdefghijklmnopqrstuvwxyz0123456789]*|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+valid_image_pattern() {
+  case "$1" in
+    ''|-*|*[!abcdefghijklmnopqrstuvwxyz0123456789._:/*-]*) return 1 ;;
+  esac
+  case "$1" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  [ "${#1}" -le 255 ]
+}
 
 if [ "$#" -lt 1 ]; then
   usage
@@ -158,9 +188,48 @@ while [ "$#" -gt 0 ]; do
       SERVER=$2
       shift 2
       ;;
+    --project)
+      [ "$#" -ge 2 ] || usage
+      [ -z "$PROJECT" ] || usage
+      if ! valid_slug "$2"; then
+        printf '%s\n' "bad --project value" >&2
+        usage
+      fi
+      PROJECT=$2
+      shift 2
+      ;;
+    --image)
+      [ "$#" -ge 2 ] || usage
+      if ! valid_image_pattern "$2"; then
+        printf '%s\n' "bad --image value" >&2
+        usage
+      fi
+      IMAGE_N=$((IMAGE_N + 1))
+      [ "$IMAGE_N" -le 20 ] || usage
+      # Patterns have no spaces, so a space-separated list is safe.
+      # Expand it only with set -f: a pattern may contain *.
+      IMAGES="${IMAGES:+$IMAGES }$2"
+      shift 2
+      ;;
+    --enable) ENABLE=1; shift ;;
     *) usage ;;
   esac
 done
+
+# --project, --image, and --enable: check and install only, with --runner,
+# not with --runner-config. --project and --image come together; --enable needs both.
+if [ -n "$PROJECT" ] || [ -n "$IMAGES" ] || [ "$ENABLE" != "0" ]; then
+  case "$CMD" in
+    check|install) ;;
+    *) usage ;;
+  esac
+  if [ "$RUNNER" != "1" ] || [ -n "$RUNNER_CONFIG" ]; then
+    usage
+  fi
+  if [ -z "$PROJECT" ] || [ -z "$IMAGES" ]; then
+    usage
+  fi
+fi
 
 case "$CMD" in
   check)
@@ -296,7 +365,24 @@ ORIG_BUNDLE=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P) || fail "cannot locat
 case "$ORIG_BUNDLE" in
   *[[:space:]]*) precheck_fail "bundle path contains whitespace" ;;
 esac
+
+# The bundle path is printed in the enroll command for people and agents to
+# paste into a shell, so it may hold only these characters. No ranges: a
+# range can match more than ASCII in some locales.
+safe_bundle_path() {
+  case "$1" in
+    ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+-]*) return 1 ;;
+  esac
+  return 0
+}
+
+if [ "${BOT_AGENT_INSTALL_REEXEC:-}" != "1" ] && ! safe_bundle_path "$ORIG_BUNDLE"; then
+  precheck_fail "bundle path has characters that are unsafe to paste into a shell; move the bundle to a plain path"
+fi
 BUNDLE=$ORIG_BUNDLE
+# The operator's bundle directory, for the printed enroll command. The staged
+# copy gets it from the first run, because its own directory is the stage.
+INSTALL_BUNDLE=$ORIG_BUNDLE
 
 # sum_path prints the relative path from one SHA256SUMS line, or nothing.
 sum_path() {
@@ -456,6 +542,19 @@ exec_staged_installer() {
   if [ -n "$SERVER" ]; then
     set -- "$@" --server "$SERVER"
   fi
+  if [ -n "$PROJECT" ]; then
+    set -- "$@" --project "$PROJECT"
+  fi
+  set -f
+  for _img in $IMAGES; do
+    set -- "$@" --image "$_img"
+  done
+  set +f
+  if [ "$ENABLE" = "1" ]; then
+    set -- "$@" --enable
+  fi
+  BOT_AGENT_INSTALL_BUNDLE=$INSTALL_BUNDLE
+  export BOT_AGENT_INSTALL_BUNDLE
   # shellcheck disable=SC2093 # exec replaces this process; the next line runs only if it fails
   exec "$STAGE/install.sh" "$@"
   precheck_fail "cannot re-exec staged install.sh"
@@ -482,12 +581,54 @@ if [ "${BOT_AGENT_INSTALL_REEXEC:-}" = "1" ]; then
     *) precheck_fail "refusing staged re-exec" ;;
   esac
   BUNDLE=$STAGE
+  INSTALL_BUNDLE=${BOT_AGENT_INSTALL_BUNDLE:-}
+  case "$INSTALL_BUNDLE" in
+    /*) ;;
+    *) precheck_fail "refusing staged re-exec" ;;
+  esac
+  if ! safe_bundle_path "$INSTALL_BUNDLE"; then
+    precheck_fail "refusing staged re-exec"
+  fi
+  # The printed path must be the bundle this stage was copied from.
+  if [ ! -f "$INSTALL_BUNDLE/install.sh" ] || ! cmp -s "$INSTALL_BUNDLE/install.sh" "$STAGE/install.sh"; then
+    precheck_fail "refusing staged re-exec"
+  fi
 else
   stage_bundle
 fi
 stage_runner_config
 verify_sums
 exec_staged_installer
+
+# Write the policy from --project and --image into the stage. From here it
+# takes the --runner-config path: policy check, then install as root:root 0644.
+stage_generated_policy() {
+  if [ -z "$PROJECT" ]; then
+    return 0
+  fi
+  _gp=$STAGE/generated-runner.toml
+  _gimgs=
+  set -f
+  for _img in $IMAGES; do
+    _gimgs="${_gimgs:+$_gimgs, }\"${_img}\""
+  done
+  set +f
+  _genabled=false
+  if [ "$ENABLE" = "1" ]; then
+    _genabled=true
+  fi
+  {
+    printf '%s\n' "# Written by install.sh from --project and --image. Edit by hand or re-run install with new flags."
+    printf 'enabled = %s\n' "$_genabled"
+    printf 'projects = ["%s"]\n' "$PROJECT"
+    printf 'images = [%s]\n' "$_gimgs"
+  } > "$_gp" || precheck_fail "cannot write generated policy"
+  chmod 0644 "$_gp" || precheck_fail "cannot chmod generated policy"
+  RUNNER_CONFIG=$_gp
+  RUNNER_CONFIG_LABEL="generated policy"
+  GEN_POLICY=1
+}
+stage_generated_policy
 if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_STUB_DIR:-}" ]; then
   printf '%s\n' "$0" > "$BOT_AGENT_STUB_DIR/installer-argv0"
 fi
@@ -716,6 +857,7 @@ check_policy_file() {
   _bad=0
   _pc=$(policy_check "$_pf") || _bad=1
   printf '%s\n' "$_pc"
+  LAST_POLICY_CHECK=$_pc
   if [ "$_bad" = "1" ]; then
     [ -z "$_cleanup" ] || rm -f "$_cleanup"
     precheck_fail "policy check failed for ${_label}"
@@ -745,6 +887,40 @@ check_policy_install_mode() {
 
 POLICY_HOST=/etc/bot-agent/runner.toml
 POLICY_DEST=$(hostpath "$POLICY_HOST")
+
+# A generated policy never replaces a different runner.toml.
+refuse_different_policy() {
+  if [ "$GEN_POLICY" != "1" ]; then
+    return 0
+  fi
+  if [ -h "$POLICY_DEST" ]; then
+    precheck_fail "refusing symlink ${POLICY_HOST}"
+  fi
+  if [ -e "$POLICY_DEST" ] && ! cmp -s "$RUNNER_CONFIG" "$POLICY_DEST"; then
+    precheck_fail "runner.toml exists and differs; remove it or edit it by hand"
+  fi
+}
+
+# With --enable, the last policy check must report images=true.
+require_images_enabled() {
+  if [ "$ENABLE" != "1" ]; then
+    return 0
+  fi
+  if ! printf '%s\n' "$LAST_POLICY_CHECK" | awk '$0=="images=true"{f=1} END{exit f?0:1}'; then
+    precheck_fail "policy would not enable images"
+  fi
+}
+
+# The command to run next, with the absolute bundle path, so nobody has to
+# work out where the bundle is.
+say_next_enroll() {
+  if [ "$WANT_RUNNER" = "1" ]; then
+    say "next: sudo ${INSTALL_BUNDLE}/install.sh enroll --server '<server URL>' --runner"
+  else
+    say "next: sudo ${INSTALL_BUNDLE}/install.sh enroll --server '<server URL>'"
+  fi
+}
+
 ENV_HOST=/etc/bot-agent/env
 ENV_DEST=$(hostpath "$ENV_HOST")
 
@@ -784,7 +960,9 @@ report_installed_files() {
 do_check() {
   report_installed_files
   if [ -n "$RUNNER_CONFIG" ]; then
-    check_policy_file "$RUNNER_CONFIG" "--runner-config"
+    refuse_different_policy
+    check_policy_file "$RUNNER_CONFIG" "$RUNNER_CONFIG_LABEL"
+    require_images_enabled
   elif [ -f "$POLICY_DEST" ]; then
     check_policy_file "$POLICY_DEST" "$POLICY_HOST"
   elif [ "$WANT_RUNNER" = "1" ]; then
@@ -1247,13 +1425,16 @@ precheck_policy_for_install() {
     say "policy: not checked"
     return 0
   fi
+  refuse_different_policy
   if [ -f "$POLICY_DEST" ]; then
     check_policy_install_mode "$POLICY_DEST"
     check_policy_file "$POLICY_DEST" "$POLICY_HOST"
+    require_images_enabled
     return 0
   fi
   if [ -n "$RUNNER_CONFIG" ]; then
-    check_policy_file "$RUNNER_CONFIG" "--runner-config"
+    check_policy_file "$RUNNER_CONFIG" "$RUNNER_CONFIG_LABEL"
+    require_images_enabled
     return 0
   fi
   _tmp=$(mktemp) || precheck_fail "mktemp failed"
@@ -1320,7 +1501,11 @@ $(each_managed)
 EOF
   refuse_managed_symlinks
   if same_as_record && id bot-agent >/dev/null 2>&1 && getent group bot-agent >/dev/null 2>&1; then
+    if [ "$GEN_POLICY" = "1" ]; then
+      say "kept: ${POLICY_HOST}"
+    fi
     say "already installed, nothing changed"
+    say_next_enroll
     say "summary: already installed ${VER}"
     exit 0
   fi
@@ -1347,6 +1532,7 @@ EOF
     say "tmpfiles: applied"
   fi
   say "units: disabled"
+  say_next_enroll
   say "summary: installed ${VER}"
 }
 

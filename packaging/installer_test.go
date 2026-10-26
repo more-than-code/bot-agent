@@ -3092,3 +3092,376 @@ func TestInstallerReexecStagedScript(t *testing.T) {
 		dry.fail(t, "", "dry-run duplicated the preamble")
 	}
 }
+
+const genPolicyHeader = "# Written by install.sh from --project and --image. Edit by hand or re-run install with new flags.\n"
+
+func nextLines(out string) []string {
+	var got []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "next:") {
+			got = append(got, line)
+		}
+	}
+	return got
+}
+
+func realBundlePath(t *testing.T, bundle string) string {
+	t.Helper()
+	p, err := filepath.EvalSymlinks(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestInstallerPolicyFlagsWriteAndRerun(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	args := []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/library/*", "--enable"}
+	res := runBundle(t, bundle, rg, "", args...)
+	if res.code != 0 {
+		res.fail(t, "", "install with policy flags")
+	}
+	policyPath := filepath.Join(rg.root, "etc/bot-agent/runner.toml")
+	want := genPolicyHeader + "enabled = true\nprojects = [\"home-lab\"]\nimages = [\"docker.io/library/*\"]\n"
+	got, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("policy:\n%s\nwant:\n%s", got, want)
+	}
+	assertPerm(t, policyPath, 0o644)
+	// The policy is written to a temp file in /etc/bot-agent, chowned, then renamed.
+	// It is the only root:root file the installer writes in that directory.
+	realRoot, err := filepath.EvalSymlinks(rg.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.log, "chown root:root "+realRoot+"/etc/bot-agent/.bot-agent-inst.") {
+		res.fail(t, "", "policy was not chowned root:root")
+	}
+	if _, err := os.Stat(filepath.Join(rg.root, "var/lib/bot-agent-installer/policy-owned")); err != nil {
+		t.Fatalf("policy-owned marker: %v", err)
+	}
+	rec, err := os.ReadFile(filepath.Join(rg.root, "var/lib/bot-agent-installer/installed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rec), "  /etc/bot-agent/runner.toml\n") {
+		t.Fatalf("record has no policy hash:\n%s", rec)
+	}
+	out, err := exec.Command(realAgent, "policy", "check", policyPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("policy check: %v\n%s", err, out)
+	}
+	for _, line := range []string{"valid\n", "enabled=true\n", "images=true\n"} {
+		if !strings.Contains(string(out), line) {
+			t.Fatalf("policy check missing %q:\n%s", line, out)
+		}
+	}
+	again := runBundle(t, bundle, rg, "", args...)
+	if again.code != 0 || !strings.Contains(again.stdout, "kept: /etc/bot-agent/runner.toml") || !strings.Contains(again.stdout, "already installed, nothing changed") {
+		again.fail(t, "", "re-run")
+	}
+	abs := realBundlePath(t, bundle)
+	wantNext := "next: sudo " + abs + "/install.sh enroll --server '<server URL>' --runner"
+	if got := nextLines(again.stdout); len(got) != 1 || got[0] != wantNext {
+		again.fail(t, "", fmt.Sprintf("re-run next lines %q", got))
+	}
+	// Without --runner, the installer record still says the helper is
+	// installed, so the enroll command keeps --runner.
+	plain := runBundle(t, bundle, rg, "", "install")
+	if plain.code != 0 {
+		plain.fail(t, "", "re-run without --runner")
+	}
+	if got := nextLines(plain.stdout); len(got) != 1 || got[0] != wantNext {
+		plain.fail(t, "", fmt.Sprintf("re-run without --runner next lines %q", got))
+	}
+	got2, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got2) != want {
+		t.Fatal("re-run changed the policy")
+	}
+}
+
+func TestInstallerPolicyFlagsExistingDiffers(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	etc := filepath.Join(rg.root, "etc/bot-agent")
+	if err := os.MkdirAll(etc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	policy := []byte("# hand-written\nenabled = false\n")
+	if err := os.WriteFile(filepath.Join(etc, "runner.toml"), policy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(etc, "runner.toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := treeSig(t, rg.root)
+	for _, cmd := range []string{"install", "check"} {
+		res := runBundle(t, bundle, rg, "", cmd, "--runner", "--project", "home-lab", "--image", "docker.io/library/*", "--enable")
+		if res.code != 1 {
+			res.fail(t, "", cmd+": want exit 1")
+		}
+		if !strings.Contains(res.stderr, "runner.toml exists and differs; remove it or edit it by hand") || !strings.Contains(res.stdout, "nothing changed") {
+			res.fail(t, "", cmd+": output")
+		}
+		if strings.Contains(res.log, "useradd ") {
+			res.fail(t, "", cmd+": useradd ran")
+		}
+		got, err := os.ReadFile(filepath.Join(etc, "runner.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, policy) {
+			t.Fatalf("%s changed runner.toml", cmd)
+		}
+		if treeSig(t, rg.root) != before {
+			t.Fatalf("%s changed the fake root", cmd)
+		}
+	}
+}
+
+func TestInstallerPolicyFlagRefusals(t *testing.T) {
+	t.Parallel()
+	bundle := makeBundle(t, "0.2.0")
+	cfg := writeOKConfig(t)
+	img := "docker.io/library/*"
+	many := []string{"install", "--runner", "--project", "home-lab"}
+	for i := 0; i < 21; i++ {
+		many = append(many, "--image", fmt.Sprintf("docker.io/app%d/*", i))
+	}
+	const badProject = "bad --project value"
+	const badImage = "bad --image value"
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stderr string
+	}{
+		{"no runner", []string{"install", "--project", "home-lab", "--image", img}, 2, ""},
+		{"check no runner", []string{"check", "--project", "home-lab", "--image", img}, 2, ""},
+		{"with runner-config", []string{"install", "--runner", "--runner-config", cfg, "--project", "home-lab", "--image", img}, 2, ""},
+		{"project only", []string{"install", "--runner", "--project", "home-lab"}, 2, ""},
+		{"image only", []string{"install", "--runner", "--image", img}, 2, ""},
+		{"enable only", []string{"install", "--runner", "--enable"}, 2, ""},
+		{"enable with project only", []string{"install", "--runner", "--project", "home-lab", "--enable"}, 2, ""},
+		{"project twice", []string{"install", "--runner", "--project", "home-lab", "--project", "other", "--image", img}, 2, ""},
+		{"21 images", many, 2, ""},
+		{"enroll", []string{"enroll", "--server", "wss://example.invalid", "--runner", "--project", "home-lab", "--image", img}, 2, ""},
+		{"upgrade", []string{"upgrade", "--runner", "--project", "home-lab", "--image", img}, 2, ""},
+		{"slug uppercase", []string{"install", "--runner", "--project", "Home", "--image", img}, 2, badProject},
+		{"slug leading dash", []string{"install", "--runner", "--project", "-lab", "--image", img}, 2, badProject},
+		{"slug too long", []string{"install", "--runner", "--project", strings.Repeat("a", 65), "--image", img}, 2, badProject},
+		{"slug quote", []string{"install", "--runner", "--project", "a\"b", "--image", img}, 2, badProject},
+		{"pattern quote", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a\"]"}, 2, badImage},
+		{"pattern backslash", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a\\b"}, 2, badImage},
+		{"pattern space", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a b"}, 2, badImage},
+		{"pattern newline", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a\nenabled = true"}, 2, badImage},
+		{"pattern at", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a@sha256"}, 2, badImage},
+		{"pattern uppercase", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/App"}, 2, badImage},
+		{"pattern no slash", []string{"install", "--runner", "--project", "home-lab", "--image", "nginx"}, 2, badImage},
+		{"pattern too long", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/" + strings.Repeat("a", 250)}, 2, badImage},
+		{"pattern fails policy check", []string{"install", "--runner", "--project", "home-lab", "--image", "docker.io/a*b", "--enable"}, 1, "policy check failed for generated policy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rg := newRig(t)
+			before := treeSig(t, rg.root)
+			res := runBundle(t, bundle, rg, "", tc.args...)
+			if res.code != tc.code {
+				res.fail(t, "", fmt.Sprintf("want exit %d", tc.code))
+			}
+			if tc.stderr != "" && !strings.Contains(res.stderr, tc.stderr) {
+				res.fail(t, "", "stderr missing "+tc.stderr)
+			}
+			if tc.code == 1 && !strings.Contains(res.stdout, "nothing changed") {
+				res.fail(t, "", "no nothing changed")
+			}
+			if strings.Contains(res.log, "useradd ") {
+				res.fail(t, "", "useradd ran")
+			}
+			if treeSig(t, rg.root) != before {
+				t.Fatal("fake root changed")
+			}
+		})
+	}
+}
+
+func TestInstallerPolicyFlagsSurviveReexec(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	res := runBundle(t, bundle, rg, "", "install", "--runner", "--project", "home-lab",
+		"--image", "docker.io/library/*", "--image", "ghcr.io/acme/app")
+	if res.code != 0 {
+		res.fail(t, "", "install")
+	}
+	raw, err := os.ReadFile(filepath.Join(rg.stubs, "installer-argv0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "bot-agent-inst.") {
+		t.Fatalf("did not re-exec: %q", raw)
+	}
+	got, err := os.ReadFile(filepath.Join(rg.root, "etc/bot-agent/runner.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := genPolicyHeader + "enabled = false\nprojects = [\"home-lab\"]\nimages = [\"docker.io/library/*\", \"ghcr.io/acme/app\"]\n"
+	if string(got) != want {
+		t.Fatalf("policy:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestInstallerCheckWithPolicyFlags(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	before := treeSig(t, rg.root)
+	res := runBundle(t, bundle, rg, "", "check", "--runner", "--project", "home-lab", "--image", "docker.io/library/*", "--enable")
+	if res.code != 0 {
+		res.fail(t, "", "check")
+	}
+	for _, line := range []string{"\nvalid\n", "\nenabled=true\n", "\nimages=true\n", "summary: check ok"} {
+		if !strings.Contains(res.stdout, line) {
+			res.fail(t, "", "check output missing "+strings.TrimSpace(line))
+		}
+	}
+	if treeSig(t, rg.root) != before {
+		t.Fatal("check changed the fake root")
+	}
+	off := runBundle(t, bundle, rg, "", "check", "--runner", "--project", "home-lab", "--image", "docker.io/library/*")
+	if off.code != 0 || !strings.Contains(off.stdout, "\nimages=false\n") {
+		off.fail(t, "", "check without --enable")
+	}
+}
+
+func TestInstallerPrintsNextEnroll(t *testing.T) {
+	t.Parallel()
+	bundle := makeBundle(t, "0.2.0")
+	abs := realBundlePath(t, bundle)
+	cfg := writeOKConfig(t)
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"runner", []string{"install", "--runner", "--runner-config", cfg}, "next: sudo " + abs + "/install.sh enroll --server '<server URL>' --runner"},
+		{"no runner", []string{"install"}, "next: sudo " + abs + "/install.sh enroll --server '<server URL>'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rg := newRig(t)
+			dry := runBundle(t, bundle, rg, "", append(tc.args, "--dry-run")...)
+			if dry.code != 0 || len(nextLines(dry.stdout)) != 0 {
+				dry.fail(t, "", "dry-run printed next")
+			}
+			res := runBundle(t, bundle, rg, "", tc.args...)
+			if res.code != 0 {
+				res.fail(t, "", "install")
+			}
+			got := nextLines(res.stdout)
+			if len(got) != 1 || got[0] != tc.want {
+				res.fail(t, "", fmt.Sprintf("next lines %q, want %q", got, tc.want))
+			}
+			if !filepath.IsAbs(strings.Fields(got[0])[2]) {
+				t.Fatalf("path is not absolute: %q", got[0])
+			}
+			if !strings.Contains(res.stdout, got[0]+"\nsummary: installed ") {
+				res.fail(t, "", "next is not right before the summary")
+			}
+		})
+	}
+}
+
+func TestInstallerRefusesUnsafeBundlePath(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"x;y", "x$y", "x'y"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rg := newRig(t)
+			bundle := filepath.Join(t.TempDir(), name)
+			if err := os.Rename(makeBundle(t, "0.2.0"), bundle); err != nil {
+				t.Fatal(err)
+			}
+			before := treeSig(t, rg.root)
+			res := runBundle(t, bundle, rg, "", "install", "--runner")
+			if res.code != 1 {
+				res.fail(t, "", "want exit 1")
+			}
+			if !strings.Contains(res.stderr, "bundle path has characters that are unsafe to paste into a shell; move the bundle to a plain path") || !strings.Contains(res.stdout, "nothing changed") {
+				res.fail(t, "", "output")
+			}
+			if treeSig(t, rg.root) != before {
+				t.Fatal("fake root changed")
+			}
+		})
+	}
+}
+
+func TestInstallerPolicyFlagsRefuseSymlinkPolicy(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	etc := filepath.Join(rg.root, "etc/bot-agent")
+	if err := os.MkdirAll(etc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.toml")
+	if err := os.WriteFile(target, []byte("enabled = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(etc, "runner.toml")); err != nil {
+		t.Fatal(err)
+	}
+	before := treeSig(t, rg.root)
+	for _, cmd := range []string{"check", "install"} {
+		res := runBundle(t, bundle, rg, "", cmd, "--runner", "--project", "home-lab", "--image", "docker.io/library/*")
+		if res.code != 1 {
+			res.fail(t, "", cmd+": want exit 1")
+		}
+		if !strings.Contains(res.stderr, "refusing symlink /etc/bot-agent/runner.toml") || !strings.Contains(res.stdout, "nothing changed") {
+			res.fail(t, "", cmd+": output")
+		}
+		if treeSig(t, rg.root) != before {
+			t.Fatalf("%s changed the fake root", cmd)
+		}
+	}
+}
+
+func TestInstallerEnableNeedsImagesTrue(t *testing.T) {
+	t.Parallel()
+	rg := newRig(t)
+	bundle := makeBundle(t, "0.2.0")
+	// An agent whose policy check says valid but images=false.
+	agent := "#!/bin/sh\nset -eu\nif [ \"${1:-}\" = \"policy\" ]; then\n" +
+		"  printf '%s\\n' valid enabled=true programs=true images=false projects=1 max_containers=20 allow_public_ports=false image_patterns=1\n" +
+		"  exit 0\nfi\nprintf '%s\\n' 0.2.0\n"
+	writeExe(t, filepath.Join(bundle, "bot-agent-v0.2.0-linux-"+bundleArch(t)), agent)
+	writeSums(t, bundle)
+	before := treeSig(t, rg.root)
+	for _, cmd := range []string{"check", "install"} {
+		res := runBundle(t, bundle, rg, "", cmd, "--runner", "--project", "home-lab", "--image", "docker.io/library/*", "--enable")
+		if res.code != 1 {
+			res.fail(t, "", cmd+": want exit 1")
+		}
+		if !strings.Contains(res.stdout, "images=false") || !strings.Contains(res.stderr, "policy would not enable images") || !strings.Contains(res.stdout, "nothing changed") {
+			res.fail(t, "", cmd+": output")
+		}
+		if strings.Contains(res.log, "useradd ") {
+			res.fail(t, "", cmd+": useradd ran")
+		}
+		if treeSig(t, rg.root) != before {
+			t.Fatalf("%s changed the fake root", cmd)
+		}
+	}
+}

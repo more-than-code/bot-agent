@@ -41,13 +41,14 @@ A release bundle contains `install.sh`, `SHA256SUMS`, `bot-agent-vX-linux-{amd64
 ```bash
 sudo ./install.sh check
 sudo ./install.sh install --runner --runner-config /path/to/runner.toml
+sudo ./install.sh install --runner --project <slug> --image '<pattern>' --enable
 sudo ./install.sh enroll --server 'wss://<your-api-host>'
 sudo ./install.sh upgrade
 sudo ./install.sh rollback
 sudo ./install.sh remove
 ```
 
-The steps are in [docs/install.md](docs/install.md), and the bundles are on the [GitHub releases page](https://github.com/more-than-code/bot-agent/releases).
+`--project`, `--image` (repeatable), and `--enable` write `runner.toml` for an images-only host instead of `--runner-config`. `install` ends with a `next:` line that holds the enrol command with the bundle's absolute path. The steps are in [docs/install.md](docs/install.md), and the bundles are on the [GitHub releases page](https://github.com/more-than-code/bot-agent/releases).
 
 `check` confirms the architecture, systemd, and the bundle hashes, and reports what is already installed. With `--runner`, or when `runner.toml` is already there, it also runs `bot-agent policy check`. A non-empty `images` list makes it report whether `docker` is on `PATH`. `check` changes nothing. If `/usr/local/bin/bot-agent` is present and the installer has no record, `check` prints `installed: <version> (not installed by the installer)`, where `<version>` is the output of that binary's `version` command. It runs that binary only when it is a regular non-symlink file owned by root and not writable by group or other. Otherwise `check` reports `installed: none`.
 

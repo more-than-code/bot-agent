@@ -691,7 +691,18 @@ rm -rf \
   /var/lib/bot-agent-installer \
   /etc/systemd/system/bot-agent.service.d
 systemctl daemon-reload || die "real enroll setup: daemon-reload"
-run_ok "real enroll install" /opt/bundles/b020/install.sh install --runner --runner-config /opt/ok.toml >/tmp/real-install.out
+# The policy comes from --project and --image, and enroll uses the printed
+# absolute path from another directory.
+run_ok "real enroll install" /opt/bundles/b020/install.sh install --runner --project home-lab --image 'docker.io/library/*' --enable >/tmp/real-install.out
+[ "$(stat -c '%a %U:%G' /etc/bot-agent/runner.toml)" = "644 root:root" ] || die "generated policy mode"
+grep -qx 'enabled = true' /etc/bot-agent/runner.toml || die "generated policy enabled"
+grep -qx 'projects = \["home-lab"\]' /etc/bot-agent/runner.toml || die "generated policy projects"
+grep -qx 'images = \["docker.io/library/\*"\]' /etc/bot-agent/runner.toml || die "generated policy images"
+grep -qx 'images=true' /tmp/real-install.out || die "generated policy images=false"
+[ "$(grep -c '^next: ' /tmp/real-install.out)" = 1 ] || die "install printed no single next line"
+next_line=$(grep '^next: ' /tmp/real-install.out)
+[ "$next_line" = "next: sudo /opt/bundles/b020/install.sh enroll --server '<server URL>' --runner" ] || die "next line: $next_line"
+next_sh=$(printf '%s\n' "$next_line" | awk '{print $3}')
 [ "$(stat -c '%a %U:%G' /etc/bot-agent)" = "1770 root:bot-agent" ] || die "real enroll install etc mode"
 en=$(systemctl is-enabled bot-agent.service 2>/dev/null || true)
 [ "$en" = "disabled" ] || die "real enroll install left the agent $en"
@@ -724,7 +735,7 @@ esac
 
 live_token=LiveEnrollToken12345
 set +e
-out=$(printf '%s\n' "$live_token" | /opt/bundles/b020/install.sh enroll --insecure-dev --server "$bare" 2>&1)
+out=$(cd / && printf '%s\n' "$live_token" | "$next_sh" enroll --insecure-dev --server "$bare" --runner 2>&1)
 code=$?
 set -e
 case "$out" in
