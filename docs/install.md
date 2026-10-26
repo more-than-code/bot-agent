@@ -15,6 +15,48 @@ The installer copies files only from the bundle. It does not download anything. 
 - The server URL for enrol. Use `wss://<your-api-host>`. A dev server on loopback uses `ws://127.0.0.1:<port>` or `ws://localhost:<port>`, and those commands need `--insecure-dev`.
 - For agent v0.2.5 and later, Deploybot API v0.2.7 or later. An older API marks the host's programs as disabled, and deploys are refused.
 
+## Enrol with an AI agent
+
+An AI coding agent (Claude Code, Codex CLI, or another) can do every step of this guide for you except one: the join token. The agent prepares the host; you create the token and type it yourself. The token never passes through the agent.
+
+The agent must run on your own computer, with your SSH access to the host and your sudo on it. It works through `ssh <host> '<command>'`. You can start it with a prompt such as: "Add my server `<host>` to Deploybot project `<slug>` following https://deploybot.dev/llms.txt."
+
+**Instructions for the agent.** Follow them in order. Stop where it says stop.
+
+1. Check access: `ssh <host> 'uname -m; systemctl --version | head -1; sudo -n true && echo sudo-ok'`. `uname -m` must print `x86_64` or `aarch64`. If sudo needs a password, ask the user to run the sudo steps, or to give you a session where sudo works. Never ask for or handle their password.
+2. Find the latest version:
+   ```bash
+   V=$(curl -fsSL https://api.github.com/repos/more-than-code/bot-agent/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+   ```
+   The tarball holds both architectures; `install.sh` picks the right one.
+3. Download and verify on the host, in a directory without spaces:
+   ```bash
+   ssh <host> "set -e; mkdir -p ~/bot-agent-install && cd ~/bot-agent-install && \
+     curl -fsSLO https://github.com/more-than-code/bot-agent/releases/download/v$V/bot-agent-v$V.tar.gz && \
+     curl -fsSLO https://github.com/more-than-code/bot-agent/releases/download/v$V/bot-agent-v$V.tar.gz.sha256 && \
+     sha256sum -c bot-agent-v$V.tar.gz.sha256 && tar -xzf bot-agent-v$V.tar.gz && \
+     cd bot-agent-v$V && sha256sum -c SHA256SUMS"
+   ```
+   Every checked line must end in `OK`. Stop if any line does not.
+4. Check, dry run, install. Add `--runner` only if the host will run catalog containers or programs:
+   ```bash
+   ssh <host> "cd ~/bot-agent-install/bot-agent-v$V && sudo ./install.sh check --runner && \
+     sudo ./install.sh install --runner --dry-run && sudo ./install.sh install --runner"
+   ```
+   The install must end with `summary: installed <version>`.
+5. Write the host policy (`--runner` only). Build `/etc/bot-agent/runner.toml` from the [Review the host policy](#review-the-host-policy) rules: `projects = ["<slug>"]`, and `images` limited to the registries the user named. **Stop and show the user the file before you write it.** `enabled = true` lets this host run those images as root through Docker, so only the user decides the image patterns. After they agree, write it as `root:root` mode `0644` (for example `sudo tee` then `sudo chmod 0644`), and run `sudo ./install.sh check --runner`. It must print `valid` and `summary: check ok`.
+6. **Stop. Hand over to the user for the token.** Tell them:
+   - In the console, open project `<slug>`, then Join tokens, and create a token.
+   - In **their own terminal** (not through you), run:
+     ```bash
+     ssh -t <host> "cd ~/bot-agent-install/bot-agent-v<version> && sudo ./install.sh enroll --server 'wss://api.deploybot.dev' --runner"
+     ```
+     Then type the token at the `join token (not echoed):` prompt. Drop `--runner` if step 4 did not use it. For a self-hosted server, use its own `wss://` URL.
+   - Never ask for the token, never read it from the screen, chat or a file, and never put it in a command, URL or file.
+7. When the user says enrol finished, verify: `ssh <host> 'sudo systemctl is-active bot-agent bot-agent-runner.socket'` prints `active` (one line per unit). If you have the Deploybot MCP server, `list_hosts` for the project shows the host online. Otherwise ask the user to check the Hosts tab.
+
+Never print or copy `/etc/bot-agent/env`; it holds the host credential. If a step fails, use [If something goes wrong](#if-something-goes-wrong) and tell the user what you saw.
+
 ## Download and verify
 
 Open the latest release:
