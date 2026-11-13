@@ -488,3 +488,23 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
   - **Recovery budget.** The restart's start step and the rollback's restore run on a fresh recovery context of 20 s. This context is not derived from the 60 s finish context, so a stop that used up the whole budget still restarts the original.
   - **Entry names.** An entry name must not end with `-old` (agent `ValidEntry`, same rule as `-prev`).
   - **Logging.** A failure to restore a file slot, or to remove `-old` after a successful rollback, is logged. The rollback still reports success.
+
+> v1.10 (env hash) is on hold and not part of this copy; see the umbrella contract.
+
+## v1.11 secrets for program entries (2026-11-13, approved spec `docs/spec-program-secrets.md` rev 1)
+
+1. **`hello.programs.secrets: true`** from this agent version.
+2. **`program_start`** takes an optional `"secret_keys":[KEY]` (the key set stays closed otherwise). Every listed key must be in `env` (`bad_spec` otherwise). A key matching the secret-looking pattern (v1.3 check 6) is allowed only when listed. Every other env rule still applies to listed keys: key grammar, `PATH` and `HOME` reserved, value ≤ 4096 bytes with no NUL or newline, and the v1.3.1 changes-what-runs denylist. The agent (`bad_spec`) and the helper apply the same rules; the helper's re-check of a stored spec on `program_restart` (v1.5.1 item 3) accepts the stored `secret_keys`.
+3. **Files:** unchanged. The env file `/var/lib/bot-agent-runner/programs/<unit>.env` (root 0600) holds the resolved values; the stored spec `<unit>.json` (root 0600, directory root 0700) keeps `secret_keys`.
+4. **Redaction:** the agent and the helper redact every listed value (raw, base64 and JSON-escaped forms; values of 6 bytes or more) from `program_start`, `program_stop`, `program_restart`, `program_status` and `program_logs` output, as `preview(v)` (v1.7). The helper takes the values from the stored spec. Values never appear in agent or helper logs.
+5. **Without `secret_keys`** the frame and every check are exactly v1.9.
+
+## v1.12 the host's projects allowlist covers programs (2026-11-13, approved spec `docs/spec-projects-gate-programs.md` rev 1)
+
+1. **Gate.** `program_start` and `program_restart` require the spec's `project` to match the slug grammar (v1.4), to be in the policy's `projects`, and `projects` to have no overlapping pair (v1.5.2). Otherwise the agent answers `task_reject` `policy_denied` and the helper `policy_denied`. This amends v1.5.2 "Program verbs are unaffected": overlap now turns programs off as well as images.
+2. **Still allowed** for an owned unit whatever its project: `program_stop`, `program_status`, `program_logs`, and the helper `list`.
+3. **Restart refused for the project** (not listed, or overlap) leaves the unit in place: the helper answers `policy_denied` and does not disable, stop or remove it. Every other failed re-check keeps the v1.5.1 removal.
+4. **Boot and agent start:** units are not stopped. At start the agent logs once per owned unit whose project is not listed: `bot-agent: program unit <unit> is for project <slug>, which is not in projects`.
+5. **`hello.programs.projects: [slug]`**: the policy's valid project list, sent whenever `hello.programs` is. A policy with more than 32 projects is invalid (`parse`). This replaces the v1.4 rule that project lists are not sent; image patterns, `dirs` and `exec_allow` are still never sent.
+6. **`bot-agent policy check`** keeps its lines and adds `projects_overlap=true|false`.
+7. **Installer:** `install.sh check|install|upgrade --runner` exits 1 and changes nothing when the policy has programs on (`enabled`, at least one `run_as`, `max_programs > 0`) and `projects` is empty, with `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)`.
