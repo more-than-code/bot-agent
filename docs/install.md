@@ -11,6 +11,7 @@ The installer copies files only from the bundle. It does not download anything. 
 - A Linux host with systemd, and root on that host. `uname -m` must print `x86_64` or `aarch64`. The installer calls these `amd64` and `arm64`. It is written for a Debian-family host.
 - A terminal with a tty. From your own machine, `ssh -t <host>` gives you one. Enrol cannot show the hidden prompt without a tty.
 - Docker on the host, if it will run catalog images. A host that runs programs only does not need Docker.
+- A project in the console. The host joins one project. Creating a project and creating a join token are done in the console only; there is no MCP tool for either.
 - A join token. In the console, open the project, then Hosts → Add a host, and create a join token. Create it just before you enrol. The token expires, and it can be used once.
 - The server URL for enrol. Use `wss://<your-api-host>`. A dev server on loopback uses `ws://127.0.0.1:<port>` or `ws://localhost:<port>`, and those commands need `--insecure-dev`.
 - For the policy flags (`--project`, `--image`, `--enable`) and the printed `next:` enrol command, bundle v0.2.7 or later.
@@ -46,6 +47,11 @@ Follow them in order. Stop where it says stop. Run each command on the host. The
    ```bash
    V=$(curl -fsSL https://api.github.com/repos/more-than-code/bot-agent/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
    ```
+   The GitHub API allows 60 unauthenticated requests an hour per IP address, so this can fail on a shared network. If `V` is empty, read the tag from the `releases/latest` redirect instead:
+   ```bash
+   V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/more-than-code/bot-agent/releases/latest | sed -n 's#.*/tag/v\([0-9.]*\)$#\1#p')
+   ```
+   Or ask the user for the version and set `V` by hand.
    Stop if `V` is empty or does not look like a version such as `0.2.7` (digits and dots only). The steps below need v0.2.7 or later. The tarball holds both architectures; `install.sh` picks the right one.
 3. Download and verify on the host, in a plain path (letters, digits, `. _ / + -`):
    ```bash
@@ -61,7 +67,11 @@ Follow them in order. Stop where it says stop. Run each command on the host. The
      ```bash
      sudo ~/bot-agent-install/bot-agent-v$V/install.sh install --runner --project <slug> --image '<pattern>' --enable
      ```
-   - **Host runs programs** (with or without images). Use `install --runner` with no policy flags. After step 5, stop and tell the user that the policy needs a hand-written file, as in [Review the host policy](#review-the-host-policy). Do not write it yourself.
+   - **Host runs programs** (with or without images). Use `install --runner` with no policy flags. After step 5 the policy needs a hand-written file, as in [Review the host policy](#review-the-host-policy):
+     1. Ask the user for the accounts (`run_as`), the directories, the commands (`exec_allow`) and `max_programs`, and, if the host also runs images, the project slug and image patterns.
+     2. Draft the whole file from the programs example in that section, adding the image lines when the host runs both. Never add `allow_shell = true`, a `run_as` account, a directory or a command the user did not name.
+     3. Show the user the exact text. Write it only after the user approves that exact text, unchanged: put it in a file on the host, then `sudo install -m 0644 -o root -g root <file> /etc/bot-agent/runner.toml`. If the user does not approve, or you cannot run sudo on the host, give the user the text and that command to run themselves.
+     4. Either way, run `sudo ~/bot-agent-install/bot-agent-v$V/install.sh check --runner`. It must print `valid` and `programs=true`. Show the user the output.
    - **Host runs no catalog workloads at all.** Leave out `--runner` and the policy flags.
 
    **Stop and show the user the command before you run it.** `--enable` lets this host run those images as root through Docker, so only the user decides the image patterns.
@@ -127,7 +137,7 @@ Each checked line ends with `OK`. Run the rest of this guide from `bot-agent-vX.
 sudo ./install.sh check --runner
 ```
 
-`check` confirms the architecture, systemd, and the bundle hashes. It prints `arch: amd64` or `arch: arm64`, then `systemd: present`, and ends with `summary: check ok`. A host with no agent yet prints `installed: none`. A hash mismatch prints `sha256 mismatch:` and the relative path. `check` writes nothing.
+`check` confirms the architecture, systemd, and the bundle hashes. It prints `arch: amd64` or `arch: arm64`, then `systemd: present`, and ends with `summary: check ok`. A host with no agent yet prints `installed: none`. On a host that already has an agent, `check` prints one line per agent file: `stock: <path>` when the file matches what the installer wrote, `modified: <path>` when it was changed after that, `not installed by the installer: <path>` when the installer did not write it, and `absent: <path>` when it is missing. A hash mismatch prints `sha256 mismatch:` and the relative path. `check` writes nothing.
 
 The script must run as root. Otherwise it prints `must run as root` and exits 1.
 
@@ -168,10 +178,10 @@ sudo ./install.sh install --runner --project your-project --image 'ghcr.io/examp
 The written file has `enabled`, `projects`, and `images`, and is `root:root` mode `0644`. With `--enable`, the check must print `images=true` or nothing is installed. If `runner.toml` already exists, the same file is kept, and a different file stops the install with `runner.toml exists and differs; remove it or edit it by hand`. A value outside the slug or pattern rules exits 2. Programs, `max_containers`, and `allow_public_ports` still need a hand-written file. Put each setting on one line. An array that spans more than one line is invalid, and an invalid file leaves programs and images off.
 
 - `images` lists the images this host may run, for example `ghcr.io/example/*`. A `*` is one whole path component. With `--runner` installed, the helper runs as root and can open `/var/run/docker.sock`. An empty list does not remove that socket. An image deploy runs only when images are enabled: the policy is valid, `enabled = true`, there is at least one image pattern, there is at least one project, and no project slug overlaps another. Review the patterns before you set `enabled = true`.
-- `projects` lists the project slugs allowed to deploy here. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves images off.
+- `projects` lists the project slugs allowed to deploy **images** here. It does not limit programs: a program can run for any project the server lets deploy to this host, which is the host's own project and any project it is shared with at deploy level, within `run_as`, `dirs`, `exec_allow` and `max_programs`. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves images off.
 - `max_containers` is how many containers this host may run. If you omit it, the limit is 20. A value you set must be from 1 to 200.
 - A port that is not public always binds `127.0.0.1`. `allow_public_ports = false` refuses a port marked public. `allow_public_ports = true` binds those ports on `0.0.0.0`.
-- Programs use `run_as`, `dirs`, `exec_allow`, `allow_shell`, and `max_programs`. `run_as` drops root, an account whose uid is below 1000, an account whose primary gid is below 1000, and an account whose primary group is `root` or `0`. Set `max_programs`. If you omit it, the limit is 0 and no program can start. Leave `allow_shell = false` unless this host should run a shell.
+- Programs use `run_as`, `dirs`, `exec_allow`, `allow_shell`, and `max_programs`. `dirs` are absolute directories; a program's working directory must be inside one of them after symlinks are resolved. `exec_allow` lists absolute paths that must match exactly; it has no wildcards. A command given as a bare name runs `<dir>/node_modules/.bin/<name>` when that file is inside the working directory, and otherwise the `exec_allow` entry with that file name. `run_as` drops root, an account whose uid is below 1000, an account whose primary gid is below 1000, and an account whose primary group is `root` or `0`. Set `max_programs`. If you omit it, the limit is 0 and no program can start. Leave `allow_shell = false` unless this host should run a shell.
 - Set `enabled = true` when the lists are reviewed. Nothing runs while it is `false`.
 
 Replace `example` and `your-project` before you rely on this file:
@@ -184,6 +194,19 @@ projects = ["your-project"]
 max_containers = 20
 allow_public_ports = false
 ```
+
+For a host that runs programs only, replace `deploy`, `/srv/apps` and the commands with your own:
+
+```toml
+enabled = true
+allow_shell = false
+run_as = ["deploy"]
+dirs = ["/srv/apps"]
+exec_allow = ["/usr/bin/node", "/usr/bin/npm"]
+max_programs = 5
+```
+
+A host that runs both programs and images has one `runner.toml` with both sets of lines: the program lines above plus `images`, `projects`, `max_containers` and `allow_public_ports`, and a single `enabled` and `allow_shell`.
 
 Check the file again:
 
