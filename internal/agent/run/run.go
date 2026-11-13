@@ -180,6 +180,7 @@ func Run(ctx context.Context, opt Options) error {
 		healthCh:  make(chan protocol.Sample, 128),
 		taskSlots: make(chan struct{}, maxRunningTasks),
 	}
+	a.noteUnlistedUnits(ctx)
 	if pol.ImagesEnabled() {
 		go a.supervise(ctx)
 	}

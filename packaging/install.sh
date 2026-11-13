@@ -901,6 +901,38 @@ refuse_different_policy() {
   fi
 }
 
+# From v0.2.8 programs run only for projects listed in runner.toml
+# (agent-protocol v1.12). With the runner, a policy that has programs on
+# (enabled, at least one run_as, max_programs > 0) but lists no projects is
+# refused, so an upgrade cannot silently stop new program deploys.
+# The file has passed policy check, so every key is on one line.
+# Call right after check_policy_file on the same file.
+require_programs_projects() {
+  if [ "$WANT_RUNNER" != "1" ]; then
+    return 0
+  fi
+  if ! printf '%s\n' "$LAST_POLICY_CHECK" | awk '$0=="projects=0"{f=1} END{exit f?0:1}'; then
+    return 0
+  fi
+  if ! awk '
+    function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+    /^[ \t]*#/ { next }
+    {
+      i = index($0, "=")
+      if (i == 0) next
+      k = trim(substr($0, 1, i - 1))
+      v = trim(substr($0, i + 1))
+      if (k == "enabled") en = (v == "true")
+      else if (k == "max_programs") mp = (v + 0 > 0)
+      else if (k == "run_as") { gsub(/[ \t\r]/, "", v); ra = (v != "[]") }
+    }
+    END { exit (en && mp && ra) ? 0 : 1 }
+  ' "$1"; then
+    return 0
+  fi
+  precheck_fail 'runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)'
+}
+
 # With --enable, the last policy check must report images=true.
 require_images_enabled() {
   if [ "$ENABLE" != "1" ]; then
@@ -962,9 +994,11 @@ do_check() {
   if [ -n "$RUNNER_CONFIG" ]; then
     refuse_different_policy
     check_policy_file "$RUNNER_CONFIG" "$RUNNER_CONFIG_LABEL"
+    require_programs_projects "$RUNNER_CONFIG"
     require_images_enabled
   elif [ -f "$POLICY_DEST" ]; then
     check_policy_file "$POLICY_DEST" "$POLICY_HOST"
+    require_programs_projects "$POLICY_DEST"
   elif [ "$WANT_RUNNER" = "1" ]; then
     _tmp=$(mktemp) || precheck_fail "mktemp failed"
     write_disabled_template "$_tmp"
@@ -1429,11 +1463,13 @@ precheck_policy_for_install() {
   if [ -f "$POLICY_DEST" ]; then
     check_policy_install_mode "$POLICY_DEST"
     check_policy_file "$POLICY_DEST" "$POLICY_HOST"
+    require_programs_projects "$POLICY_DEST"
     require_images_enabled
     return 0
   fi
   if [ -n "$RUNNER_CONFIG" ]; then
     check_policy_file "$RUNNER_CONFIG" "$RUNNER_CONFIG_LABEL"
+    require_programs_projects "$RUNNER_CONFIG"
     require_images_enabled
     return 0
   fi
@@ -1993,6 +2029,7 @@ do_upgrade() {
   if [ -f "$POLICY_DEST" ]; then
     say "kept: ${POLICY_HOST}"
     check_policy_file "$POLICY_DEST" "$POLICY_HOST" || return 1
+    require_programs_projects "$POLICY_DEST"
   fi
   while IFS=' ' read -r _path _mode _owner _kind _src; do
     [ -n "$_path" ] || continue

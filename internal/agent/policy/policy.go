@@ -25,6 +25,10 @@ const (
 	// MaxBytes bounds a policy file. Larger files are invalid.
 	MaxBytes = 64 * 1024
 
+	// MaxProjects bounds the projects list (agent-protocol v1.12 item 5).
+	// A longer list makes the file invalid (parse).
+	MaxProjects = 32
+
 	minUID = 1000
 )
 
@@ -88,6 +92,21 @@ func OverlappingProjects(projects []string) (a, b string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// ProjectAllowed is the v1.12 project gate for program_start and
+// program_restart: the slug is listed and the list has no overlapping pair.
+// Image verbs keep their own check.
+func (p Policy) ProjectAllowed(project string) bool {
+	if _, _, overlap := OverlappingProjects(p.Projects); overlap {
+		return false
+	}
+	for _, x := range p.Projects {
+		if x == project {
+			return true
+		}
+	}
+	return false
 }
 
 func projectOverlaps(x, y string) bool {
@@ -214,6 +233,9 @@ func validateImagePolicy(p *parsed) string {
 		if !images.ValidPattern(pat) {
 			return "parse"
 		}
+	}
+	if len(p.projects) > MaxProjects {
+		return "parse"
 	}
 	seen := map[string]bool{}
 	for _, proj := range p.projects {

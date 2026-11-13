@@ -91,6 +91,8 @@ func printPolicyCheck(w io.Writer, path string) error {
 	fmt.Fprintf(w, "max_containers=%d\n", p.MaxContainers)
 	fmt.Fprintf(w, "allow_public_ports=%t\n", p.AllowPublicPorts)
 	fmt.Fprintf(w, "image_patterns=%d\n", len(p.Images))
+	_, _, overlap := policy.OverlappingProjects(p.Projects)
+	fmt.Fprintf(w, "projects_overlap=%t\n", overlap)
 	return nil
 }
 

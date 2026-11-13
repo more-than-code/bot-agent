@@ -436,8 +436,9 @@ func TestHelloProgramsAbsentDisabledAndEnabled(t *testing.T) {
 	if len(web.Ports) != 1 || web.Ports[0] != 3031 || web.SystemdUnit == nil || *web.SystemdUnit != "deploybot-tour-agent-web.service" {
 		t.Fatalf("%+v", web)
 	}
+	// The first list is the v1.12 start-up check for units of unlisted projects.
 	calls := enabledHelper.Calls()
-	if len(calls) < 2 || calls[0] != "list" || calls[1] != "sockets" {
+	if len(calls) < 3 || calls[0] != "list" || calls[1] != "list" || calls[2] != "sockets" {
 		t.Fatalf("calls %v", calls)
 	}
 }
@@ -585,6 +586,7 @@ func programAgent(t *testing.T, max int) (*agent, *fakeHelper, *testClock, []byt
 	pol := policy.Policy{
 		Exists: true, Valid: true, Enabled: true, MaxPrograms: max,
 		RunAs: []string{"joe"}, Dirs: []string{root}, ExecAllow: []string{"/usr/bin/pnpm"},
+		Projects: []string{"tour-agent"},
 		Accounts: map[string]policy.Account{
 			"joe": {Name: "joe", UID: 1000, GID: 1000, Home: "/home/joe", Group: "joe"},
 		},
@@ -608,8 +610,9 @@ func programTask(kind string, spec []byte) protocol.Task {
 	return protocol.Task{
 		V: protocol.Version, Type: "task", TaskID: "task-1",
 		HostID: "11111111-1111-4111-8111-111111111111", Kind: kind,
-		ExpiresAt:  protocol.FormatTime(time.Date(2026, 10, 15, 12, 5, 0, 0, time.UTC)),
-		TimeoutSec: 30, Spec: spec,
+		ExpiresAt: protocol.FormatTime(time.Date(2026, 10, 15, 12, 5, 0, 0, time.UTC)),
+		// A copy: runProgram zeroes the spec when the task ends, and tests reuse theirs.
+		TimeoutSec: 30, Spec: append([]byte(nil), spec...),
 	}
 }
 
@@ -772,7 +775,7 @@ func writeRunner(t *testing.T, enabled, shell bool) string {
 	if shell {
 		sh = "true"
 	}
-	body := fmt.Sprintf("# disabled example\nenabled = %s\nrun_as = [\"joe\"]\ndirs = [\"/home/joe/workspace-SENTINEL-dir\"]\nexec_allow = [\"/usr/bin/pnpm-SENTINEL\"]\nallow_shell = %s\nmax_programs = 20\n", flag, sh)
+	body := fmt.Sprintf("# disabled example\nenabled = %s\nrun_as = [\"joe\"]\ndirs = [\"/home/joe/workspace-SENTINEL-dir\"]\nexec_allow = [\"/usr/bin/pnpm-SENTINEL\"]\nallow_shell = %s\nmax_programs = 20\nprojects = [\"tour-agent\", \"acme\"]\n", flag, sh)
 	path := filepath.Join(t.TempDir(), "runner.toml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

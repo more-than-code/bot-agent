@@ -76,23 +76,26 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	if len(in) > programs.MaxFrame {
 		return refuse(sys, programs.ReasonBadSpec)
 	}
-	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
-	})
 	if err := ensureRuntime(sys.Root); err != nil {
 		return refuse(sys, programs.ReasonIO)
 	}
-	if verb == "list" {
-		return doList(ctx, in, pol, sys)
-	}
 	// Each connection is its own root process, so serialise the mutating verbs:
 	// the max_programs count, the checks and the unit writes happen under one lock.
-	if verb == "start" || verb == "restart" || verb == "stop" {
+	// logs takes it too, so the stored spec it redacts with is not being replaced.
+	if verb == "start" || verb == "restart" || verb == "stop" || verb == "logs" {
 		unlock, err := lockHelper(sys.Root)
 		if err != nil {
 			return refuse(sys, programs.ReasonIO)
 		}
 		defer unlock()
+	}
+	// One policy snapshot, read under the lock, for the request check and the
+	// restart re-check.
+	pol := policy.Load(policy.Files{
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+	})
+	if verb == "list" {
+		return doList(ctx, in, pol, sys)
 	}
 	gate := programs.Gate{Policy: pol, Files: true}
 	if verb == "start" || verb == "restart" {
@@ -115,7 +118,7 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	case "stop":
 		return doStop(ctx, res, sys)
 	case "restart":
-		return doRestart(ctx, res, sys)
+		return doRestart(ctx, res, pol, sys)
 	case "status":
 		return doStatus(ctx, res, sys)
 	case "logs":
@@ -297,7 +300,7 @@ func doStop(ctx context.Context, res programs.Resolved, sys Sys) []byte {
 	return programs.EncodeStatus(inactive(res.Unit))
 }
 
-func doRestart(ctx context.Context, res programs.Resolved, sys Sys) []byte {
+func doRestart(ctx context.Context, res programs.Resolved, pol policy.Policy, sys Sys) []byte {
 	loc, err := locateUnit(sys.Root, res)
 	if err != nil {
 		return refuse(sys, programs.ReasonIO)
@@ -313,8 +316,12 @@ func doRestart(ctx context.Context, res programs.Resolved, sys Sys) []byte {
 	}
 	// The restart request names the unit only. recheckSpec resolves the stored
 	// start spec; fieldBreaks runs on that Resolved before any write.
-	checked, code := recheckSpec(sys, res.Unit)
+	checked, code, keep := recheckSpec(sys, res.Unit, pol)
 	if code != "" {
+		// v1.12 item 3: a project refusal leaves the unit installed and running.
+		if keep {
+			return refuse(sys, programs.ReasonPolicy)
+		}
 		// Policy denial stays policy_denied even when cleanup itself fails.
 		_ = discardUnit(sys, res.Unit, loc.runOurs)
 		return refuse(sys, programs.ReasonPolicy)
@@ -378,16 +385,30 @@ func doLogs(ctx context.Context, res programs.Resolved, sys Sys) []byte {
 	if sys.Journalctl == nil {
 		return refuse(sys, programs.ReasonIO)
 	}
+	// v1.11 item 4: the stored spec's current and retired secret values, read
+	// under the helper lock before journalctl runs, then the regex.
+	secrets, err := storedSecrets(sys.Root, res.Unit)
+	if err != nil {
+		return refuse(sys, programs.ReasonIO)
+	}
+	ex := redact.NewExactEnv(secrets...)
+	defer ex.Clear()
 	out, err := sys.Journalctl(ctx, []string{
 		"-u", res.Unit, "-n", strconv.Itoa(res.Lines), "-o", "cat", "--no-pager",
 	})
 	if err != nil && out == "" {
 		return refuse(sys, programs.ReasonIO)
 	}
+	// Cut at a line end so a value split by the cap is not half-printed.
 	if len(out) > maxJournalRead {
 		out = out[:maxJournalRead]
+		if i := strings.LastIndexByte(out, '\n'); i >= 0 {
+			out = out[:i+1]
+		} else {
+			out = ""
+		}
 	}
-	lines, truncated := redact.Journal(splitLines(out))
+	lines, truncated := redact.JournalTask(splitLines(out), ex)
 	return programs.EncodeLogs(programs.LogBatch{Lines: lines, Truncated: truncated})
 }
 
@@ -450,10 +471,12 @@ func writeProgramFiles(root string, res programs.Resolved, loc unitLoc) error {
 	envPath := envFile(root, res.Unit)
 	specPath := specFile(root, res.Unit)
 	unitPath := unitFile(root, res.Unit)
+	// Read the old spec's secrets before anything is replaced (v1.11 S1).
+	retired := nextRetired(root, res)
 	if err := atomicWrite(envPath, []byte(renderEnv(res.Env)), 0o600); err != nil {
 		return err
 	}
-	spec, err := recordSpec(res)
+	spec, err := recordSpec(res, retired)
 	if err != nil {
 		if !preserve {
 			_ = removeRegular(envPath)
@@ -557,19 +580,38 @@ func fieldBreaks(res programs.Resolved) string {
 // recheckSpec runs the stored start request through the current policy.
 // A missing or now-disallowed spec is policy_denied. The Resolved is what
 // an upgrade restart writes; the restart request itself has no command line.
-func recheckSpec(sys Sys, unit string) (programs.Resolved, string) {
+// pol is Handle's snapshot. The stored secret_keys (v1.11) go through the
+// same checks; the helper-only retired_secrets key is dropped first. keep is
+// true when the stored project is not allowed (v1.12 item 3): the caller
+// refuses without disabling, stopping or removing the unit.
+func recheckSpec(sys Sys, unit string, pol policy.Policy) (programs.Resolved, string, bool) {
 	raw, err := readSpec(sys.Root, unit)
 	if err != nil || len(raw) > programs.MaxFrame {
-		return programs.Resolved{}, programs.ReasonPolicy
+		return programs.Resolved{}, programs.ReasonPolicy, false
 	}
-	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
-	})
+	raw, err = withoutRetired(raw)
+	if err != nil {
+		return programs.Resolved{}, programs.ReasonPolicy, false
+	}
+	if project := storedProject(raw); project != "" && !pol.ProjectAllowed(project) {
+		return programs.Resolved{}, programs.ReasonPolicy, true
+	}
 	checked, code := programs.Check("program_start", raw, programs.Gate{Policy: pol, Files: true})
 	if code != "" || checked.Unit != unit {
-		return programs.Resolved{}, programs.ReasonPolicy
+		return programs.Resolved{}, programs.ReasonPolicy, false
 	}
-	return checked, ""
+	return checked, "", false
+}
+
+// storedProject is the project slug of a stored spec, or "" when it has none.
+func storedProject(raw []byte) string {
+	var spec struct {
+		Project string `json:"project"`
+	}
+	if json.Unmarshal(raw, &spec) != nil {
+		return ""
+	}
+	return spec.Project
 }
 
 // discardUnit disables and stops a unit this call is abandoning, removes the

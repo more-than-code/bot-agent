@@ -68,10 +68,10 @@ Follow them in order. Stop where it says stop. Run each command on the host. The
      sudo ~/bot-agent-install/bot-agent-v$V/install.sh install --runner --project <slug> --image '<pattern>' --enable
      ```
    - **Host runs programs** (with or without images). Use `install --runner` with no policy flags. After step 5 the policy needs a hand-written file, as in [Review the host policy](#review-the-host-policy):
-     1. Ask the user for the accounts (`run_as`), the directories, the commands (`exec_allow`) and `max_programs`, and, if the host also runs images, the project slug and image patterns.
+     1. Ask the user for the project slug, the accounts (`run_as`), the directories, the commands (`exec_allow`) and `max_programs`, and, if the host also runs images, the image patterns. From v0.2.8 programs run only for projects listed in `projects`, so the slug is needed for programs too.
      2. Draft the whole file from the programs example in that section, adding the image lines when the host runs both. Never add `allow_shell = true`, a `run_as` account, a directory or a command the user did not name.
      3. Show the user the exact text. Write it only after the user approves that exact text, unchanged: put it in a file on the host, then `sudo install -m 0644 -o root -g root <file> /etc/bot-agent/runner.toml`. If the user does not approve, or you cannot run sudo on the host, give the user the text and that command to run themselves.
-     4. Either way, run `sudo ~/bot-agent-install/bot-agent-v$V/install.sh check --runner`. It must print `valid` and `programs=true`. Show the user the output.
+     4. Either way, run `sudo ~/bot-agent-install/bot-agent-v$V/install.sh check --runner`. It must print `valid`, `programs=true`, a `projects=` count of at least 1 and `projects_overlap=false`. Show the user the output.
    - **Host runs no catalog workloads at all.** Leave out `--runner` and the policy flags.
 
    **Stop and show the user the command before you run it.** `--enable` lets this host run those images as root through Docker, so only the user decides the image patterns.
@@ -178,7 +178,8 @@ sudo ./install.sh install --runner --project your-project --image 'ghcr.io/examp
 The written file has `enabled`, `projects`, and `images`, and is `root:root` mode `0644`. With `--enable`, the check must print `images=true` or nothing is installed. If `runner.toml` already exists, the same file is kept, and a different file stops the install with `runner.toml exists and differs; remove it or edit it by hand`. A value outside the slug or pattern rules exits 2. Programs, `max_containers`, and `allow_public_ports` still need a hand-written file. Put each setting on one line. An array that spans more than one line is invalid, and an invalid file leaves programs and images off.
 
 - `images` lists the images this host may run, for example `ghcr.io/example/*`. A `*` is one whole path component. With `--runner` installed, the helper runs as root and can open `/var/run/docker.sock`. An empty list does not remove that socket. An image deploy runs only when images are enabled: the policy is valid, `enabled = true`, there is at least one image pattern, there is at least one project, and no project slug overlaps another. Review the patterns before you set `enabled = true`.
-- `projects` lists the project slugs allowed to deploy **images** here. It does not limit programs: a program can run for any project the server lets deploy to this host, which is the host's own project and any project it is shared with at deploy level, within `run_as`, `dirs`, `exec_allow` and `max_programs`. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves images off.
+- `projects` lists the project slugs allowed to deploy **programs and images** here (programs from v0.2.8). A program or image for a project that is not listed is refused, even when the server lets that project deploy to this host through sharing. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. List at most 32 slugs; a longer list makes the file invalid. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves both programs and images off, and `check` prints `projects_overlap=true`.
+- Taking a project out of `projects` does not stop its running programs. Start and Restart are refused for it; Stop, status and logs still work. When the agent starts, it logs one line for each such unit: `bot-agent: program unit <unit> is for project <slug>, which is not in projects`.
 - `max_containers` is how many containers this host may run. If you omit it, the limit is 20. A value you set must be from 1 to 200.
 - A port that is not public always binds `127.0.0.1`. `allow_public_ports = false` refuses a port marked public. `allow_public_ports = true` binds those ports on `0.0.0.0`.
 - Programs use `run_as`, `dirs`, `exec_allow`, `allow_shell`, and `max_programs`. `dirs` are absolute directories; a program's working directory must be inside one of them after symlinks are resolved. `exec_allow` lists absolute paths that must match exactly; it has no wildcards. A command given as a bare name runs `<dir>/node_modules/.bin/<name>` when that file is inside the working directory, and otherwise the `exec_allow` entry with that file name. `run_as` drops root, an account whose uid is below 1000, an account whose primary gid is below 1000, and an account whose primary group is `root` or `0`. Set `max_programs`. If you omit it, the limit is 0 and no program can start. Leave `allow_shell = false` unless this host should run a shell.
@@ -195,18 +196,31 @@ max_containers = 20
 allow_public_ports = false
 ```
 
-For a host that runs programs only, replace `deploy`, `/srv/apps` and the commands with your own:
+For a host that runs programs only, replace `your-project`, `deploy`, `/srv/apps` and the commands with your own:
 
 ```toml
 enabled = true
 allow_shell = false
+projects = ["your-project"]
 run_as = ["deploy"]
 dirs = ["/srv/apps"]
 exec_allow = ["/usr/bin/node", "/usr/bin/npm"]
 max_programs = 5
 ```
 
-A host that runs both programs and images has one `runner.toml` with both sets of lines: the program lines above plus `images`, `projects`, `max_containers` and `allow_public_ports`, and a single `enabled` and `allow_shell`.
+From v0.2.8, `check`, `install` and `upgrade` with `--runner` refuse a policy that has programs on (`enabled = true`, at least one `run_as` account and `max_programs` above 0) but no `projects`. They exit 1, change nothing, and print `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)`.
+
+A host that runs both programs and images has one `runner.toml` with both sets of lines: the program lines above plus `images`, `max_containers` and `allow_public_ports`, and a single `enabled`, `allow_shell` and `projects`.
+
+### Program secrets
+
+A program entry can use env sets and secret env, such as `GH_TOKEN`, from v0.2.8 of the agent. Before you give a program a secret, know these limits:
+
+- **Other processes can read the values.** A process running as the same `run_as` account, or as root, can read a program's environment through `/proc/<pid>/environ`, the same as for a container. Give a program that holds a secret its own `run_as` account, and list only that program's directory for it.
+- **Values are stored on the host.** The helper writes them to `/var/lib/bot-agent-runner/programs/<unit>.env` and keeps the spec in `<unit>.json`, both `root` mode `0600` in a `root` mode `0700` directory, so they survive a reboot. Stopping the program removes both files.
+- **A changed value needs a Run.** Changing a secret value in the console takes effect at the next **Run**. **Restart** reuses the spec stored on the host, with the old value. After a Run, the helper keeps up to 64 earlier values in the stored spec so older log lines stay redacted; values retired before that are covered only by the keyword regex.
+- Program logs show a listed value as a short preview. Values shorter than 6 bytes are not matched exactly and are covered only by the keyword regex, and a value printed in some other encoding can still appear.
+- **Before `install.sh rollback`** to an agent older than v0.2.8, Stop the programs that use secrets, or remove their env sets in the console. An older helper does not know the stored `secret_keys`, so its re-check refuses a Restart of such a program and removes the unit. With the agent rolled back, the server refuses a Run of an entry with env sets on this host.
 
 Check the file again:
 
@@ -286,6 +300,9 @@ Both `is-active` commands print `active` when you installed the helper. Without 
 | `enroll failed: agent did not stay up. Run systemctl stop bot-agent, move /etc/bot-agent/env aside, then enroll again` | The agent did not stay active with `NRestarts` 0 after the credential was saved. | Run the two steps in that message, then enrol again with a new token. Keep the moved file. Do not delete it. |
 | The new host's name ends in `-2`, or a higher number | That hostname is already used in the project. A revoked host still holds its name. | The suffix is expected. Revoking the old host does not free the name. |
 | A deploy is refused and the console shows programs disabled | The API is older than v0.2.7 and the agent is v0.2.5 or later. The old API stores this agent's programs report as disabled. | Upgrade the API to v0.2.7 or later, or roll this host back with `sudo ./install.sh rollback`. |
+| `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)` | From v0.2.8 programs run only for listed projects. The policy has programs on and no `projects`. Nothing was changed. | Add `projects = ["<slug>"]` to `/etc/bot-agent/runner.toml` as root, then run the command again. |
+| A program Run or Restart is refused with "the host refused this under its policy (runner.toml)" | The program's project is not in `projects`, or two slugs overlap (`check` prints `projects_overlap=true`). | Add the slug to `projects`, or fix the overlap, then `sudo systemctl restart bot-agent`. The running unit was left in place; Stop still works. |
+| The journal shows `bot-agent: program unit … is for project …, which is not in projects` | A unit installed earlier belongs to a project that is not listed. It keeps running. | Add the slug to `projects` and restart `bot-agent`, or Stop that program. |
 | Catalog containers seem to vanish from Deploybot after you enrol again | They did not. Ownership follows `/etc/machine-id`, not the host id. | Nothing to do. They stay owned. |
 
 ## Undo
@@ -325,5 +342,7 @@ sudo ./install.sh upgrade --runner
 ```
 
 `check` changes nothing and ends with `summary: check ok`. The dry run changes nothing and ends with `summary: dry-run upgrade <old> -> <new>`. The upgrade ends with `summary: upgraded <old> -> <new>`.
+
+From v0.2.8, programs run only for projects listed in `runner.toml`. On a host with the helper, where the policy has programs on but no `projects` line, `check`, the dry run and the upgrade exit 1 with `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)` and change nothing. Add `projects = ["<slug>"]` with every project whose programs run on this host, as in [Review the host policy](#review-the-host-policy), run `check --runner` again, then upgrade.
 
 Leave `--runner` off when this host has no helper. The same version prints `summary: already at <version>` and changes nothing, unless you pass `--force`. If the upgrade fails after it has written the backup, it restores the `.prev` set. `rollback` restores that set later.

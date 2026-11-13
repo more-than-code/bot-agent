@@ -111,7 +111,16 @@ type Programs struct {
 	Healthcheck  bool `json:"healthcheck"`
 	Logging      bool `json:"logging"`
 	HealthPolicy bool `json:"health_policy"`
+	// Secrets is true when program_start takes secret_keys (agent-protocol v1.11).
+	Secrets bool `json:"secrets"`
+	// Projects is the policy's valid project list (agent-protocol v1.12),
+	// never null. Image patterns, dirs and exec_allow are never sent.
+	Projects []string `json:"projects"`
 }
+
+// MaxHelloProjects is the v1.12 cap on hello.programs.projects. The policy
+// loader refuses a longer list, so a valid hello never reaches it.
+const MaxHelloProjects = 32
 
 // NormalizePorts makes a nil port list encode as [] rather than null.
 func (d Discovered) NormalizePorts() Discovered {

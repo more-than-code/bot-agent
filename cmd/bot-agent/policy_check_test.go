@@ -153,3 +153,26 @@ func TestPolicyCheckOmitsAccountNames(t *testing.T) {
 		t.Fatalf("account names in output: %q", out)
 	}
 }
+
+// v1.12 item 6: one added line, projects_overlap, after the existing lines.
+func TestPolicyCheckProjectsOverlap(t *testing.T) {
+	for _, tc := range []struct {
+		projects string
+		want     string
+	}{
+		{`["acme", "acme-web"]`, "projects_overlap=true\n"},
+		{`["acme", "acmeweb"]`, "projects_overlap=false\n"},
+		{`[]`, "projects_overlap=false\n"},
+	} {
+		out, err := runPolicyCheck(t, writePolicy(t, "enabled = true\nprojects = "+tc.projects+"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(out, "image_patterns=0\n"+tc.want) {
+			t.Fatalf("%s: %q", tc.projects, out)
+		}
+		if strings.Contains(out, "acme") {
+			t.Fatalf("printed a slug: %q", out)
+		}
+	}
+}

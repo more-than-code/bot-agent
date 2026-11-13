@@ -151,6 +151,9 @@ func checkHello(f Hello) error {
 		if f.Programs.Enabled && f.Programs.PolicyHash == "" {
 			return fmt.Errorf("policy_hash")
 		}
+		if len(f.Programs.Projects) > MaxHelloProjects {
+			return fmt.Errorf("projects")
+		}
 	}
 	return checkDiscovered(f.Services)
 }

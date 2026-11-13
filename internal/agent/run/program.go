@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
@@ -57,6 +58,11 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	p.Healthcheck = true
 	p.Logging = true
 	p.HealthPolicy = true
+	p.Secrets = true
+	p.Projects = []string{}
+	if a.policy.Valid {
+		p.Projects = append(p.Projects, a.policy.Projects...)
+	}
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}
@@ -64,6 +70,9 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 }
 
 func (a *agent) runProgram(ctx context.Context, task protocol.Task) protocol.TaskResult {
+	// A program_start spec can hold secret values (v1.11). Zero it when the
+	// task is done, as scrubTask does for images.
+	defer clear(task.Spec)
 	a.setHelperKind(task.Kind)
 	defer a.setHelperKind("")
 	tmo := time.Duration(task.TimeoutSec) * time.Second
@@ -206,7 +215,7 @@ func (a *agent) startFailed(ctx context.Context, task protocol.Task, st programs
 		if p, _, err := a.sockets(ctx, project, entry); err == nil {
 			ports = p
 		}
-		lines = a.tail(ctx, project, entry)
+		lines = a.tail(ctx, project, entry, programs.StartSecrets(task.Kind, task.Spec))
 	}
 	payload := statusPayload(st, ports)
 	payload["lines"] = lines
@@ -241,7 +250,10 @@ func (a *agent) finishLogs(task protocol.Task, raw []byte) protocol.TaskResult {
 	}
 }
 
-func (a *agent) tail(ctx context.Context, project, entry string) []string {
+// tail fetches the last lines for a start_failed result. secrets are the
+// start frame's secret values (v1.11); the helper has already redacted the
+// stored spec's values, and this applies the task's own set again.
+func (a *agent) tail(ctx context.Context, project, entry string, secrets []string) []string {
 	body, err := json.Marshal(struct {
 		Project string `json:"project"`
 		Entry   string `json:"entry"`
@@ -263,11 +275,38 @@ func (a *agent) tail(ctx context.Context, project, entry string) []string {
 		a.logHelper("logs", programs.FixedReason(reason))
 		return []string{}
 	}
-	lines, _ := redact.Journal(batch.Lines)
+	ex := redact.NewExactEnv(secrets...)
+	defer ex.Clear()
+	lines, _ := redact.JournalTask(batch.Lines, ex)
 	if lines == nil {
 		return []string{}
 	}
 	return lines
+}
+
+// noteUnlistedUnits is v1.12 item 4: at start, one log line per owned unit
+// whose project is not in projects. Nothing is stopped. A unit whose name
+// does not match its project and entry is skipped rather than logged.
+func (a *agent) noteUnlistedUnits(ctx context.Context) {
+	if a.opt.Helper == nil || !a.policy.Valid || !a.policy.Enabled {
+		return
+	}
+	// Capped so a hung helper does not hold up the first connect.
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	units, err := a.listUnits(lctx)
+	if err != nil {
+		return
+	}
+	for _, u := range units {
+		if name, ok := programs.UnitName(u.Project, u.Entry); !ok || name != u.Unit {
+			continue
+		}
+		if slices.Contains(a.policy.Projects, u.Project) {
+			continue
+		}
+		a.opt.Log.Printf("bot-agent: program unit %s is for project %s, which is not in projects", u.Unit, u.Project)
+	}
 }
 
 func (a *agent) fetchStatus(ctx context.Context, project, entry string) (programs.Status, string, error) {

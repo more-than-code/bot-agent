@@ -653,6 +653,7 @@ func writePolicy(t *testing.T, dir string, enabled, shell bool, max int, runAs, 
 	b.WriteString("exec_allow = [" + joinTOML(allow) + "]\n")
 	fmt.Fprintf(&b, "allow_shell = %t\n", shell)
 	fmt.Fprintf(&b, "max_programs = %d\n", max)
+	b.WriteString("projects = [\"demo\", \"mohiguide\"]\n")
 	path := filepath.Join(dir, "runner.toml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)

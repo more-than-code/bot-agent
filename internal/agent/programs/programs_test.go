@@ -309,7 +309,7 @@ func spec(t *testing.T, s startSpec) []byte {
 func joePolicy(ws string, shell bool, allow []string, max int) policy.Policy {
 	return policy.Policy{
 		Exists: true, Valid: true, Enabled: true, AllowShell: shell, MaxPrograms: max,
-		RunAs: []string{"joe"}, Dirs: []string{ws}, ExecAllow: allow,
+		RunAs: []string{"joe"}, Dirs: []string{ws}, ExecAllow: allow, Projects: []string{"tour-agent"},
 		Accounts: map[string]policy.Account{
 			"joe": {Name: "joe", UID: 1000, GID: 1000, Home: "/home/joe", Group: "joe"},
 		},

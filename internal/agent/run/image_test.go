@@ -774,7 +774,8 @@ func TestHelloOverlappingProjects(t *testing.T) {
 	if !strings.Contains(string(raw), `"images":false`) {
 		t.Fatalf("%s", raw)
 	}
-	if strings.Contains(string(raw), "acme-web") || strings.Contains(string(raw), "ghcr.io/acme") {
+	// v1.12 replaces "project lists are not sent"; image patterns still are not.
+	if !strings.Contains(string(raw), `"projects":["acme","acme-web"]`) || strings.Contains(string(raw), "ghcr.io/acme") {
 		t.Fatalf("%s", raw)
 	}
 }

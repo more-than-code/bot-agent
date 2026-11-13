@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 )
 
@@ -53,6 +55,33 @@ type Resolved struct {
 	Env     map[string]string
 	Shell   bool
 	Lines   int
+	// SecretKeys is the start's secret_keys (agent-protocol v1.11), nil when
+	// the frame had none. Each key is in Env. The helper stores it with the spec.
+	SecretKeys []string
+}
+
+// SecretValues is the env values of SecretKeys, for exact-value redaction.
+// Callers must not log them.
+func (r Resolved) SecretValues() []string {
+	out := make([]string, 0, len(r.SecretKeys))
+	for _, k := range r.SecretKeys {
+		out = append(out, r.Env[k])
+	}
+	return out
+}
+
+// StartSecrets is the secret values of a program_start spec that Check has
+// accepted, for redacting its output in the agent. Any other kind, or a spec
+// that does not decode, has none.
+func StartSecrets(kind string, spec []byte) []string {
+	if kind != "program_start" {
+		return nil
+	}
+	req, code := decodeStart(spec)
+	if code != "" {
+		return nil
+	}
+	return Resolved{Env: req.Env, SecretKeys: req.SecretKeys}.SecretValues()
 }
 
 // Gate is the host side of checks 5 and 7.
@@ -85,6 +114,11 @@ func Check(kind string, spec []byte, gate Gate) (Resolved, string) {
 	if !p.Valid || !p.Enabled {
 		return Resolved{}, ReasonPolicy
 	}
+	// v1.12 item 1: on start and restart a project outside the slug grammar
+	// is policy_denied, like an unlisted one. Other kinds keep bad_spec.
+	if (kind == "program_start" || kind == "program_restart") && !images.ValidProject(req.Project) {
+		return Resolved{}, ReasonPolicy
+	}
 	if code = lexical(kind, req); code != "" {
 		return Resolved{}, code
 	}
@@ -106,6 +140,8 @@ type request struct {
 	Env     map[string]string
 	Restart string
 	Lines   int
+	// SecretKeys is nil when program_start had no secret_keys.
+	SecretKeys []string
 }
 
 func decode(kind string, spec []byte) (request, string) {
@@ -132,6 +168,8 @@ func decodeStart(spec []byte) (request, string) {
 		RunAs   *string         `json:"run_as"`
 		Env     json.RawMessage `json:"env"`
 		Restart *string         `json:"restart"`
+		// SecretKeys is optional (agent-protocol v1.11). JSON null is absent.
+		SecretKeys *[]string `json:"secret_keys"`
 	}
 	if err := strictDecode(spec, &raw); err != nil {
 		return request{}, ReasonBadSpec
@@ -145,10 +183,14 @@ func decodeStart(spec []byte) (request, string) {
 	if !ok {
 		return request{}, ReasonBadSpec
 	}
-	return request{
+	req := request{
 		Project: *raw.Project, Entry: *raw.Entry, Dir: *raw.Dir, Exec: *raw.Exec,
 		Args: *raw.Args, Shell: *raw.Shell, RunAs: *raw.RunAs, Env: env, Restart: *raw.Restart,
-	}, ""
+	}
+	if raw.SecretKeys != nil {
+		req.SecretKeys = append([]string{}, *raw.SecretKeys...)
+	}
+	return req, ""
 }
 
 func decodeRef(spec []byte) (request, string) {
@@ -293,8 +335,17 @@ func lexical(kind string, req request) string {
 	if len(req.Env) > maxEnvKeys {
 		return ReasonBadSpec
 	}
+	// v1.11: every listed key is in env, and only a listed key may look secret.
+	// A listed key still meets every other env rule below and the denylist.
+	listed := make(map[string]bool, len(req.SecretKeys))
+	for _, k := range req.SecretKeys {
+		if _, ok := req.Env[k]; !ok {
+			return ReasonBadSpec
+		}
+		listed[k] = true
+	}
 	for k, v := range req.Env {
-		if !envKeyRE.MatchString(k) || k == "PATH" || k == "HOME" || secretRE.MatchString(k) {
+		if !envKeyRE.MatchString(k) || k == "PATH" || k == "HOME" || (secretRE.MatchString(k) && !listed[k]) {
 			return ReasonBadSpec
 		}
 		if len(v) > maxEnvVal || strings.ContainsAny(v, "\x00\n") {
@@ -345,6 +396,11 @@ func authorize(p policy.Policy, kind string, req request, gate Gate) (Resolved, 
 		return Resolved{}, ReasonBadSpec
 	}
 	out := Resolved{Unit: unit, Project: req.Project, Entry: req.Entry, Lines: req.Lines}
+	// v1.12: start and restart run only for a listed project with no overlap.
+	// Stop, status and logs stay allowed so an owner can still see and stop it.
+	if (kind == "program_start" || kind == "program_restart") && !p.ProjectAllowed(req.Project) {
+		return Resolved{}, ReasonPolicy
+	}
 	if kind != "program_start" {
 		if kind == "program_restart" && gate.CountKnown && overMax(p, unit, gate) {
 			return Resolved{}, ReasonPolicy
@@ -369,6 +425,7 @@ func authorize(p policy.Policy, kind string, req request, gate Gate) (Resolved, 
 	for k, v := range req.Env {
 		env[k] = v
 	}
+	out.SecretKeys = secretKeys(req.SecretKeys)
 	if !gate.Files {
 		if gate.CountKnown && overMax(p, unit, gate) {
 			return Resolved{}, ReasonPolicy
@@ -408,6 +465,24 @@ func authorize(p policy.Policy, kind string, req request, gate Gate) (Resolved, 
 	out.Env = env
 	out.Shell = req.Shell
 	return out, ""
+}
+
+// secretKeys copies the listed keys, sorted and without repeats. Nil stays nil
+// so a spec without secret_keys is stored exactly as before.
+func secretKeys(keys []string) []string {
+	if keys == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func overMax(p policy.Policy, unit string, gate Gate) bool {

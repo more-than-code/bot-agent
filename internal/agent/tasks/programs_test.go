@@ -148,7 +148,7 @@ func loadPolicy(t *testing.T, ws string, shell bool, max int, allow []string) po
 	if shell {
 		flag = "true"
 	}
-	body := fmt.Sprintf("enabled = true\nallow_shell = %s\nmax_programs = %d\nrun_as = [\"joe\", \"root\", \"daemon\", \"mallory\"]\ndirs = [%q]\nexec_allow = [%s]\n", flag, max, ws, strings.Join(quoted, ", "))
+	body := fmt.Sprintf("enabled = true\nallow_shell = %s\nmax_programs = %d\nrun_as = [\"joe\", \"root\", \"daemon\", \"mallory\"]\ndirs = [%q]\nexec_allow = [%s]\nprojects = [\"tour-agent\"]\n", flag, max, ws, strings.Join(quoted, ", "))
 	path := filepath.Join(dir, "runner.toml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

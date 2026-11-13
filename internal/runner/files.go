@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -128,7 +129,7 @@ func ensurePrivateDir(dir string) error {
 
 // recordSpec is the validated start request stored next to the env file.
 // Restart reads it back and runs it through Check against the current policy.
-func recordSpec(res programs.Resolved) ([]byte, error) {
+func recordSpec(res programs.Resolved, retired []string) ([]byte, error) {
 	args := res.Args
 	if args == nil {
 		args = []string{}
@@ -147,9 +148,17 @@ func recordSpec(res programs.Resolved) ([]byte, error) {
 		RunAs   string            `json:"run_as"`
 		Env     map[string]string `json:"env"`
 		Restart string            `json:"restart"`
+		// SecretKeys (v1.11) is left out when the start had none, so the
+		// stored spec of a start without secrets is byte-for-byte as before.
+		SecretKeys []string `json:"secret_keys,omitempty"`
+		// RetiredSecrets is helper-only: earlier secret values kept so logs
+		// written before a value changed stay redacted. recheckSpec drops it
+		// before the stored request goes through programs.Check.
+		RetiredSecrets []string `json:"retired_secrets,omitempty"`
 	}{
 		Project: res.Project, Entry: res.Entry, Dir: res.Dir, Exec: res.Exec,
 		Args: args, Shell: res.Shell, RunAs: res.RunAs, Env: env, Restart: res.Restart,
+		SecretKeys: res.SecretKeys, RetiredSecrets: retired,
 	})
 }
 
@@ -561,6 +570,92 @@ func specOwned(path string, res programs.Resolved) bool {
 		return false
 	}
 	return meta.Project != "" && meta.Project == res.Project && meta.Entry == res.Entry
+}
+
+// maxRetired caps the retired secret values a stored spec keeps (newest kept).
+// Values retired before that are covered only by the keyword regex.
+const maxRetired = 64
+
+// storedSpecSecrets is the redaction part of a stored spec.
+type storedSpecSecrets struct {
+	Env            map[string]string `json:"env"`
+	SecretKeys     []string          `json:"secret_keys"`
+	RetiredSecrets []string          `json:"retired_secrets"`
+}
+
+func (s storedSpecSecrets) current() []string {
+	out := make([]string, 0, len(s.SecretKeys))
+	for _, k := range s.SecretKeys {
+		if v, ok := s.Env[k]; ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// storedSecrets is the current and retired secret values of the stored spec
+// (v1.11 item 4), for redacting program logs. An owned unit always has a
+// stored spec, so a missing, unreadable or malformed one is an error and
+// logs fail closed rather than print a value unredacted.
+func storedSecrets(root, unit string) ([]string, error) {
+	raw, err := readSpec(root, unit)
+	if err != nil {
+		return nil, err
+	}
+	var spec storedSpecSecrets
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return nil, err
+	}
+	return append(spec.current(), spec.RetiredSecrets...), nil
+}
+
+// nextRetired is the retired set for the spec about to replace the stored
+// one: the old retired values, then the old current ones, minus any value
+// that is current again, without repeats, newest maxRetired kept. Values
+// under 6 bytes are left out; exact redaction skips them anyway. A missing
+// or unreadable old spec has nothing to carry.
+func nextRetired(root string, res programs.Resolved) []string {
+	raw, err := readSpec(root, res.Unit)
+	if err != nil {
+		return nil
+	}
+	var old storedSpecSecrets
+	if json.Unmarshal(raw, &old) != nil {
+		return nil
+	}
+	now := map[string]bool{}
+	for _, v := range res.SecretValues() {
+		now[v] = true
+	}
+	var out []string
+	for _, v := range append(append([]string{}, old.RetiredSecrets...), old.current()...) {
+		if len(v) < 6 || now[v] {
+			continue
+		}
+		if i := slices.Index(out, v); i >= 0 {
+			out = slices.Delete(out, i, i+1)
+		}
+		out = append(out, v)
+	}
+	if len(out) > maxRetired {
+		out = out[len(out)-maxRetired:]
+	}
+	return out
+}
+
+// withoutRetired drops the helper-only retired_secrets key so the stored
+// request decodes under programs.Check's closed key set. A spec without the
+// key is returned as it is.
+func withoutRetired(raw []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	if _, ok := m["retired_secrets"]; !ok {
+		return raw, nil
+	}
+	delete(m, "retired_secrets")
+	return json.Marshal(m)
 }
 
 // readSpec prefers the persistent spec and falls back to the wave-1 file.

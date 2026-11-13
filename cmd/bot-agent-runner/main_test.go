@@ -275,7 +275,7 @@ func TestServeConnCancelStopsSystemctl(t *testing.T) {
 func writeCancelPolicy(t *testing.T, dir, app string) string {
 	t.Helper()
 	path := filepath.Join(dir, "runner.toml")
-	body := "enabled = true\nrun_as = [\"joe\"]\ndirs = [\"" + filepath.Dir(app) + "\"]\nexec_allow = [\"/usr/bin/pnpm\"]\nallow_shell = false\nmax_programs = 20\n"
+	body := "enabled = true\nrun_as = [\"joe\"]\ndirs = [\"" + filepath.Dir(app) + "\"]\nexec_allow = [\"/usr/bin/pnpm\"]\nallow_shell = false\nmax_programs = 20\nprojects = [\"demo\", \"mohiguide\"]\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func enabledSys(t *testing.T) (runner.Sys, *[][]string) {
 		t.Fatal(err)
 	}
 	policyPath := filepath.Join(dir, "runner.toml")
-	body := "enabled = true\nrun_as = [\"joe\"]\ndirs = [\"/home/joe/workspace\"]\nexec_allow = [\"/usr/bin/pnpm\"]\nallow_shell = false\nmax_programs = 20\n"
+	body := "enabled = true\nrun_as = [\"joe\"]\ndirs = [\"/home/joe/workspace\"]\nexec_allow = [\"/usr/bin/pnpm\"]\nallow_shell = false\nmax_programs = 20\nprojects = [\"demo\", \"mohiguide\"]\n"
 	if err := os.WriteFile(policyPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
