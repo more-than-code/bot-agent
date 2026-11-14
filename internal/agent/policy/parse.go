@@ -19,9 +19,12 @@ type parsed struct {
 	execAllow     []string
 	images        []string
 	projects      []string
+	sharedNets    []string
+	sharedMembers []string
 }
 
-// parseTOML accepts the v1.3 keys and the v1.4 image keys. Unknown keys,
+// parseTOML accepts the v1.3 keys, the v1.4 image keys and the v1.13 shared
+// network keys. Unknown keys,
 // duplicates, and wrong types return a fixed reason. Values are not
 // included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
@@ -113,6 +116,18 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.allowPublic = v
+		case "shared_networks":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.sharedNets = xs
+		case "shared_network_projects":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.sharedMembers = xs
 		default:
 			return parsed{}, "unknown_key"
 		}
@@ -132,7 +147,8 @@ func parseTOML(data []byte) (parsed, string) {
 func knownKey(k string) bool {
 	switch k {
 	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
-		"images", "projects", "max_containers", "allow_public_ports":
+		"images", "projects", "max_containers", "allow_public_ports",
+		"shared_networks", "shared_network_projects":
 		return true
 	default:
 		return false

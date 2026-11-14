@@ -16,6 +16,10 @@ const (
 	LabelEntry     = "dev.deploybot.entry"
 	LabelSpecHash  = "dev.deploybot.spec_hash"
 	LabelFilesHash = "dev.deploybot.files_hash"
+	// Shared network labels (agent-protocol v1.13 item 4).
+	LabelKind    = "dev.deploybot.kind"
+	LabelNetwork = "dev.deploybot.network"
+	KindShared   = "shared"
 	// Health policy labels (agent-protocol v1.9 item 3). Set only on a
 	// service whose on_unhealthy is not none. Values are decimal strings.
 	LabelOnUnhealthy       = "dev.deploybot.on_unhealthy"
@@ -33,6 +37,8 @@ var (
 	entryRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
 	volumeRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
 	hashRE    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	// sharedNameRE is the v1.13 shared network name.
+	sharedNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 )
 
 // ValidProject is the runner.toml projects slug.
@@ -113,6 +119,19 @@ func NetworkName(project string) (string, bool) {
 		return "", false
 	}
 	return "deploybot-" + project, true
+}
+
+// ValidSharedName is the v1.13 shared network name.
+func ValidSharedName(s string) bool {
+	return sharedNameRE.MatchString(s)
+}
+
+// SharedNetworkName is deploybot-shared-<name>.
+func SharedNetworkName(name string) (string, bool) {
+	if !ValidSharedName(name) {
+		return "", false
+	}
+	return "deploybot-shared-" + name, true
 }
 
 // LockPath is the per-entry flock. It is absolute on the host; the helper

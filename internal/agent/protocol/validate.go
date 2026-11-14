@@ -154,8 +154,30 @@ func checkHello(f Hello) error {
 		if len(f.Programs.Projects) > MaxHelloProjects {
 			return fmt.Errorf("projects")
 		}
+		if err := checkSharedNetworks(f.Programs.SharedNetworks); err != nil {
+			return err
+		}
 	}
 	return checkDiscovered(f.Services)
+}
+
+// checkSharedNetworks bounds the v1.13 list. A nil list is allowed so an
+// older shape still validates; the daemon always sends [].
+func checkSharedNetworks(list []SharedNetwork) error {
+	if len(list) > MaxHelloSharedNetworks {
+		return fmt.Errorf("shared_networks")
+	}
+	members := 0
+	for _, n := range list {
+		if n.Name == "" || n.Subnet == "" || n.Projects == nil {
+			return fmt.Errorf("shared_networks")
+		}
+		members += len(n.Projects)
+	}
+	if members > MaxHelloNetworkMembers {
+		return fmt.Errorf("shared_networks")
+	}
+	return nil
 }
 
 func checkCaps(f Hello) error {

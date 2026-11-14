@@ -58,8 +58,10 @@ type hostConfigBody struct {
 	LogConfig     logConfigBody         `json:"LogConfig"`
 }
 
+// endpointBody is one EndpointsConfig value. The project endpoint always
+// has its alias. A v1.13 shared endpoint has none, so the key is omitted.
 type endpointBody struct {
-	Aliases []string `json:"Aliases"`
+	Aliases []string `json:"Aliases,omitempty"`
 }
 
 type networkConfigBody struct {
@@ -137,6 +139,19 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 				net: {Aliases: []string{entry}},
 			},
 		},
+	}
+	// v1.13: one endpoint per shared network, no alias and no fixed address.
+	// NetworkMode stays the project network. A shared name equal to the
+	// project network (a project slug starting "shared-") is refused.
+	for _, n := range spec.Networks {
+		shared, ok := images.SharedNetworkName(n)
+		if !ok {
+			return nil, programs.ReasonBadSpec
+		}
+		if shared == net {
+			return nil, programs.ReasonConflict
+		}
+		body.NetworkingConfig.EndpointsConfig[shared] = endpointBody{}
 	}
 	if len(spec.Command) > 0 {
 		body.Cmd = append([]string(nil), spec.Command...)

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,6 +58,9 @@ type fakeCtr struct {
 	exit, restarts         int
 	started, finished      string
 	ports                  []portView
+	// networks records the endpoints a test seeded. The fake never changes
+	// them, so a test can show a verb left them alone.
+	networks []string
 }
 
 type fakeVol struct {
@@ -66,8 +70,9 @@ type fakeVol struct {
 }
 
 type fakeNet struct {
-	driver string
-	labels map[string]string
+	driver  string
+	labels  map[string]string
+	subnets []string
 }
 
 type fakeDocker struct {
@@ -121,9 +126,15 @@ type fakeDocker struct {
 	pullID     string
 	logBody    []byte
 	volumeRace string
-	block      chan struct{}
-	entered    chan struct{}
-	once       sync.Once
+	// netRace, on a create of that name, stores it and answers 409, as when
+	// another client created the network first. netInspectFail and
+	// netCreateFail answer 500 to an inspect or create of that name.
+	netRace        map[string]*fakeNet
+	netInspectFail string
+	netCreateFail  string
+	block          chan struct{}
+	entered        chan struct{}
+	once           sync.Once
 }
 
 func startFake(t *testing.T) (*fakeDocker, string) {
@@ -140,7 +151,9 @@ func startFake(t *testing.T) (*fakeDocker, string) {
 	}
 	f := &fakeDocker{
 		ctrs: map[string]*fakeCtr{}, byID: map[string]*fakeCtr{},
-		vols: map[string]*fakeVol{}, nets: map[string]*fakeNet{},
+		vols: map[string]*fakeVol{},
+		// Docker's default bridge, so a create can overlap a real pool.
+		nets: map[string]*fakeNet{"bridge": {driver: "bridge", subnets: []string{"172.17.0.0/16"}}},
 	}
 	srv := &http.Server{Handler: f, ErrorLog: log.New(io.Discard, "", 0)}
 	go srv.Serve(ln)
@@ -523,14 +536,23 @@ func (f *fakeDocker) serveVolCreate(w http.ResponseWriter, body []byte) {
 }
 
 func (f *fakeDocker) serveNet(w http.ResponseWriter, name string) {
+	if name == f.netInspectFail {
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		return
+	}
 	n, ok := f.nets[name]
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	config := []map[string]string{}
+	for _, sub := range n.subnets {
+		config = append(config, map[string]string{"Subnet": sub, "Gateway": "x"})
+	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"Driver": n.driver, "Labels": n.labels,
 		"Options": map[string]string{"com.docker.network.bridge.enable_icc": "true"},
+		"IPAM":    map[string]any{"Driver": "default", "Config": config},
 	})
 }
 
@@ -539,13 +561,57 @@ func (f *fakeDocker) serveNetCreate(w http.ResponseWriter, body []byte) {
 		Name   string
 		Driver string
 		Labels map[string]string
+		IPAM   struct {
+			Config []struct{ Subnet string }
+		}
 	}
 	if json.Unmarshal(body, &raw) != nil {
 		http.Error(w, "bad", http.StatusBadRequest)
 		return
 	}
-	f.nets[raw.Name] = &fakeNet{driver: raw.Driver, labels: raw.Labels}
+	if raw.Name == f.netCreateFail {
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		return
+	}
+	// Docker checks the name before the address pool.
+	if n, ok := f.netRace[raw.Name]; ok {
+		f.nets[raw.Name] = n
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	n := &fakeNet{driver: raw.Driver, labels: raw.Labels}
+	for _, c := range raw.IPAM.Config {
+		if f.subnetTaken(c.Subnet) {
+			// Docker's pool overlap refusal. The status and message are
+			// from the Engine source; confirm both on pi3 (Docker 29)
+			// before release.
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"message": "invalid pool request: Pool overlaps with other one on this address space"})
+			return
+		}
+		n.subnets = append(n.subnets, c.Subnet)
+	}
+	if n.subnets == nil {
+		n.subnets = []string{"172.18.0.0/16"}
+	}
+	f.nets[raw.Name] = n
 	w.WriteHeader(http.StatusCreated)
+}
+
+// subnetTaken reports whether cidr overlaps any existing network's subnet.
+func (f *fakeDocker) subnetTaken(cidr string) bool {
+	want, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return false
+	}
+	for _, n := range f.nets {
+		for _, s := range n.subnets {
+			if have, err := netip.ParsePrefix(s); err == nil && have.Overlaps(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func itoa(n int) string {
@@ -1224,13 +1290,14 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	}
 	want := []string{
 		"GET /v1.47/containers/json?all=1",
+		// v1.13: the project network is ensured before any stop.
+		"GET /v1.47/networks/deploybot-mohiguide?",
+		"POST /v1.47/networks/create?",
+		"GET /v1.47/networks/deploybot-mohiguide?",
 		"POST /v1.47/containers/" + prev + "/stop?t=30",
 		"DELETE /v1.47/containers/" + prev + "?v=1",
 		"POST /v1.47/containers/" + cur + "/stop?t=30",
 		"POST /v1.47/containers/" + cur + "/rename?name=mohiguide-web-prev",
-		"GET /v1.47/networks/deploybot-mohiguide?",
-		"POST /v1.47/networks/create?",
-		"GET /v1.47/networks/deploybot-mohiguide?",
 		"GET /v1.47/volumes/mohiguide-data?",
 		"POST /v1.47/volumes/create?",
 		"GET /v1.47/volumes/mohiguide-data?",
@@ -1282,11 +1349,11 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	json.Unmarshal(raw, &id)
 	assertCalls(t, e.fake, []string{
 		"GET /v1.47/containers/json?all=1",
-		"POST /v1.47/containers/" + cur + "/stop?t=30",
-		"DELETE /v1.47/containers/" + cur + "?v=1",
 		"GET /v1.47/networks/deploybot-mohiguide?",
 		"POST /v1.47/networks/create?",
 		"GET /v1.47/networks/deploybot-mohiguide?",
+		"POST /v1.47/containers/" + cur + "/stop?t=30",
+		"DELETE /v1.47/containers/" + cur + "?v=1",
 		"POST /v1.47/containers/create?name=mohiguide-job",
 		"POST /v1.47/containers/" + id.ContainerID + "/start?",
 	})

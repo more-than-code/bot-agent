@@ -47,7 +47,14 @@ type ImageSpec struct {
 	// HealthPolicy is api-v1 v1.15 (agent-protocol v1.9). Nil means absent
 	// or null. Each key is optional; Health fills the defaults. Services only.
 	HealthPolicy *HealthPolicy `json:"health_policy,omitempty"`
+	// Networks is agent-protocol v1.13: shared network names, 1–4, unique.
+	// Nil means absent or null, and the key is then not marshalled, so a
+	// spec without it is unchanged. An empty array is refused.
+	Networks []string `json:"networks,omitempty"`
 }
+
+// MaxNetworks bounds ImageSpec networks (agent-protocol v1.13 item 3).
+const MaxNetworks = 4
 
 // HealthPolicy is the optional per-service failure rule. A nil key is the
 // default: rollback, none, 45 and 3. Pointers keep an explicit 0 or "" apart
@@ -166,6 +173,9 @@ func (s *ImageSpec) Validate() string {
 	if field := checkHealthPolicy(s); field != "" {
 		return field
 	}
+	if !validNetworks(s.Networks) {
+		return "networks"
+	}
 	if s.Kind == "job" {
 		s.Restart = "no"
 		if s.HealthyAfterSec != 0 {
@@ -192,6 +202,25 @@ func (s *ImageSpec) Validate() string {
 		return "healthy_after_sec"
 	}
 	return ""
+}
+
+// validNetworks is the v1.13 shape rule. Policy membership is checked by
+// the caller, which holds the policy.
+func validNetworks(names []string) bool {
+	if names == nil {
+		return true
+	}
+	if len(names) < 1 || len(names) > MaxNetworks {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if !ValidSharedName(n) || seen[n] {
+			return false
+		}
+		seen[n] = true
+	}
+	return true
 }
 
 func checkLogging(s *ImageSpec) string {

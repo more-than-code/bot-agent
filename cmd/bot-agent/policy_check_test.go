@@ -168,11 +168,39 @@ func TestPolicyCheckProjectsOverlap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasSuffix(out, "image_patterns=0\n"+tc.want) {
+		if !strings.HasSuffix(out, "image_patterns=0\n"+tc.want+"shared_networks=0\n") {
 			t.Fatalf("%s: %q", tc.projects, out)
 		}
 		if strings.Contains(out, "acme") {
 			t.Fatalf("printed a slug: %q", out)
 		}
+	}
+}
+
+// v1.13 item 6: shared_networks=<count> after projects_overlap, then one
+// line per network in file order, "-" when it has no members.
+func TestPolicyCheckSharedNetworks(t *testing.T) {
+	out, err := runPolicyCheck(t, writePolicy(t, ""+
+		"enabled = true\n"+
+		"projects = [\"daikou\", \"defect-drainer\"]\n"+
+		"shared_networks = [\"dd=10.200.10.0/24\", \"spare=192.168.50.0/28\"]\n"+
+		"shared_network_projects = [\"dd:daikou\", \"dd:defect-drainer\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "projects_overlap=false\n" +
+		"shared_networks=2\n" +
+		"shared_network dd 10.200.10.0/24 daikou,defect-drainer\n" +
+		"shared_network spare 192.168.50.0/28 -\n"
+	if !strings.HasSuffix(out, "image_patterns=0\n"+want) {
+		t.Fatalf("%q", out)
+	}
+	out, err = runPolicyCheck(t, writePolicy(t, "enabled = true\n"))
+	if err != nil || !strings.HasSuffix(out, "projects_overlap=false\nshared_networks=0\n") {
+		t.Fatalf("%q %v", out, err)
+	}
+	out, err = runPolicyCheck(t, writePolicy(t, "enabled = true\nshared_networks = [\"dd=8.8.8.0/24\"]\n"))
+	if err == nil || out != "invalid: parse\n" {
+		t.Fatalf("%q %v", out, err)
 	}
 }

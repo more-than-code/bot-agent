@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -30,6 +31,9 @@ var (
 	errImage    = errors.New("image")
 	errNotFound = errors.New("missing")
 	errBadSpec  = errors.New("spec")
+	// errOverlap is a network create Docker refused because the requested
+	// subnet overlaps an existing pool (agent-protocol v1.13 item 4).
+	errOverlap = errors.New("overlap")
 
 	engineIDRE   = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	engineNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,127}$`)
@@ -52,6 +56,7 @@ type engine interface {
 	VolumeCreate(ctx context.Context, name, host, project string) error
 	NetworkInspect(ctx context.Context, name string) (networkInfo, error)
 	NetworkCreate(ctx context.Context, name, host, project string) error
+	SharedNetworkCreate(ctx context.Context, name, host, network, subnet string) error
 }
 
 type listed struct {
@@ -94,6 +99,8 @@ type volumeInfo struct {
 type networkInfo struct {
 	Driver string
 	Labels map[string]string
+	// Subnets is IPAM.Config[].Subnet in Engine order, empty when unset.
+	Subnets []string
 }
 
 type engineClient struct {
@@ -269,7 +276,11 @@ func (e *engineClient) VolumeInspect(ctx context.Context, name string) (volumeIn
 }
 
 func (e *engineClient) VolumeCreate(ctx context.Context, name, host, project string) error {
-	return e.createNamed(ctx, "/volumes/create", name, "local", host, project)
+	if !images.ValidProject(project) {
+		return errEngine
+	}
+	_, err := e.createNamed(ctx, "/volumes/create", name, "local", host, scopeLabels(host, project), "")
+	return err
 }
 
 func (e *engineClient) NetworkInspect(ctx context.Context, name string) (networkInfo, error) {
@@ -290,41 +301,103 @@ func (e *engineClient) NetworkInspect(ctx context.Context, name string) (network
 	var raw struct {
 		Driver string            `json:"Driver"`
 		Labels map[string]string `json:"Labels"`
+		IPAM   struct {
+			Config []struct {
+				Subnet string `json:"Subnet"`
+			} `json:"Config"`
+		} `json:"IPAM"`
 	}
 	if json.Unmarshal(body, &raw) != nil {
 		return networkInfo{}, errEngine
 	}
-	return networkInfo{Driver: raw.Driver, Labels: raw.Labels}, nil
+	info := networkInfo{Driver: raw.Driver, Labels: raw.Labels}
+	for _, c := range raw.IPAM.Config {
+		info.Subnets = append(info.Subnets, c.Subnet)
+	}
+	return info, nil
 }
 
 func (e *engineClient) NetworkCreate(ctx context.Context, name, host, project string) error {
-	return e.createNamed(ctx, "/networks/create", name, "bridge", host, project)
+	if !images.ValidProject(project) {
+		return errEngine
+	}
+	_, err := e.createNamed(ctx, "/networks/create", name, "bridge", host, scopeLabels(host, project), "")
+	return err
 }
 
-func (e *engineClient) createNamed(ctx context.Context, path, name, driver, host, project string) error {
-	if !engineNameRE.MatchString(name) || !hostIDRE.MatchString(host) || !images.ValidProject(project) {
+// SharedNetworkCreate creates deploybot-shared-<network> with the v1.13
+// labels and the policy subnet. A refusal whose Engine message mentions an
+// overlap, whatever its status (Docker answers 403 for a pool overlap), is
+// errOverlap.
+func (e *engineClient) SharedNetworkCreate(ctx context.Context, name, host, network, subnet string) error {
+	want, ok := images.SharedNetworkName(network)
+	if !ok || name != want {
 		return errEngine
+	}
+	if _, err := netip.ParsePrefix(subnet); err != nil {
+		return errEngine
+	}
+	refusal, err := e.createNamed(ctx, "/networks/create", name, "bridge", host, sharedLabels(host, network), subnet)
+	if err != nil && strings.Contains(strings.ToLower(refusal), "overlap") {
+		return errOverlap
+	}
+	return err
+}
+
+type ipamConfig struct {
+	Subnet string `json:"Subnet"`
+}
+
+type ipamBody struct {
+	Config []ipamConfig `json:"Config"`
+}
+
+// createNamed posts a volume or network create. subnet, when set, becomes
+// the one IPAM config; without it the body has no IPAM key. A 409 is a lost
+// race and counts as success: the caller inspects whatever is there now.
+// Any other refusal returns the Engine message with errEngine, for a caller
+// that maps a specific refusal.
+func (e *engineClient) createNamed(ctx context.Context, path, name, driver, host string, labels map[string]string, subnet string) (string, error) {
+	if !engineNameRE.MatchString(name) || !hostIDRE.MatchString(host) {
+		return "", errEngine
+	}
+	var ipam *ipamBody
+	if subnet != "" {
+		ipam = &ipamBody{Config: []ipamConfig{{Subnet: subnet}}}
 	}
 	body, err := marshalJSON(struct {
 		Name   string            `json:"Name"`
 		Driver string            `json:"Driver"`
 		Labels map[string]string `json:"Labels"`
+		IPAM   *ipamBody         `json:"IPAM,omitempty"`
 	}{
-		Name: name, Driver: driver,
-		Labels: scopeLabels(host, project),
+		Name: name, Driver: driver, Labels: labels, IPAM: ipam,
 	})
 	if err != nil {
-		return errEngine
+		return "", errEngine
 	}
-	code, _, err := e.do(ctx, http.MethodPost, path, nil, nil, body, maxEngineJSON)
+	code, resp, err := e.do(ctx, http.MethodPost, path, nil, nil, body, maxEngineJSON)
 	if err != nil {
-		return errEngine
+		return "", errEngine
 	}
-	// 409: create lost a race. The caller inspects whatever is there now.
 	if code == http.StatusConflict || code == http.StatusOK || code == http.StatusCreated {
-		return nil
+		return "", nil
 	}
-	return errEngine
+	var msg struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(resp, &msg)
+	return msg.Message, errEngine
+}
+
+// sharedLabels are the four v1.13 shared network labels.
+func sharedLabels(host, network string) map[string]string {
+	return map[string]string{
+		images.LabelOwner:   images.OwnerValue,
+		images.LabelHost:    host,
+		images.LabelKind:    images.KindShared,
+		images.LabelNetwork: network,
+	}
 }
 
 func scopeLabels(host, project string) map[string]string {
