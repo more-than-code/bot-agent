@@ -212,6 +212,51 @@ From v0.2.8, `check`, `install` and `upgrade` with `--runner` refuse a policy th
 
 A host that runs both programs and images has one `runner.toml` with both sets of lines: the program lines above plus `images`, `max_containers` and `allow_public_ports`, and a single `enabled`, `allow_shell` and `projects`.
 
+### Shared networks
+
+From v0.2.9 of the agent, root can open a shared Docker network to several projects on this host, so their containers reach each other. A container on a shared network is reachable there by its container name, `<project>-<entry>`, such as `defect-drainer-serve`. Nothing else on either project's own network is reachable through it. An entry joins in the console or over MCP by listing the network name in its image spec (`networks`).
+
+Two keys define the networks. Each is one line:
+
+```toml
+projects = ["daikou", "defect-drainer"]
+shared_networks = ["dd=10.200.10.0/24"]
+shared_network_projects = ["dd:daikou", "dd:defect-drainer"]
+```
+
+- `shared_networks` lists `<name>=<subnet>`. The name is lowercase letters, digits and dashes, starts with a letter or digit, and has at most 32 characters. List at most 8 networks, each name once. The Docker network is `deploybot-shared-<name>`.
+- The subnet is an IPv4 CIDR in a private range (`10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`), with a prefix from `/16` to `/28`, written with the host bits zero (`10.200.10.0/24`, not `10.200.10.1/24`). Two networks may not overlap.
+- `shared_network_projects` lists `<name>:<slug>`, one item per member. The network must be in `shared_networks` and the slug must be in `projects`. List each pair once, at most 32 in all. A network with no members is valid, but no entry can join it.
+- A project whose slug is `shared-<name>` cannot join network `<name>`: its own project network is also called `deploybot-shared-<name>`, so the deploy fails `conflict`. Pick another network name.
+- Any mistake makes the whole file invalid, which turns programs and images off. Check the file before you restart the agent, always naming it:
+
+  ```bash
+  sudo bot-agent policy check /etc/bot-agent/runner.toml
+  # or, from the bundle:
+  sudo ./install.sh check --runner
+  ```
+
+  After `projects_overlap=` it prints `shared_networks=<count>` and one line per network, such as `shared_network dd 10.200.10.0/24 daikou,defect-drainer`, with `-` when it has no members. A mistake in either key prints only `invalid: parse`, with no hint of which item is wrong, so check each item against the rules above.
+
+**Order of upgrades.** Upgrade the server first (Deploybot v0.2.32, api-v1 v1.25), then the agent (v0.2.9), then add the keys and restart the agent: `sudo systemctl restart bot-agent`. An agent older than v0.2.9 rejects the keys as `unknown_key`, which turns programs and images off. The console and MCP show the network, and offer it to entries, after the agent has reconnected with the new policy. To go back to an older agent, remove the two keys first.
+
+**Choose the subnet.** It must not overlap the host's own network (its VPC or LAN), its routes, or Docker's address pools. Before you add the key, check with `ip route` and `docker network inspect $(docker network ls -q) --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'`. A range such as `10.200.x.0/24` is usually free. If Docker refuses the create because the pool overlaps, the deploy fails `conflict` and the helper's journal (`journalctl -u 'bot-agent-runner@*'`) shows `subnet <cidr> overlaps an existing Docker network`.
+
+The helper creates the network on the first deploy that needs it, with the subnet from this file and labels that mark it as Deploybot's. It does this before the current container is stopped, parked or replaced, so a refused deploy leaves the running container as it was. It keeps the subnet fixed, so a proxy can trust it. If a network of that name already exists with another subnet, driver or labels, the deploy fails `conflict` and the journal shows `shared network deploybot-shared-<name> exists with a different subnet or labels; remove it by hand (docker network rm) after stopping its containers`. This is also what happens after you change a subnet in this file.
+
+**Removing a member or a network.** The agent and the helper never remove a shared network. The one exception is `install.sh remove --remove-workloads`, which removes every Docker network Deploybot labelled (see [Undo](#undo)).
+
+- To remove a member, take its pair out of `shared_network_projects` and restart the agent. New deploys of that project with the network are refused `policy_denied`. Its running containers stay attached until they are redeployed without `networks` or removed.
+- To remove a network, take its lines out of **both** keys in the same edit: a member line for a network that is no longer in `shared_networks` makes the whole file invalid. First redeploy every entry that lists it without the network (or stop and remove those containers), then edit the file, check it, restart the agent, and remove the network by hand as root:
+
+  ```bash
+  docker network inspect deploybot-shared-dd --format '{{range .Containers}}{{.Name}} {{end}}'
+  docker network rm deploybot-shared-dd
+  ```
+
+  The first command must print nothing before you run the second.
+- After a revoke, a container created on the network still has it. A rollback to the `-prev` container, or a start of such a container, attaches it to the network again. Remove the container to end that. `policy check` reads only the file and cannot see Docker, so use `docker network inspect` as above to find containers still attached.
+
 ### Program secrets
 
 A program entry can use env sets and secret env, such as `GH_TOKEN`, from v0.2.8 of the agent. Before you give a program a secret, know these limits:
@@ -303,6 +348,8 @@ Both `is-active` commands print `active` when you installed the helper. Without 
 | `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)` | From v0.2.8 programs run only for listed projects. The policy has programs on and no `projects`. Nothing was changed. | Add `projects = ["<slug>"]` to `/etc/bot-agent/runner.toml` as root, then run the command again. |
 | A program Run or Restart is refused with "the host refused this under its policy (runner.toml)" | The program's project is not in `projects`, or two slugs overlap (`check` prints `projects_overlap=true`). | Add the slug to `projects`, or fix the overlap, then `sudo systemctl restart bot-agent`. The running unit was left in place; Stop still works. |
 | The journal shows `bot-agent: program unit … is for project …, which is not in projects` | A unit installed earlier belongs to a project that is not listed. It keeps running. | Add the slug to `projects` and restart `bot-agent`, or Stop that program. |
+| A deploy with a shared network is refused `policy_denied` | The network is not in `shared_networks`, or `shared_network_projects` has no `<name>:<slug>` pair for the entry's project, or the agent was not restarted after the edit. | Add the pair (the slug must also be in `projects`), run `sudo bot-agent policy check /etc/bot-agent/runner.toml`, then `sudo systemctl restart bot-agent`. |
+| A deploy with a shared network is refused `conflict` | The helper's journal (`journalctl -u 'bot-agent-runner@*'`) shows one of two lines. `subnet <cidr> overlaps an existing Docker network`: the subnet overlaps another Docker network. `shared network deploybot-shared-<name> exists with a different subnet or labels; remove it by hand (docker network rm) after stopping its containers`: a network of that name exists that Deploybot did not make with this subnet, often after the subnet was changed. Neither line: the project slug is `shared-<name>` for a network it joins, or another container holds the entry's name. | For an overlap, choose a free subnet (see Shared networks). For the second line, stop the containers on that network, remove it with `docker network rm`, and deploy again. For a `shared-<name>` slug, use another network name. |
 | Catalog containers seem to vanish from Deploybot after you enrol again | They did not. Ownership follows `/etc/machine-id`, not the host id. | Nothing to do. They stay owned. |
 
 ## Undo

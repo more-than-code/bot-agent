@@ -154,7 +154,21 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	if code := imagePattern(pol, req); code != "" {
 		return req, code
 	}
+	if code := sharedNetworks(pol, req); code != "" {
+		return req, code
+	}
 	return req, ""
+}
+
+// sharedNetworks is the v1.13 pre-check: every spec network is defined in
+// the policy and lists the task's project. The shape was checked by Validate.
+func sharedNetworks(pol policy.Policy, req ImageReq) string {
+	for _, name := range req.Spec.Networks {
+		if !pol.NetworkAllowed(name, req.Project) {
+			return "policy_denied"
+		}
+	}
+	return ""
 }
 
 type entryBody struct {

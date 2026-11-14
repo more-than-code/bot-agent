@@ -60,8 +60,14 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	p.HealthPolicy = true
 	p.Secrets = true
 	p.Projects = []string{}
+	p.SharedNetworks = []protocol.SharedNetwork{}
 	if a.policy.Valid {
 		p.Projects = append(p.Projects, a.policy.Projects...)
+		for _, n := range a.policy.SharedNetworks {
+			p.SharedNetworks = append(p.SharedNetworks, protocol.SharedNetwork{
+				Name: n.Name, Subnet: n.Subnet, Projects: append([]string{}, n.Projects...),
+			})
+		}
 	}
 	if p.Enabled {
 		caps = append(caps, "programs")

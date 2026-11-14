@@ -321,7 +321,8 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	if req.Spec.Validate() != "" || images.ResolvedEnv(req.Env) != "" || images.CheckResolved(req.Spec.Files, req.Files) != "" {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
-	if code := precheckDeploy(req, pol); code != "" {
+	shared, code := precheckDeploy(req, pol)
+	if code != "" {
 		return imgErr(sys, code)
 	}
 	if err := ensureRuntime(sys.Root); err != nil {
@@ -342,37 +343,60 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		if req.Spec.Kind == "job" {
-			return deployJob(ctx, sys, eng, req, host, body, n, cur, pol.MaxContainers)
+		// A service replaces -prev. A job does not remove -prev, so its
+		// own slot is the one it replaces. A foreign -prev was already a
+		// conflict.
+		job := req.Spec.Kind == "job"
+		replaced := prev.found
+		if job {
+			replaced = cur.found
 		}
-		return deployService(ctx, sys, eng, req, host, body, n, cur, prev, pol.MaxContainers)
+		if !fits(n, replaced, pol.MaxContainers) {
+			return imgErr(sys, programs.ReasonPolicy)
+		}
+		// Shared networks go before any container is stopped, parked or
+		// replaced, so a refusal leaves the entry as it was.
+		if code := ensureShared(ctx, sys, eng, host, shared); code != "" {
+			return imgErr(sys, code)
+		}
+		if job {
+			return deployJob(ctx, sys, eng, req, host, body, cur)
+		}
+		return deployService(ctx, sys, eng, req, host, body, cur, prev)
 	})
 }
 
 // precheckDeploy is the part of create that does not need the host id:
-// allowlist, digest pin, and public ports. It runs before the flock and
-// before any Engine call.
-func precheckDeploy(req images.DeployRequest, pol policy.Policy) string {
+// allowlist, digest pin, public ports and shared networks. It runs before
+// the flock and before any Engine call. It returns the policy definitions of
+// the spec's shared networks, in spec order.
+func precheckDeploy(req images.DeployRequest, pol policy.Policy) ([]policy.SharedNetwork, string) {
 	ref, err := images.Parse(req.Spec.Image)
 	if err != nil {
-		return programs.ReasonBadSpec
+		return nil, programs.ReasonBadSpec
 	}
 	pinned, err := images.Parse(ref.Name + "@" + req.Digest)
 	if err != nil || !images.Match(ref, pol.Images) || !images.Match(pinned, pol.Images) {
-		return programs.ReasonPolicy
+		return nil, programs.ReasonPolicy
 	}
 	for _, p := range req.Spec.Ports {
 		if p.Public && !pol.AllowPublicPorts {
-			return programs.ReasonPolicy
+			return nil, programs.ReasonPolicy
 		}
 	}
-	return ""
+	// v1.13 re-check: each shared network is defined and lists the project.
+	var shared []policy.SharedNetwork
+	for _, name := range req.Spec.Networks {
+		def, ok := pol.Network(name)
+		if !ok || !pol.NetworkAllowed(name, req.Project) {
+			return nil, programs.ReasonPolicy
+		}
+		shared = append(shared, def)
+	}
+	return shared, ""
 }
 
-func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRequest, host string, body []byte, n int, cur, prev slot, max int) []byte {
-	if !fits(n, prev.found, max) {
-		return imgErr(sys, programs.ReasonPolicy)
-	}
+func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRequest, host string, body []byte, cur, prev slot) []byte {
 	curName, prevName, newName, ok := slotNames(req.Project, req.Entry)
 	if !ok {
 		return imgErr(sys, programs.ReasonBadSpec)
@@ -409,6 +433,12 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 			}
 		}
 	}
+	// The project network also goes before any container is stopped. A
+	// name held by another network (shared network dd under project slug
+	// shared-dd) is a conflict with the current container still running.
+	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
+		return imgErr(sys, code)
+	}
 	if err := stopRemove(ctx, eng, prev); err != nil {
 		return imgErr(sys, engReason(err))
 	}
@@ -435,9 +465,6 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 			}
 		}
 	}
-	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
-		return imgErr(sys, code)
-	}
 	if code := ensureVols(ctx, eng, req.Project, host, req.Spec.Volumes); code != "" {
 		return imgErr(sys, code)
 	}
@@ -448,11 +475,7 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 	return out
 }
 
-func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployRequest, host string, body []byte, n int, cur slot, max int) []byte {
-	// A job does not remove -prev. A foreign -prev was already a conflict.
-	if !fits(n, cur.found, max) {
-		return imgErr(sys, programs.ReasonPolicy)
-	}
+func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployRequest, host string, body []byte, cur slot) []byte {
 	curName, _, newName, ok := slotNames(req.Project, req.Entry)
 	if !ok {
 		return imgErr(sys, programs.ReasonBadSpec)
@@ -475,6 +498,10 @@ func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployReques
 			}
 		}
 	}
+	// The project network goes before the current container is stopped.
+	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
+		return imgErr(sys, code)
+	}
 	if err := stopRemove(ctx, eng, cur); err != nil {
 		return imgErr(sys, engReason(err))
 	}
@@ -487,9 +514,6 @@ func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployReques
 				return imgErr(sys, storeCode(err))
 			}
 		}
-	}
-	if code := ensureNet(ctx, eng, req.Project, host); code != "" {
-		return imgErr(sys, code)
 	}
 	if code := ensureVols(ctx, eng, req.Project, host, req.Spec.Volumes); code != "" {
 		return imgErr(sys, code)
@@ -1141,6 +1165,52 @@ func ensureNet(ctx context.Context, eng engine, project, host string) string {
 		return programs.ReasonConflict
 	}
 	return ""
+}
+
+// ensureShared ensures each spec network's deploybot-shared-<name> network
+// (agent-protocol v1.13 item 4). defs come from precheckDeploy, which has
+// already checked that each is defined and lists the project. Every create,
+// including a 409 lost race, is followed by an inspect and the same adoption
+// check, so a network someone else made is never adopted blindly. Nothing is
+// removed. The conflict diagnostics hold only policy names, a policy subnet
+// and a fixed sentence; the refusal body stays {"error":"conflict"}.
+func ensureShared(ctx context.Context, sys Sys, eng engine, host string, defs []policy.SharedNetwork) string {
+	for _, def := range defs {
+		name, ok := images.SharedNetworkName(def.Name)
+		if !ok {
+			return programs.ReasonBadSpec
+		}
+		info, err := eng.NetworkInspect(ctx, name)
+		if errors.Is(err, errNotFound) {
+			if err := eng.SharedNetworkCreate(ctx, name, host, def.Name, def.Subnet); err != nil {
+				if errors.Is(err, errOverlap) {
+					logf(sys, "bot-agent-runner: subnet "+def.Subnet+" overlaps an existing Docker network")
+					return programs.ReasonConflict
+				}
+				return engReason(err)
+			}
+			info, err = eng.NetworkInspect(ctx, name)
+		}
+		if err != nil {
+			return engReason(err)
+		}
+		if !sharedMatch(info, host, def.Name, def.Subnet) {
+			logf(sys, "bot-agent-runner: shared network "+name+" exists with a different subnet or labels; remove it by hand (docker network rm) after stopping its containers")
+			return programs.ReasonConflict
+		}
+	}
+	return ""
+}
+
+// sharedMatch is the v1.13 adoption rule: bridge, the four labels, and
+// exactly one IPAM subnet equal to the policy's.
+func sharedMatch(info networkInfo, host, network, subnet string) bool {
+	return info.Driver == "bridge" &&
+		info.Labels[images.LabelOwner] == images.OwnerValue &&
+		info.Labels[images.LabelHost] == host &&
+		info.Labels[images.LabelKind] == images.KindShared &&
+		info.Labels[images.LabelNetwork] == network &&
+		len(info.Subnets) == 1 && info.Subnets[0] == subnet
 }
 
 func ensureVols(ctx context.Context, eng engine, project, host string, vols []images.Volume) string {

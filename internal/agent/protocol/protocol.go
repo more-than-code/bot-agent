@@ -12,7 +12,7 @@ import (
 
 const (
 	Version      = 1
-	AgentVersion = "0.2.8"
+	AgentVersion = "0.2.9"
 	MaxFrame     = 1 << 20
 	MaxSamples   = 5000
 	CmdlineMax   = 1024
@@ -116,7 +116,24 @@ type Programs struct {
 	// Projects is the policy's valid project list (agent-protocol v1.12),
 	// never null. Image patterns, dirs and exec_allow are never sent.
 	Projects []string `json:"projects"`
+	// SharedNetworks is the v1.13 list from a valid policy, in file order,
+	// never null. The subnet and member slugs are sent; nothing else is.
+	SharedNetworks []SharedNetwork `json:"shared_networks"`
 }
+
+// SharedNetwork is one hello.programs.shared_networks item (agent-protocol
+// v1.13 item 2). Projects is never null.
+type SharedNetwork struct {
+	Name     string   `json:"name"`
+	Subnet   string   `json:"subnet"`
+	Projects []string `json:"projects"`
+}
+
+// Hello bounds on shared networks, the same as the policy's.
+const (
+	MaxHelloSharedNetworks = 8
+	MaxHelloNetworkMembers = 32
+)
 
 // MaxHelloProjects is the v1.12 cap on hello.programs.projects. The policy
 // loader refuses a longer list, so a valid hello never reaches it.

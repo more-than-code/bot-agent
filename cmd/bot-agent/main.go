@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/more-than-code/bot-agent/internal/agent/config"
@@ -93,6 +94,16 @@ func printPolicyCheck(w io.Writer, path string) error {
 	fmt.Fprintf(w, "image_patterns=%d\n", len(p.Images))
 	_, _, overlap := policy.OverlappingProjects(p.Projects)
 	fmt.Fprintf(w, "projects_overlap=%t\n", overlap)
+	// v1.13 item 6: the shared networks, in file order. Names, subnets and
+	// slugs were validated by the loader, so they cannot carry a newline.
+	fmt.Fprintf(w, "shared_networks=%d\n", len(p.SharedNetworks))
+	for _, n := range p.SharedNetworks {
+		members := "-"
+		if len(n.Projects) > 0 {
+			members = strings.Join(n.Projects, ",")
+		}
+		fmt.Fprintf(w, "shared_network %s %s %s\n", n.Name, n.Subnet, members)
+	}
 	return nil
 }
 

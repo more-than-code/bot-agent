@@ -63,10 +63,13 @@ type Policy struct {
 	Projects         []string
 	MaxContainers    int
 	AllowPublicPorts bool
-	Accounts         map[string]Account
-	Hash             string
-	Reason           string
-	Dropped          []Drop
+	// SharedNetworks is the v1.13 list in file order. It is empty, not nil,
+	// on a valid policy without the keys and nil on an invalid one.
+	SharedNetworks []SharedNetwork
+	Accounts       map[string]Account
+	Hash           string
+	Reason         string
+	Dropped        []Drop
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -196,6 +199,11 @@ func Load(f Files) Policy {
 		out.Reason = reason
 		return out
 	}
+	shared, reason := validateSharedNetworks(parsed.sharedNets, parsed.sharedMembers, parsed.projects)
+	if reason != "" {
+		out.Reason = reason
+		return out
+	}
 	users := readAccounts(passwd, group)
 	kept, dropped := filterRunAs(parsed.runAs, users)
 	out.Valid = true
@@ -209,6 +217,7 @@ func Load(f Files) Policy {
 	out.Projects = parsed.projects
 	out.MaxContainers = parsed.maxContainers
 	out.AllowPublicPorts = parsed.allowPublic
+	out.SharedNetworks = shared
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

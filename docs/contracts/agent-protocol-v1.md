@@ -489,7 +489,7 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
   - **Entry names.** An entry name must not end with `-old` (agent `ValidEntry`, same rule as `-prev`).
   - **Logging.** A failure to restore a file slot, or to remove `-old` after a successful rollback, is logged. The rollback still reports success.
 
-> v1.10 (env hash) is on hold and not part of this copy; see the umbrella contract.
+> v1.14 (env hash, renumbered from v1.10) is on hold and not part of this copy; see the umbrella contract.
 
 ## v1.11 secrets for program entries (2026-11-13, approved spec `docs/spec-program-secrets.md` rev 1)
 
@@ -508,3 +508,42 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
 5. **`hello.programs.projects: [slug]`**: the policy's valid project list, sent whenever `hello.programs` is. A policy with more than 32 projects is invalid (`parse`). This replaces the v1.4 rule that project lists are not sent; image patterns, `dirs` and `exec_allow` are still never sent.
 6. **`bot-agent policy check`** keeps its lines and adds `projects_overlap=true|false`.
 7. **Installer:** `install.sh check|install|upgrade --runner` exits 1 and changes nothing when the policy has programs on (`enabled`, at least one `run_as`, `max_programs > 0`) and `projects` is empty, with `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)`.
+
+## v1.13 shared networks (2026-11-14, approved spec `docs/spec-cross-project-network.md` rev 2; additive, gated)
+
+1. **Runner policy keys** (agent ≥ 0.2.9; an older agent rejects them as `unknown_key`, so the agent is upgraded first). Both keys are one-line string arrays.
+   - **`shared_networks`:** items `<name>=<cidr>`.
+     - The name matches `^[a-z0-9][a-z0-9-]{0,31}$`. At most 8 networks; names unique.
+     - The CIDR is IPv4 in canonical form (host bits zero), inside RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), with a prefix length from 16 to 28. No two subnets overlap.
+   - **`shared_network_projects`:** items `<name>:<project slug>`.
+     - The name must be defined in `shared_networks`, and the slug must be in `projects`.
+     - No duplicates; at most 32 items.
+   - Any violation makes the policy invalid (`parse`). `policy_hash` stays the file hash.
+2. **`hello.programs.shared_networks: [{"name","subnet","projects":[slug]}]`.**
+   - Sent whenever `hello.programs` is, by agents ≥ 0.2.9, from a valid policy only.
+   - It is `[]` when the keys are unset. Order follows the file.
+   - Agents < 0.2.9 never send the key.
+3. **Image deploy spec `networks: [name]`.** Optional; 1–4 unique names with the same grammar.
+   - The server sends it only when non-empty and only to an agent that sent `programs.shared_networks`.
+   - The agent pre-check and the helper re-check both require every name to be defined in the policy and to list the task's `project`. Otherwise `task_reject` `policy_denied` (agent) or `policy_denied` (helper), with nothing created.
+   - A bad name, a duplicate, an empty array or more than 4 is `bad_spec`.
+4. **Shared network rule** (helper). For each name it ensures the network `deploybot-shared-<name>`:
+   - **inspect:** decode `Driver`, `Labels` and `IPAM.Config[].Subnet`;
+   - **if missing,** create it with:
+     - `Driver:"bridge"`;
+     - labels `dev.deploybot.owner=bot-agent`, `dev.deploybot.host=<host id>`, `dev.deploybot.kind=shared`, `dev.deploybot.network=<name>`;
+     - `IPAM:{"Config":[{"Subnet":"<policy cidr>"}]}`;
+   - **if present,** it must have that driver, those four labels and exactly one IPAM subnet equal to the policy's. Otherwise `conflict`, with the diagnostic `shared network deploybot-shared-<name> exists with a different subnet or labels; remove it by hand (docker network rm) after stopping its containers`;
+   - **if Docker refuses the create because the address pool overlaps,** that is `conflict` with `subnet <cidr> overlaps an existing Docker network`;
+   - the agent and the helper never remove or recreate a shared network (only the operator's `install.sh remove --remove-workloads` teardown removes labelled networks).
+5. **Create body** (amends the v1.4 create-body rule):
+   - `NetworkingConfig.EndpointsConfig` holds the project network with `Aliases:[<entry>]`, plus one endpoint per shared network with no `Aliases` and no fixed address.
+   - `HostConfig.NetworkMode` stays the project network.
+   - A spec without `networks` gives a body byte-identical to v1.12.
+   - The `-prev` rollback container keeps the networks it was created with.
+     After a member or network is revoked, a rollback or a start of a container created on the network re-attaches it; the operator removes such a container to end the attachment.
+   - A project whose slug is `shared-<name>` cannot join shared network `<name>`: its project network would have the same name, so the helper answers `conflict` before any Docker call.
+   - The helper ensures the shared networks and the project network before it stops or parks the current container, so a `conflict` on either leaves the running container untouched.
+6. **`bot-agent policy check`** keeps its lines and adds, after `projects_overlap=`:
+   - `shared_networks=<count>`;
+   - one line `shared_network <name> <cidr> <slug,slug,…>` per network, in file order, with `-` when there are no members.
