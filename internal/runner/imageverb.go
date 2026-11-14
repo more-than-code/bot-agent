@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -318,6 +319,9 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	if !images.ValidEntry(req.Entry) || !images.ValidDigest(req.Digest) || !images.ValidSpecHash(req.SpecHash) {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
+	if !envHashOK(in) {
+		return imgErr(sys, programs.ReasonBadSpec)
+	}
 	if req.Spec.Validate() != "" || images.ResolvedEnv(req.Env) != "" || images.CheckResolved(req.Spec.Files, req.Files) != "" {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
@@ -334,7 +338,7 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	}
 	defer unlock()
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, host, req.Spec, req.Env, req.Files, pol.Images, pol.AllowPublicPorts)
+		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, req.Env, req.Files, pol.Images, pol.AllowPublicPorts)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -847,11 +851,11 @@ func doStatusCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []b
 		if !cur.found {
 			return images.Encode(images.StatusResult{Status: missingStatus(), Prev: view})
 		}
-		st, hash, filesHash, code := inspectStatus(ctx, eng, cur.id)
+		st, labels, code := inspectStatus(ctx, eng, cur.id)
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: filesHash, Prev: view})
+		return images.Encode(images.StatusResult{Status: st, SpecHash: specHashOf(labels), FilesHash: filesHashOf(labels), EnvHash: envHashOf(labels), Prev: view})
 	})
 }
 
@@ -865,6 +869,7 @@ func prevView(s slot) *images.PrevView {
 		Digest:    repoDigest(s.image),
 		SpecHash:  specHashOf(s.labels),
 		FilesHash: filesHashOf(s.labels),
+		EnvHash:   envHashOf(s.labels),
 	}
 }
 
@@ -925,7 +930,7 @@ func mutateOne(ctx context.Context, in []byte, pol policy.Policy, sys Sys, op sl
 		if !cur.found {
 			return encodeAction(missingStatus())
 		}
-		st, _, _, code := inspectStatus(ctx, eng, cur.id)
+		st, _, code := inspectStatus(ctx, eng, cur.id)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -1257,15 +1262,17 @@ func createStart(ctx context.Context, eng engine, project, entry string, body []
 	return images.Encode(images.IDResponse{ContainerID: id}), ""
 }
 
-func inspectStatus(ctx context.Context, eng engine, id string) (images.ImageStatus, string, string, string) {
+// inspectStatus returns the projection and the container's labels. A
+// missing container has no labels.
+func inspectStatus(ctx context.Context, eng engine, id string) (images.ImageStatus, map[string]string, string) {
 	in, err := eng.Inspect(ctx, id)
 	if errors.Is(err, errNotFound) {
-		return missingStatus(), "", "", ""
+		return missingStatus(), nil, ""
 	}
 	if err != nil {
-		return images.ImageStatus{}, "", "", engReason(err)
+		return images.ImageStatus{}, nil, engReason(err)
 	}
-	return projectInspect(in), specHashOf(in.Labels), filesHashOf(in.Labels), ""
+	return projectInspect(in), in.Labels, ""
 }
 
 func encodeAction(st images.ImageStatus) []byte {
@@ -1392,6 +1399,29 @@ func specHashOf(labels map[string]string) string {
 
 func filesHashOf(labels map[string]string) string {
 	h := labels[images.LabelFilesHash]
+	if !images.ValidSpecHash(h) {
+		return ""
+	}
+	return h
+}
+
+// envHashOK is the v1.14 container_deploy check. The typed request cannot
+// tell an absent env_hash from "", so presence is read from the frame:
+// absent or null is v1.9, anything present must be 64 lowercase hex.
+// The frame already passed the strict decode.
+func envHashOK(in []byte) bool {
+	var probe struct {
+		EnvHash *string `json:"env_hash"`
+	}
+	if json.Unmarshal(in, &probe) != nil {
+		return false
+	}
+	return probe.EnvHash == nil || images.ValidSpecHash(*probe.EnvHash)
+}
+
+// envHashOf is the v1.14 env_hash label, or "" when absent or malformed.
+func envHashOf(labels map[string]string) string {
+	h := labels[images.LabelEnvHash]
 	if !images.ValidSpecHash(h) {
 		return ""
 	}

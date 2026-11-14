@@ -65,6 +65,9 @@ type DeployRequest struct {
 	// Files is empty for a v1.4 deploy. The key is omitted then, so a
 	// no-file request stays the same shape.
 	Files []MountFile `json:"files,omitempty"`
+	// EnvHash is the task's env_hash (v1.14), stored as LabelEnvHash.
+	// Empty when the task had none; the key is omitted then.
+	EnvHash string `json:"env_hash,omitempty"`
 }
 
 // MaxFrame is the image-verb request cap (agent-protocol v1.5).
@@ -150,6 +153,8 @@ type PrevView struct {
 	Digest    *string `json:"digest"`
 	SpecHash  string  `json:"spec_hash"`
 	FilesHash string  `json:"files_hash"`
+	// EnvHash is the env_hash label (v1.14), omitted when absent.
+	EnvHash string `json:"env_hash,omitempty"`
 }
 
 // StatusResult is container_status. SpecHash and FilesHash are empty when
@@ -160,7 +165,10 @@ type StatusResult struct {
 	Status    ImageStatus `json:"status"`
 	SpecHash  string      `json:"spec_hash"`
 	FilesHash string      `json:"files_hash"`
-	Prev      *PrevView   `json:"prev"`
+	// EnvHash is the env_hash label (v1.14), omitted when absent so a
+	// container without it has the v1.9 shape.
+	EnvHash string    `json:"env_hash,omitempty"`
+	Prev    *PrevView `json:"prev"`
 }
 
 // LogsResponse is container_logs.

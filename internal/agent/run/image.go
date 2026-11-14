@@ -166,7 +166,8 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	return a.deployJob(ctx, task, req, deadline, digest, ex, secrets)
 }
 
-// rollbackKept swaps -prev back when its digest equals the task digest.
+// rollbackKept swaps -prev back when its digest equals the task digest
+// and, when the task has env_hash, its env_hash label equals the task's.
 // done is false when this rollback must pull and deploy. A status failure
 // does not fall through: the kept digest is unknown, and deploying would
 // hide that. force does not matter; the swap is not the unchanged short-circuit.
@@ -182,6 +183,11 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), tail(), ex), true
 	}
 	if resp.Prev == nil || resp.Prev.Digest == nil || *resp.Prev.Digest != req.Digest {
+		return protocol.TaskResult{}, false
+	}
+	// v1.14: with env_hash, the kept container comes back only when its
+	// env matches. Otherwise pull by digest and create with the task's env.
+	if req.EnvHash != "" && resp.Prev.EnvHash != req.EnvHash {
 		return protocol.TaskResult{}, false
 	}
 	digest := *resp.Prev.Digest
@@ -218,6 +224,11 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	}
 	st, hash, filesHash := resp.Status, resp.SpecHash, resp.FilesHash
 	same := !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files))
+	// v1.14: with env_hash, the label must match too. A container without
+	// the label reads "" and counts as changed.
+	if req.EnvHash != "" && resp.EnvHash != req.EnvHash {
+		same = false
+	}
 	if same {
 		ok, herr := a.unchangedHealthy(ctx, task.Kind, req)
 		if herr != nil {
@@ -650,7 +661,7 @@ func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest 
 	body := images.Encode(images.DeployRequest{
 		Project: req.Project, Entry: req.Entry, Spec: *req.Spec,
 		Env: env, Digest: digest, SpecHash: req.SpecHash,
-		Files: images.AsMount(req.Files),
+		Files: images.AsMount(req.Files), EnvHash: req.EnvHash,
 	})
 	var id images.IDResponse
 	return a.callImage(ctx, images.VerbDeploy, body, &id)

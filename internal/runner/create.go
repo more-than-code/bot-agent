@@ -94,7 +94,7 @@ type createBody struct {
 	NetworkingConfig networkConfigBody   `json:"NetworkingConfig"`
 }
 
-func buildCreate(project, entry, digest, specHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool) ([]byte, string) {
+func buildCreate(project, entry, digest, specHash, envHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool) ([]byte, string) {
 	ref, err := images.Parse(spec.Image)
 	if err != nil {
 		return nil, programs.ReasonBadSpec
@@ -120,7 +120,7 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 	}
 	body := createBody{
 		Image:  pinned.Name + "@" + digest,
-		Labels: containerLabels(project, entry, specHash, host, images.FilesHash(files)),
+		Labels: containerLabels(project, entry, specHash, envHash, host, images.FilesHash(files)),
 		HostConfig: hostConfigBody{
 			RestartPolicy: restartBody{Name: restart},
 			NetworkMode:   net,
@@ -239,7 +239,7 @@ func buildCreate(project, entry, digest, specHash, host string, spec images.Imag
 	return raw, ""
 }
 
-func containerLabels(project, entry, specHash, host, filesHash string) map[string]string {
+func containerLabels(project, entry, specHash, envHash, host, filesHash string) map[string]string {
 	labels := map[string]string{
 		images.LabelOwner:    images.OwnerValue,
 		images.LabelHost:     host,
@@ -249,6 +249,9 @@ func containerLabels(project, entry, specHash, host, filesHash string) map[strin
 	}
 	if filesHash != "" {
 		labels[images.LabelFilesHash] = filesHash
+	}
+	if envHash != "" {
+		labels[images.LabelEnvHash] = envHash
 	}
 	return labels
 }

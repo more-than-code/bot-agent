@@ -80,6 +80,15 @@ func TestImageCheckOrder(t *testing.T) {
 		{"secret key missing", on, task(host, "image_deploy", nil, live, withSecretKeys(good, `["NOPE"]`)), "bad_spec"},
 		{"secret key on rollback", on, task(host, "image_rollback", nil, live, withSecretKeys(rollbackSpec(imgDigest), `["DB_URL"]`)), ""},
 		{"secret keys empty", on, task(host, "image_deploy", nil, live, withSecretKeys(good, `[]`)), ""},
+		{"env_hash ok", on, task(host, "image_deploy", nil, live, withEnvHash(good, `"`+imgHash+`"`)), ""},
+		{"env_hash on rollback", on, task(host, "image_rollback", nil, live, withEnvHash(rollbackSpec(imgDigest), `"`+imgHash+`"`)), ""},
+		{"env_hash null", on, task(host, "image_deploy", nil, live, withEnvHash(good, `null`)), ""},
+		{"env_hash empty", on, task(host, "image_deploy", nil, live, withEnvHash(good, `""`)), "bad_spec"},
+		{"env_hash upper", on, task(host, "image_deploy", nil, live, withEnvHash(good, `"`+strings.ToUpper(imgHash)+`"`)), "bad_spec"},
+		{"env_hash short", on, task(host, "image_rollback", nil, live, withEnvHash(rollbackSpec(imgDigest), `"`+imgHash[:63]+`"`)), "bad_spec"},
+		{"env_hash long", on, task(host, "image_deploy", nil, live, withEnvHash(good, `"`+imgHash+`0"`)), "bad_spec"},
+		{"env_hash number", on, task(host, "image_deploy", nil, live, withEnvHash(good, `1`)), "bad_spec"},
+		{"env_hash on start", on, task(host, "image_start", nil, live, []byte(`{"project":"acme","entry":"web","env_hash":"`+imgHash+`"}`)), "bad_spec"},
 		{"over helper frame off", off, task(host, "image_deploy", nil, live, wideSpec()), "policy_denied"},
 		{"over helper frame", on, task(host, "image_deploy", nil, live, wideSpec()), ""},
 	}
@@ -141,6 +150,31 @@ func withHealthPolicy(spec []byte, hp string) []byte {
 
 func jobTaskSpec() []byte {
 	return []byte(`{"project":"acme","entry":"web","spec":{"kind":"job","image":"ghcr.io/acme/web:1","timeout_sec":10},"env":{},"registry_auth":null,"force":false,"spec_hash":"` + imgHash + `"}`)
+}
+
+func withEnvHash(spec []byte, v string) []byte {
+	return []byte(strings.TrimSuffix(string(spec), "}") + `,"env_hash":` + v + `}`)
+}
+
+func TestParseImageEnvHash(t *testing.T) {
+	on := policy.Policy{
+		Valid: true, Enabled: true,
+		Images: []string{"ghcr.io/acme/*"}, Projects: []string{"acme"},
+	}
+	for _, kind := range []string{"image_deploy", "image_rollback"} {
+		spec := deploySpec(false, "")
+		if kind == "image_rollback" {
+			spec = rollbackSpec(imgDigest)
+		}
+		req, code := ParseImage(protocol.Task{Kind: kind, Spec: withEnvHash(spec, `"`+imgHash+`"`)}, on)
+		if code != "" || req.EnvHash != imgHash {
+			t.Fatalf("%s: code %q env_hash %q", kind, code, req.EnvHash)
+		}
+		req, code = ParseImage(protocol.Task{Kind: kind, Spec: spec}, on)
+		if code != "" || req.EnvHash != "" {
+			t.Fatalf("%s absent: code %q env_hash %q", kind, code, req.EnvHash)
+		}
+	}
 }
 
 func withDigest(spec []byte) []byte {

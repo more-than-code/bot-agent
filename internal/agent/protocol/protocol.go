@@ -119,6 +119,9 @@ type Programs struct {
 	// SharedNetworks is the v1.13 list from a valid policy, in file order,
 	// never null. The subnet and member slugs are sent; nothing else is.
 	SharedNetworks []SharedNetwork `json:"shared_networks"`
+	// EnvHash is true when it accepts task env_hash and compares the
+	// container label for unchanged and the kept rollback (agent-protocol v1.14).
+	EnvHash bool `json:"env_hash"`
 }
 
 // SharedNetwork is one hello.programs.shared_networks item (agent-protocol

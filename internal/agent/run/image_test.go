@@ -698,10 +698,10 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeRunner(t, true, false), PolicyUID: rootUID,
 		Helper: off,
 	})
-	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy {
+	if hello.Programs == nil || hello.Programs.Images || hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy || !hello.Programs.EnvHash {
 		t.Fatalf("%+v", hello.Programs)
 	}
-	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) || !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) || !strings.Contains(string(raw), `"logging":true`) || !strings.Contains(string(raw), `"health_policy":true`) {
+	if !strings.Contains(string(raw), `"images":false`) || !strings.Contains(string(raw), `"docker":false`) || !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) || !strings.Contains(string(raw), `"logging":true`) || !strings.Contains(string(raw), `"health_policy":true`) || !strings.Contains(string(raw), `"env_hash":true`) {
 		t.Fatalf("%s", raw)
 	}
 
@@ -732,10 +732,10 @@ func TestHelloImageFlags(t *testing.T) {
 		PolicyPath: writeImageRunner(t), PolicyUID: rootUID,
 		Helper: on, MachineID: idPath,
 	})
-	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy || !hello.ServicesComplete {
+	if hello.Programs == nil || !hello.Programs.Images || !hello.Programs.Docker || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy || !hello.Programs.EnvHash || !hello.ServicesComplete {
 		t.Fatalf("programs %+v complete %v", hello.Programs, hello.ServicesComplete)
 	}
-	if !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) || !strings.Contains(string(raw), `"logging":true`) || !strings.Contains(string(raw), `"health_policy":true`) {
+	if !strings.Contains(string(raw), `"files":true`) || !strings.Contains(string(raw), `"docker_health":true`) || !strings.Contains(string(raw), `"healthcheck":true`) || !strings.Contains(string(raw), `"logging":true`) || !strings.Contains(string(raw), `"health_policy":true`) || !strings.Contains(string(raw), `"env_hash":true`) {
 		t.Fatalf("%s", raw)
 	}
 	if strings.Contains(string(raw), "SENTINEL") || strings.Contains(string(raw), "ghcr.io/acme/*") || strings.Contains(string(raw), "port-3031") || strings.Contains(string(raw), "port-6379") {
@@ -768,7 +768,7 @@ func TestHelloOverlappingProjects(t *testing.T) {
 		PolicyPath: path, PolicyUID: rootUID,
 		Helper: off,
 	})
-	if hello.Programs == nil || !hello.Programs.Enabled || hello.Programs.Images || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy {
+	if hello.Programs == nil || !hello.Programs.Enabled || hello.Programs.Images || !hello.Programs.Files || !hello.Programs.DockerHealth || !hello.Programs.Healthcheck || !hello.Programs.Logging || !hello.Programs.HealthPolicy || !hello.Programs.EnvHash {
 		t.Fatalf("%+v", hello.Programs)
 	}
 	if !strings.Contains(string(raw), `"images":false`) {
@@ -843,6 +843,7 @@ type imageSeq struct {
 	pre            images.ImageStatus
 	preHash        string
 	preFiles       string
+	preEnv         string
 	post           images.ImageStatus
 	postHash       string
 	postFiles      string
@@ -884,7 +885,7 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 		}
 		return images.Encode(images.PullResponse{Digest: imgDigest, ImageID: "sha256:image"}), nil
 	case images.VerbStatus:
-		st, hash, files := s.pre, s.preHash, s.preFiles
+		st, hash, files, env := s.pre, s.preHash, s.preFiles, s.preEnv
 		if s.stops > 0 && s.stoppedSet {
 			st = s.stopped
 		} else if s.deployed {
@@ -894,9 +895,9 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 			if s.waitCode != "" {
 				return refuse("error", s.waitCode), nil
 			}
-			st, hash, files = s.post, s.postHash, s.postFiles
+			st, hash, files, env = s.post, s.postHash, s.postFiles, ""
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: files, Prev: s.prev}), nil
+		return images.Encode(images.StatusResult{Status: st, SpecHash: hash, FilesHash: files, EnvHash: env, Prev: s.prev}), nil
 	case images.VerbDeploy:
 		s.deployed = true
 		s.deployBody = cp
