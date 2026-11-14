@@ -1,6 +1,6 @@
 # Install a host
 
-This guide is for a project admin adding a Linux host to Deploybot. You download a release bundle, run `install.sh` from that directory, and type the join token at a hidden prompt.
+This guide is for an organization owner or admin adding a Linux host to Deploybot. You download a release bundle, run `install.sh` from that directory, and type the join token at a hidden prompt.
 
 Run every command in this guide on the host you are adding, in a terminal on that host or an `ssh -t <host>` session. Do not run them on your own computer.
 
@@ -11,8 +11,8 @@ The installer copies files only from the bundle. It does not download anything. 
 - A Linux host with systemd, and root on that host. `uname -m` must print `x86_64` or `aarch64`. The installer calls these `amd64` and `arm64`. It is written for a Debian-family host.
 - A terminal with a tty. From your own machine, `ssh -t <host>` gives you one. Enrol cannot show the hidden prompt without a tty.
 - Docker on the host, if it will run catalog images. A host that runs programs only does not need Docker.
-- A project in the console. The host joins one project. Creating a project and creating a join token are done in the console only; there is no MCP tool for either.
-- A join token. In the console, open the project, then Hosts → Add a host, and create a join token. Create it just before you enrol. The token expires, and it can be used once.
+- An organization and a project in the console. The host joins your organization; each project then gets `metrics` or `deploy` access to it from an org owner or admin. Creating a project, creating a join token and granting host access are done in the console only; there is no MCP tool for them.
+- A join token. In the console, open the organization, then Hosts → Add a host, and create a join token, optionally granting one project access. From a project's Hosts tab, Add a host makes a token that grants that project `deploy`. Only org owners and admins can create tokens. Create it just before you enrol. The token expires, and it can be used once.
 - The server URL for enrol. Use `wss://<your-api-host>`. A dev server on loopback uses `ws://127.0.0.1:<port>` or `ws://localhost:<port>`, and those commands need `--insecure-dev`.
 - For the policy flags (`--project`, `--image`, `--enable`) and the printed `next:` enrol command, bundle v0.2.7 or later.
 - For agent v0.2.5 and later, Deploybot API v0.2.7 or later. An older API marks the host's programs as disabled, and deploys are refused.
@@ -87,7 +87,7 @@ Follow them in order. Stop where it says stop. Run each command on the host. The
    - If `install.sh` exits 2 and its usage text does not list `--project`, the bundle is older than v0.2.7. Stop and tell the user. Do not hand-write `runner.toml`.
    - The install must end with a line that starts with `next:`, then `summary: installed <version>`.
 6. **Stop. Hand over to the user for the token.** Give the user the command from the `next:` line, for example `sudo /home/<user>/bot-agent-install/bot-agent-v<version>/install.sh enroll --server '<server URL>' --runner`. Leave `<server URL>` as it is, unless the user's instructions from the Deploybot console give the server URL; then put in exactly that value. Never choose or guess the server URL. Tell the user:
-   - In the console, open the project, then Hosts → Add a host, and create a join token. The join token card on the Hosts tab shows the server URL. Replace `<server URL>` with that URL, and check that the `--server` host matches the card before you type the token. For a loopback dev server (`ws://127.0.0.1:<port>`), also add `--insecure-dev`.
+   - In the console, open the organization (or the project), then Hosts → Add a host, and create a join token. The join token card on the Hosts tab shows the server URL. Replace `<server URL>` with that URL, and check that the `--server` host matches the card before you type the token. For a loopback dev server (`ws://127.0.0.1:<port>`), also add `--insecure-dev`.
    - Run the command in a terminal the agent cannot read or type into:
      - Option 1: your own terminal, with `ssh -t`:
        ```bash
@@ -178,7 +178,7 @@ sudo ./install.sh install --runner --project your-project --image 'ghcr.io/examp
 The written file has `enabled`, `projects`, and `images`, and is `root:root` mode `0644`. With `--enable`, the check must print `images=true` or nothing is installed. If `runner.toml` already exists, the same file is kept, and a different file stops the install with `runner.toml exists and differs; remove it or edit it by hand`. A value outside the slug or pattern rules exits 2. Programs, `max_containers`, and `allow_public_ports` still need a hand-written file. Put each setting on one line. An array that spans more than one line is invalid, and an invalid file leaves programs and images off.
 
 - `images` lists the images this host may run, for example `ghcr.io/example/*`. A `*` is one whole path component. With `--runner` installed, the helper runs as root and can open `/var/run/docker.sock`. An empty list does not remove that socket. An image deploy runs only when images are enabled: the policy is valid, `enabled = true`, there is at least one image pattern, there is at least one project, and no project slug overlaps another. Review the patterns before you set `enabled = true`.
-- `projects` lists the project slugs allowed to deploy **programs and images** here (programs from v0.2.8). A program or image for a project that is not listed is refused, even when the server lets that project deploy to this host through sharing. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. List at most 32 slugs; a longer list makes the file invalid. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves both programs and images off, and `check` prints `projects_overlap=true`.
+- `projects` lists the project slugs allowed to deploy **programs and images** here (programs from v0.2.8). A program or image for a project that is not listed is refused, even when the organization has given that project `deploy` access to this host. On a host that several projects use, list every project that should deploy here. Use the slug. A slug is lowercase letters, digits, and dashes, such as `your-project`. The project name in the console can be different. List at most 32 slugs; a longer list makes the file invalid. One slug must not be another slug plus `-` and more text, as with `acme` and `acme-web`. That pair leaves both programs and images off, and `check` prints `projects_overlap=true`.
 - Taking a project out of `projects` does not stop its running programs. Start and Restart are refused for it; Stop, status and logs still work. When the agent starts, it logs one line for each such unit: `bot-agent: program unit <unit> is for project <slug>, which is not in projects`.
 - `max_containers` is how many containers this host may run. If you omit it, the limit is 20. A value you set must be from 1 to 200.
 - A port that is not public always binds `127.0.0.1`. `allow_public_ports = false` refuses a port marked public. `allow_public_ports = true` binds those ports on `0.0.0.0`.
