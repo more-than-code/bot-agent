@@ -30,6 +30,9 @@ type ImageReq struct {
 	// an empty list. Nil, which is also how JSON null decodes, means the key
 	// was absent and every env value joins the set, as in v1.4.
 	SecretKeys []string
+	// EnvHash is the task's opaque env_hash (agent-protocol v1.14), or ""
+	// when the task had none. It is not a secret.
+	EnvHash string
 }
 
 // SecretValues splits the exact set for this task. env is the env secret
@@ -111,6 +114,7 @@ type deployBody struct {
 	SpecHash     *string              `json:"spec_hash"`
 	Files        []images.TaskFile    `json:"files"`
 	SecretKeys   []string             `json:"secret_keys"`
+	EnvHash      *string              `json:"env_hash"`
 }
 
 type rollbackBody struct {
@@ -147,6 +151,13 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	}
 	if digest != nil {
 		req.Digest = *digest
+	}
+	if body.EnvHash != nil {
+		// Present means exactly 64 lowercase hex. "" is refused too.
+		if !images.ValidSpecHash(*body.EnvHash) {
+			return req, "bad_spec"
+		}
+		req.EnvHash = *body.EnvHash
 	}
 	if code := deployFields(req); code != "" {
 		return req, code

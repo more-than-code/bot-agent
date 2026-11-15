@@ -20,6 +20,9 @@ const (
 	LabelKind    = "dev.deploybot.kind"
 	LabelNetwork = "dev.deploybot.network"
 	KindShared   = "shared"
+	// LabelEnvHash is the task's opaque env_hash (agent-protocol v1.14).
+	// Set only when the task carried one.
+	LabelEnvHash = "dev.deploybot.env_hash"
 	// Health policy labels (agent-protocol v1.9 item 3). Set only on a
 	// service whose on_unhealthy is not none. Values are decimal strings.
 	LabelOnUnhealthy       = "dev.deploybot.on_unhealthy"

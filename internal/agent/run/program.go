@@ -69,6 +69,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 			})
 		}
 	}
+	p.EnvHash = true
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

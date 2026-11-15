@@ -489,7 +489,17 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
   - **Entry names.** An entry name must not end with `-old` (agent `ValidEntry`, same rule as `-prev`).
   - **Logging.** A failure to restore a file slot, or to remove `-old` after a successful rollback, is logged. The rollback still reports success.
 
-> v1.14 (env hash, renumbered from v1.10) is on hold and not part of this copy; see the umbrella contract.
+## v1.14 (renumbered from v1.10, spec-env-generate rev 4) env hash (2026-10-28, approved spec `docs/spec-env-generate.md` rev 2 §3.7; additive, gated)
+
+A value-only env change used to be reported `unchanged` (rule 11 compares digest, `spec_hash` and `files_hash`; `spec_hash` covers env key names only), so it never reached the container without `force`.
+
+1. **Gate:** `hello.programs` gains `"env_hash": true`. The server sends `env_hash` only to such an agent (api-v1 v1.27 item 8, renumbered from v1.20).
+2. **Task:** `image_deploy` and `image_rollback` may carry `"env_hash": "<64 lowercase hex>"`, an opaque value. The agent stores it as the container label `dev.deploybot.env_hash` on every container it creates for that task.
+3. **Unchanged (amends rule 11 and v1.6.1 item 1):** when the task has `env_hash`, a service deploy is `unchanged` only if, in addition, the current container's `dev.deploybot.env_hash` label equals it. A container without the label counts as changed.
+4. **Rollback (amends v1.5.2):** when the task has `env_hash`, the kept `-prev` container is swapped back only if its label equals the task's `env_hash`; otherwise the agent pulls by digest and creates a new container with the task's env and spec (v1.4/v1.5 path).
+5. Without `env_hash` in the task, behaviour is exactly v1.9. Jobs, programs and all other verbs are unchanged.
+6. **Helper wire (root runner):** `container_deploy` takes optional `env_hash` (same 64-hex check; malformed → `bad_spec` before any Engine call) and sets the label; `container_status` returns optional `env_hash` and `prev.env_hash` (amends v1.5.2 `prev` = `{digest, spec_hash, files_hash}`), omitted when the container has no valid label. Agent and helper ship in one bundle; a mixed pair mid-upgrade refuses the unknown field rather than skipping the label. `container_list` labels are unchanged.
+7. **Agent auto-rollback (v1.9 health policy)** has no task `env_hash` and swaps `-prev` back as before: it restores the last known good container, including its env. The next deploy carries `env_hash` and recreates if the env differs.
 
 ## v1.11 secrets for program entries (2026-11-13, approved spec `docs/spec-program-secrets.md` rev 1)
 
