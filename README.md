@@ -183,4 +183,4 @@ For environments transitioning from Telegraf-based metrics to `bot-agent`, legac
 
 Apache License 2.0. See [LICENSE](LICENSE). You may use, change and self-host bot-agent, including commercially.
 
-Outside pull requests are not merged yet; see [CONTRIBUTING.md](CONTRIBUTING.md).
+The Deploybot name and logo are not licensed under the code licence; forks must use a different name. Outside pull requests are not merged yet; see [CONTRIBUTING.md](CONTRIBUTING.md).
