@@ -56,16 +56,13 @@ const (
 )
 
 // PinnedImage is the Caddy image this agent release runs as the edge: the
-// official multi-arch image docker.io/library/caddy 2.11.x, pinned by its
-// index digest.
-//
-// TODO(Main Dev): replace the placeholder digest with the real index digest
-// of docker.io/library/caddy:2.11.x before the release (the worker that
-// wrote this had no network access). While it is the placeholder, the edge
-// is off: hello says enabled false and the helper refuses edge_disabled
-// before any Docker call. TestReleaseGateEdgeImageDigestNotPlaceholder
-// fails until it is replaced.
-const PinnedImage = "docker.io/library/caddy@sha256:" + placeholderDigest
+// official multi-arch image docker.io/library/caddy:2.11.9, pinned by its
+// OCI index digest (looked up on Docker Hub 2026-11-17; linux amd64, arm v6
+// and v7, arm64 and others). Bump it with a new agent release, never at
+// runtime. If it were the all-zero placeholder, the edge would stay off:
+// hello says enabled false and the helper refuses edge_disabled before any
+// Docker call, and TestReleaseGateEdgeImageDigestNotPlaceholder fails.
+const PinnedImage = "docker.io/library/caddy@sha256:f971688b2aaf1a26d256de552f17fb13f64fc5ed2dee4cf40c7f9d70cea0e12d"
 
 const placeholderDigest = "0000000000000000000000000000000000000000000000000000000000000000"
 

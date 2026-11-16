@@ -265,7 +265,7 @@ From v0.2.11 of the agent, root can let Deploybot run a reverse proxy on this ho
 edge = true
 ```
 
-- The edge is a Caddy container, `deploybot-edge`, from an image pinned in the agent release. It runs in the host network and binds ports 80 and 443 itself. Its certificates are in the Docker volume `deploybot-edge-data`, and its generated config is in `/var/lib/bot-agent-runner/edge/` (root only). Caddy's admin API listens only on a unix socket in that directory, never on a TCP port.
+- The edge is a Caddy container, `deploybot-edge`, from an image pinned by digest in the agent release (Caddy 2.11.9 since bot-agent 0.2.11). It runs in the host network and binds ports 80 and 443 itself. Its certificates are in the Docker volume `deploybot-edge-data`, and its generated config is in `/var/lib/bot-agent-runner/edge/` (root only). Caddy's admin API listens only on a unix socket in that directory, never on a TCP port.
 - **Ports 80 and 443** must be free on the host and reachable from the internet, or certificates cannot be issued. A host behind NAT, such as a home Raspberry Pi, cannot use the edge yet. Turning the edge on is refused while anything else holds 80 or 443 (`port_in_use`, naming the holder when it is known), so stop an existing proxy first.
 - The key needs Docker. `install.sh check --runner` prints `edge: on (needs Docker, and ports 80 and 443 free and reachable from the internet)` and checks Docker when the key is on.
 - `edge` is `true` or `false` (the default). Anything else makes the whole file invalid, which turns programs and images off. `bot-agent policy check` prints `edge=true` or `edge=false` as its last line.
