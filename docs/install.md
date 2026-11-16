@@ -257,6 +257,36 @@ The helper creates the network on the first deploy that needs it, with the subne
   The first command must print nothing before you run the second.
 - After a revoke, a container created on the network still has it. A rollback to the `-prev` container, or a start of such a container, attaches it to the network again. Remove the container to end that. `policy check` reads only the file and cannot see Docker, so use `docker network inspect` as above to find containers still attached.
 
+### Edge (public addresses)
+
+From v0.2.11 of the agent, root can let Deploybot run a reverse proxy on this host. With it on, the org's admins can turn the host's edge on in the console, and projects can add routes (`hostname → entry port`). The edge gets and renews HTTPS certificates by itself. One line turns it on:
+
+```toml
+edge = true
+```
+
+- The edge is a Caddy container, `deploybot-edge`, from an image pinned in the agent release. It runs in the host network and binds ports 80 and 443 itself. Its certificates are in the Docker volume `deploybot-edge-data`, and its generated config is in `/var/lib/bot-agent-runner/edge/` (root only). Caddy's admin API listens only on a unix socket in that directory, never on a TCP port.
+- **Ports 80 and 443** must be free on the host and reachable from the internet, or certificates cannot be issued. A host behind NAT, such as a home Raspberry Pi, cannot use the edge yet. Turning the edge on is refused while anything else holds 80 or 443 (`port_in_use`, naming the holder when it is known), so stop an existing proxy first.
+- The key needs Docker. `install.sh check --runner` prints `edge: on (needs Docker, and ports 80 and 443 free and reachable from the internet)` and checks Docker when the key is on.
+- `edge` is `true` or `false` (the default). Anything else makes the whole file invalid, which turns programs and images off. `bot-agent policy check` prints `edge=true` or `edge=false` as its last line.
+- Removing the key stops new configs from being applied (`edge_disabled`), but does not stop a running edge. Turn the edge off in the console first; that stops and removes the container and keeps the volume and the config directory.
+- Routes reach an image entry through its published port on `127.0.0.1`, and a program entry on its port. A route to a container port that is not published is refused.
+- The helper does not trust the config it is sent. It accepts only the exact shape Deploybot generates: one server listening on `:443`; routes with host, path and client-IP matchers (plus the Cloudflare `Cf-Connecting-Ip` header check next to a client-IP match); the `subroute`, `encode` (zstd, gzip), `reverse_proxy` and the `Cache-Control: private, no-store` handlers; upstreams on `127.0.0.1` ports 1024–65535 only; the Cloudflare `X-Forwarded-For` rewrite and deletion of the client-IP headers; and TLS policies whose issuer is ACME (with an email) or Caddy's internal CA. Keys must match exactly, repeated keys are refused, and no other `{...}` placeholder is allowed. Anything else fails `bad_spec`, and the journal names the offending part of the config.
+- The container runs with every capability dropped except binding ports below 1024, `no-new-privileges`, a read-only root filesystem (`/config` and `/tmp` are tmpfs) and 512 MiB of memory with no extra swap.
+- The container's `dev.deploybot.config_hash` label is the hash at creation, for information only. Later configs are loaded without recreating the container. The applied config is `config.json`.
+- While a release carries the placeholder image digest, the edge stays off: hello reports it disabled and the helper refuses `edge_disabled`. (Release builds always carry a real digest.)
+- If a new edge container cannot start, the helper removes it, puts the previous `config.json` back and recreates the previous container from its own image.
+- `edge_stop` and `edge_status` work without the key, so an edge can always be turned off.
+
+**Order of upgrades.** Upgrade the server first (api-v1 v1.35), then the agent (v0.2.11), then add the key and restart the agent: `sudo systemctl restart bot-agent`. An agent older than v0.2.11 rejects the key as `unknown_key`, which turns programs and images off. To go back to an older agent, remove the key first.
+
+**Moving an existing Caddy.** To keep the certificates of a Caddy that already serves the host's names, create the volume and copy its data in before the edge's first start, while the old proxy is stopped. The helper adopts a local volume named `deploybot-edge-data` that has no Deploybot labels:
+
+```bash
+docker volume create deploybot-edge-data
+docker run --rm -v <old-caddy-data>:/from:ro -v deploybot-edge-data:/to alpine cp -a /from/. /to/
+```
+
 ### Program secrets
 
 A program entry can use env sets and secret env, such as `GH_TOKEN`, from v0.2.8 of the agent. Before you give a program a secret, know these limits:

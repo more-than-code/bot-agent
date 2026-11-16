@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -57,6 +58,7 @@ type engine interface {
 	NetworkInspect(ctx context.Context, name string) (networkInfo, error)
 	NetworkCreate(ctx context.Context, name, host, project string) error
 	SharedNetworkCreate(ctx context.Context, name, host, network, subnet string) error
+	EdgeVolumeCreate(ctx context.Context, name, host string) error
 }
 
 type listed struct {
@@ -342,6 +344,25 @@ func (e *engineClient) SharedNetworkCreate(ctx context.Context, name, host, netw
 		return errOverlap
 	}
 	return err
+}
+
+// EdgeVolumeCreate creates the edge's certificate volume with the owner,
+// host and kind=edge labels (agent-protocol v1.15 item 3).
+func (e *engineClient) EdgeVolumeCreate(ctx context.Context, name, host string) error {
+	if name != edge.VolumeName {
+		return errEngine
+	}
+	_, err := e.createNamed(ctx, "/volumes/create", name, "local", host, edgeLabels(host), "")
+	return err
+}
+
+// edgeLabels are the edge volume labels. The container adds config_hash.
+func edgeLabels(host string) map[string]string {
+	return map[string]string{
+		images.LabelOwner: images.OwnerValue,
+		images.LabelHost:  host,
+		images.LabelKind:  edge.KindValue,
+	}
 }
 
 type ipamConfig struct {

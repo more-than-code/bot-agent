@@ -1,0 +1,17 @@
+{
+  "admin": {
+    "listen": "unix//run/edge/admin.sock"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "edge": {
+          "listen": [
+            ":443"
+          ],
+          "routes": []
+        }
+      }
+    }
+  }
+}

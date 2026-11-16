@@ -29,3 +29,10 @@ max_programs = 20
 # routes or Docker's pools. Each member slug must also be in projects.
 # shared_networks = ["dd=10.200.10.0/24"]
 # shared_network_projects = ["dd:daikou", "dd:defect-drainer"]
+
+# Per-host edge (agent 0.2.11 and later; an older agent rejects this key and
+# turns programs and images off, so upgrade the agent first). Lets the host's
+# org admins turn on a Deploybot-managed Caddy container, deploybot-edge, that
+# binds ports 80 and 443 in the host network and serves the projects' routes.
+# Needs Docker, and 80 and 443 free and reachable from the internet.
+# edge = true

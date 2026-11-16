@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/probe"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -60,6 +61,12 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 		_, code := ParseImage(task, gate.Policy)
 		return code, ProbeSpec{}
 	}
+	if edge.IsKind(task.Kind) {
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		return parseEdge(task), ProbeSpec{}
+	}
 	if task.Kind != "host_snapshot" && task.Kind != "probe_health" {
 		return "forbidden", ProbeSpec{}
 	}
@@ -81,6 +88,22 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 		}
 	}
 	return "", spec
+}
+
+// parseEdge is the v1.15 spec check. The policy key is not checked here:
+// an apply on a host whose policy is off gets a task_result edge_disabled,
+// and stop and status are allowed whatever the key says.
+func parseEdge(task protocol.Task) string {
+	var err error
+	if task.Kind == edge.KindApply {
+		_, err = edge.ParseApply(task.Spec)
+	} else {
+		err = edge.ParseEmpty(task.Spec)
+	}
+	if err != nil {
+		return "bad_spec"
+	}
+	return ""
 }
 
 func programKind(kind string) bool {

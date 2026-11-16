@@ -97,14 +97,22 @@ func (s socketHelper) Call(ctx context.Context, verb string, body []byte) ([]byt
 	return out, nil
 }
 
+// marshalFrame wraps body without HTML escaping, so a compact request
+// reaches the helper byte for byte (the edge config hash depends on it).
 func marshalFrame(verb string, body []byte) ([]byte, error) {
 	if !json.Valid(body) {
 		return nil, errHelper
 	}
-	return json.Marshal(struct {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(struct {
 		Verb    string          `json:"verb"`
 		Request json.RawMessage `json:"request"`
-	}{Verb: verb, Request: json.RawMessage(body)})
+	}{Verb: verb, Request: json.RawMessage(body)}); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func stdoutLimit(verb string) int {

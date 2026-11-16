@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -58,12 +59,19 @@ type Sys struct {
 	// A test sets a pair this process cannot chown to, so the per-file
 	// check can fail while the store and the slot still match.
 	fileCheck *fileIDs
+	// edgeStore is the edge config directory for tests. Empty selects
+	// /var/lib/bot-agent-runner/edge when euid is 0; edge.apply and
+	// edge.status refuse otherwise. Never read from a request.
+	edgeStore string
 }
 
 // Handle runs one verb. in is the raw JSON object from stdin.
 // The result is one JSON object and never contains env values.
 func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	sys.logVerb = verb
+	if edge.IsVerb(verb) {
+		return handleEdge(ctx, verb, in, sys)
+	}
 	if images.IsVerb(verb) {
 		return handleImage(ctx, verb, in, sys)
 	}

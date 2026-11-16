@@ -21,10 +21,11 @@ type parsed struct {
 	projects      []string
 	sharedNets    []string
 	sharedMembers []string
+	edge          bool
 }
 
-// parseTOML accepts the v1.3 keys, the v1.4 image keys and the v1.13 shared
-// network keys. Unknown keys,
+// parseTOML accepts the v1.3 keys, the v1.4 image keys, the v1.13 shared
+// network keys and the v1.15 edge key. Unknown keys,
 // duplicates, and wrong types return a fixed reason. Values are not
 // included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
@@ -128,6 +129,12 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.sharedMembers = xs
+		case "edge":
+			v, ok := parseBool(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.edge = v
 		default:
 			return parsed{}, "unknown_key"
 		}
@@ -148,7 +155,7 @@ func knownKey(k string) bool {
 	switch k {
 	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
 		"images", "projects", "max_containers", "allow_public_ports",
-		"shared_networks", "shared_network_projects":
+		"shared_networks", "shared_network_projects", "edge":
 		return true
 	default:
 		return false
