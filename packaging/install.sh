@@ -831,9 +831,19 @@ policy_patterns() {
   printf '%s\n' "$1" | awk -F= '$1=="image_patterns"{print $2; exit}'
 }
 
+policy_edge() {
+  printf '%s\n' "$1" | awk -F= '$1=="edge"{print $2; exit}'
+}
+
+# Docker is checked when the policy has image patterns or the edge on
+# (the edge is a container, agent-protocol v1.15).
 note_docker() {
   _patterns=$1
-  if [ -z "$_patterns" ] || [ "$_patterns" = "0" ]; then
+  _edge=${2:-}
+  if [ "$_edge" = "true" ]; then
+    say "edge: on (needs Docker, and ports 80 and 443 free and reachable from the internet)"
+  fi
+  if { [ -z "$_patterns" ] || [ "$_patterns" = "0" ]; } && [ "$_edge" != "true" ]; then
     say "docker: not checked"
     return 0
   fi
@@ -862,7 +872,7 @@ check_policy_file() {
     [ -z "$_cleanup" ] || rm -f "$_cleanup"
     precheck_fail "policy check failed for ${_label}"
   fi
-  note_docker "$(policy_patterns "$_pc")"
+  note_docker "$(policy_patterns "$_pc")" "$(policy_edge "$_pc")"
   [ -z "$_cleanup" ] || rm -f "$_cleanup"
 }
 

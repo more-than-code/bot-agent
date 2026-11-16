@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/redact"
@@ -70,6 +71,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 		}
 	}
 	p.EnvHash = true
+	p.Edge = &protocol.EdgeHello{Enabled: edgeOn(a.policy), Image: edge.Image}
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

@@ -104,6 +104,8 @@ func printPolicyCheck(w io.Writer, path string) error {
 		}
 		fmt.Fprintf(w, "shared_network %s %s %s\n", n.Name, n.Subnet, members)
 	}
+	// v1.15 item 1: the edge key, after the shared-network lines.
+	fmt.Fprintf(w, "edge=%t\n", p.EdgeEnabled())
 	return nil
 }
 

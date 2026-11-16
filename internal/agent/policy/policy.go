@@ -70,6 +70,8 @@ type Policy struct {
 	Hash           string
 	Reason         string
 	Dropped        []Drop
+	// Edge is the v1.15 edge key. It is false on an invalid policy.
+	Edge bool
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -80,6 +82,13 @@ func (p Policy) ImagesEnabled() bool {
 		return false
 	}
 	return p.Valid && p.Enabled && len(p.Images) > 0 && len(p.Projects) > 0
+}
+
+// EdgeEnabled is the hello edge.enabled flag and the edge.apply gate
+// (agent-protocol v1.15): a valid policy with edge = true. It does not
+// depend on enabled, images or projects; the edge has no project.
+func (p Policy) EdgeEnabled() bool {
+	return p.Valid && p.Edge
 }
 
 // OverlappingProjects reports the first pair, in list order, where one slug
@@ -218,6 +227,7 @@ func Load(f Files) Policy {
 	out.MaxContainers = parsed.maxContainers
 	out.AllowPublicPorts = parsed.allowPublic
 	out.SharedNetworks = shared
+	out.Edge = parsed.edge
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

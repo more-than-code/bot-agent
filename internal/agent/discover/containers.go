@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
@@ -41,9 +42,23 @@ func ApplyContainers(res Result, items []images.ContainerInfo, hostID string, pr
 			}
 		}
 	}
+	// v1.15 item 5: the edge runs in the host network, so its 80 and 443
+	// are host listeners, not published ports. While it runs they are its
+	// own and are not reported as unmapped listeners.
+	edgeIdx := findEdge(items, hostID)
+	var edgeSeen []int
+	if edgeIdx >= 0 && items[edgeIdx].State == "running" {
+		edgeSeen = edgeListenerPorts(res.Services)
+		for _, p := range edgeSeen {
+			claimed[p] = true
+		}
+	}
 	var owned []containerCand
 	var other []containerCand
-	for _, it := range items {
+	for i, it := range items {
+		if i == edgeIdx {
+			continue
+		}
 		name := trimContainer(it.Name)
 		if name == "" {
 			continue
@@ -74,6 +89,9 @@ func ApplyContainers(res Result, items []images.ContainerInfo, hostID string, pr
 		if s.Owner != nil && s.Name != "" {
 			used[s.Name] = true
 		}
+	}
+	if edgeIdx >= 0 {
+		used[edge.ContainerName] = true
 	}
 	var rows []containerRow
 	for _, k := range keys {
@@ -145,6 +163,9 @@ func ApplyContainers(res Result, items []images.ContainerInfo, hostID string, pr
 	}
 	for _, r := range rows {
 		kept = append(kept, containerService(r))
+	}
+	if edgeIdx >= 0 {
+		kept = append(kept, edgeService(items[edgeIdx], edgeSeen))
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].Name < kept[j].Name })
 	res.Services = kept
@@ -254,6 +275,63 @@ func containerService(r containerRow) protocol.Discovered {
 		d.ImageDigest = protocol.Str(*r.c.info.Digest)
 	}
 	d.Owner = &protocol.Owner{Kind: "image", Project: r.c.project, Entry: r.c.entry}
+	return d
+}
+
+// findEdge is the index of the deploybot-edge container with the owner,
+// host and kind=edge labels and no project label, or -1. An empty hostID
+// accepts any non-empty host label, as for owned containers.
+func findEdge(items []images.ContainerInfo, hostID string) int {
+	for i, it := range items {
+		l := it.Labels
+		if trimContainer(it.Name) != edge.ContainerName || l[images.LabelOwner] != images.OwnerValue ||
+			l[images.LabelKind] != edge.KindValue || l[images.LabelProject] != "" {
+			continue
+		}
+		host := l[images.LabelHost]
+		if host == "" || (hostID != "" && host != hostID) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// edgeListenerPorts are 80 and 443 when an unmapped listener (a process
+// row with no pid) holds them.
+func edgeListenerPorts(services []protocol.Discovered) []int {
+	seen := map[int]bool{}
+	for _, s := range services {
+		if s.Kind != "process" || s.PID != nil {
+			continue
+		}
+		for _, p := range s.Ports {
+			if p == 80 || p == 443 {
+				seen[p] = true
+			}
+		}
+	}
+	var out []int
+	for _, p := range []int{80, 443} {
+		if seen[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// edgeService is the edge's row: owner kind edge with no project or entry.
+func edgeService(it images.ContainerInfo, ports []int) protocol.Discovered {
+	d := protocol.Discovered{
+		Name:          edge.ContainerName,
+		Kind:          "container",
+		Ports:         ports,
+		ContainerName: protocol.Str(edge.ContainerName),
+		Owner:         &protocol.Owner{Kind: "edge"},
+	}.NormalizePorts()
+	if it.Digest != nil && images.ValidDigest(*it.Digest) {
+		d.ImageDigest = protocol.Str(*it.Digest)
+	}
 	return d
 }
 

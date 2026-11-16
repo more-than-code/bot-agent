@@ -16,6 +16,7 @@ var (
 	deploybotUnitRE = regexp.MustCompile(`^deploybot-[a-z0-9-]{1,64}-[a-z0-9-]{1,48}\.service$`)
 	policyHashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	digestRE        = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	edgeImageRE     = regexp.MustCompile(`^[a-z0-9./-]+@sha256:[a-f0-9]{64}$`)
 	uuidRE          = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
@@ -157,6 +158,9 @@ func checkHello(f Hello) error {
 		if err := checkSharedNetworks(f.Programs.SharedNetworks); err != nil {
 			return err
 		}
+		if e := f.Programs.Edge; e != nil && !edgeImageRE.MatchString(e.Image) {
+			return fmt.Errorf("edge image")
+		}
 	}
 	return checkDiscovered(f.Services)
 }
@@ -285,6 +289,8 @@ func checkOwner(d Discovered) error {
 		return checkProgramOwner(d)
 	case "image":
 		return checkImageOwner(d)
+	case "edge":
+		return checkEdgeOwner(d)
 	default:
 		return fmt.Errorf("owner kind")
 	}
@@ -316,6 +322,17 @@ func checkImageOwner(d Discovered) error {
 	}
 	if d.Name != d.Owner.Entry {
 		return fmt.Errorf("owner entry")
+	}
+	return nil
+}
+
+// checkEdgeOwner is v1.15 item 5: the deploybot-edge container, no project.
+func checkEdgeOwner(d Discovered) error {
+	if d.Owner.Project != "" || d.Owner.Entry != "" {
+		return fmt.Errorf("owner name")
+	}
+	if d.Kind != "container" || d.Name != "deploybot-edge" || d.ContainerName == nil || *d.ContainerName != "deploybot-edge" {
+		return fmt.Errorf("owner edge")
 	}
 	return nil
 }

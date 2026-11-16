@@ -123,13 +123,19 @@ func readListeners(procRoot string) []listenRow {
 }
 
 func parseProcNet(data string) []listenRow {
+	return parseProcNetFor(data, "0A", wantedAddr)
+}
+
+// parseProcNetFor keeps the rows in state (0A: TCP listening, 07: UDP
+// unconnected) whose local address passes keep.
+func parseProcNetFor(data, state string, keep func(net.IP) bool) []listenRow {
 	var out []listenRow
 	for _, line := range strings.Split(data, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 10 || !strings.Contains(f[1], ":") {
 			continue
 		}
-		if !strings.EqualFold(f[3], "0A") {
+		if !strings.EqualFold(f[3], state) {
 			continue
 		}
 		ipHex, portHex, ok := strings.Cut(f[1], ":")
@@ -137,7 +143,7 @@ func parseProcNet(data string) []listenRow {
 			continue
 		}
 		ip, err := parseProcIP(ipHex)
-		if err != nil || !wantedAddr(ip) {
+		if err != nil || !keep(ip) {
 			continue
 		}
 		port, err := strconv.ParseUint(portHex, 16, 16)

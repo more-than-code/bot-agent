@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -56,9 +57,9 @@ func FixedReason(reason string) string {
 }
 
 // FrameLimit is the request-body cap for one verb.
-// Image verbs are 2 MiB. Every other verb stays at MaxFrame.
+// Image and edge verbs are 2 MiB. Every other verb stays at MaxFrame.
 func FrameLimit(verb string) int {
-	if images.IsVerb(verb) {
+	if images.IsVerb(verb) || edge.IsVerb(verb) {
 		return images.MaxFrame
 	}
 	return MaxFrame
@@ -78,7 +79,7 @@ func KnownVerb(verb string) bool {
 	case "start", "stop", "restart", "status", "logs", "sockets", "list":
 		return true
 	default:
-		return images.IsVerb(verb)
+		return images.IsVerb(verb) || edge.IsVerb(verb)
 	}
 }
 

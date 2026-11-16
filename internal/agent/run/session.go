@@ -413,7 +413,8 @@ func (a *agent) discover(ctx context.Context) (discover.Result, bool) {
 			res = discover.ApplyOwned(res, owned)
 		}
 	}
-	if a.policy.ImagesEnabled() {
+	// The edge (v1.15 item 5) is found through container_list too.
+	if a.policy.ImagesEnabled() || a.policy.EdgeEnabled() {
 		items, truncated, err := a.listContainers(ctx)
 		a.noteDocker(err == nil)
 		if err != nil {

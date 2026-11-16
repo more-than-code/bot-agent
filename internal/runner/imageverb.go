@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -32,7 +33,9 @@ func handleImage(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	pol := policy.Load(policy.Files{
 		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
 	})
-	if !pol.ImagesEnabled() {
+	// container_list also serves edge discovery (agent-protocol v1.15
+	// item 5), so a host with only the edge on may list.
+	if !pol.ImagesEnabled() && !(verb == images.VerbList && pol.EdgeEnabled()) {
 		return imgErr(sys, programs.ReasonPolicy)
 	}
 	switch verb {
@@ -1053,10 +1056,12 @@ func findExact(rows []listed, name string) (listed, bool) {
 	return listed{}, false
 }
 
+// countOwned is the max_containers count. The edge container is not a
+// catalog entry and does not count (agent-protocol v1.15).
 func countOwned(rows []listed) int {
 	n := 0
 	for _, c := range rows {
-		if c.Labels[images.LabelOwner] == images.OwnerValue {
+		if c.Labels[images.LabelOwner] == images.OwnerValue && c.Labels[images.LabelKind] != edge.KindValue {
 			n++
 		}
 	}
@@ -1428,9 +1433,11 @@ func envHashOf(labels map[string]string) string {
 	return h
 }
 
+// keepLabels is the container_list label allowlist. LabelKind is there so
+// the agent can tell the edge container (kind=edge, agent-protocol v1.15).
 func keepLabels(in map[string]string) map[string]string {
 	out := map[string]string{}
-	for _, k := range []string{images.LabelOwner, images.LabelHost, images.LabelProject, images.LabelEntry, images.LabelSpecHash, images.LabelFilesHash} {
+	for _, k := range []string{images.LabelOwner, images.LabelHost, images.LabelProject, images.LabelEntry, images.LabelSpecHash, images.LabelFilesHash, images.LabelKind} {
 		v, ok := in[k]
 		if !ok || strings.ContainsAny(v, "\r\n\x00") {
 			continue

@@ -12,7 +12,7 @@ import (
 
 const (
 	Version      = 1
-	AgentVersion = "0.2.10"
+	AgentVersion = "0.2.11"
 	MaxFrame     = 1 << 20
 	MaxSamples   = 5000
 	CmdlineMax   = 1024
@@ -83,6 +83,8 @@ type Discovered struct {
 }
 
 // Owner marks a service started by the root helper. Old servers ignore it.
+// Kind "edge" (agent-protocol v1.15 item 5) has an empty Project and Entry:
+// the edge belongs to the host, not to a project.
 type Owner struct {
 	Kind    string `json:"kind"`
 	Project string `json:"project"`
@@ -122,6 +124,16 @@ type Programs struct {
 	// EnvHash is true when it accepts task env_hash and compares the
 	// container label for unchanged and the kept rollback (agent-protocol v1.14).
 	EnvHash bool `json:"env_hash"`
+	// Edge is the v1.15 edge summary, sent whenever the programs object
+	// is sent. Older agents omit it; the server reads that as disabled.
+	Edge *EdgeHello `json:"edge"`
+}
+
+// EdgeHello is hello.programs.edge (agent-protocol v1.15 item 2). Enabled
+// mirrors the policy key; Image is the Caddy image pinned in this release.
+type EdgeHello struct {
+	Enabled bool   `json:"enabled"`
+	Image   string `json:"image"`
 }
 
 // SharedNetwork is one hello.programs.shared_networks item (agent-protocol
