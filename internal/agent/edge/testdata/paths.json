@@ -58,6 +58,7 @@
                       "handle": [
                         {
                           "handler": "reverse_proxy",
+                          "stream_close_delay": "1h",
                           "upstreams": [
                             {
                               "dial": "127.0.0.1:8080"
@@ -105,6 +106,7 @@
                       "handle": [
                         {
                           "handler": "reverse_proxy",
+                          "stream_close_delay": "1h",
                           "upstreams": [
                             {
                               "dial": "127.0.0.1:3000"

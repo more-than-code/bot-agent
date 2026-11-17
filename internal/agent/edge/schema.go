@@ -266,6 +266,9 @@ const (
 	noStoreValue   = "private, no-store"
 	listenHTTPS    = ":443"
 	maxPathEntries = 64
+	// streamCloseDelay keeps WebSockets of the old config open for up to an
+	// hour after a reload (spec-domains-edge-routes rev 3 §11).
+	streamCloseDelay = "1h"
 )
 
 // deletable is the request headers a reverse_proxy may delete.
@@ -483,9 +486,14 @@ func checkEncode(h *node, hp string) error {
 // may set X-Forwarded-For to the Cloudflare client IP and may delete the
 // client-IP headers. Nothing else (no transport, lb_policy, rewrite, ...).
 func checkProxy(h *node, hp string) error {
-	f, err := fields(h, hp, []string{"handler", "upstreams"}, []string{"headers"})
+	f, err := fields(h, hp, []string{"handler", "upstreams"}, []string{"headers", "stream_close_delay"})
 	if err != nil {
 		return err
+	}
+	if d, ok := f["stream_close_delay"]; ok {
+		if v, err := str(d, hp+".stream_close_delay"); err != nil || v != streamCloseDelay {
+			return bad(hp + ".stream_close_delay")
+		}
 	}
 	ups, err := array(f["upstreams"], hp+".upstreams", 1)
 	if err != nil {
