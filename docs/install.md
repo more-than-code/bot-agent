@@ -289,7 +289,7 @@ docker run --rm -v <old-caddy-data>:/from:ro -v deploybot-edge-data:/to alpine c
 
 ### Host config files
 
-From the release that adds agent-protocol v1.18, root can let the org's owners and admins edit a root-owned config file of a unit Deploybot does not run, such as Defect Drainer's worker policy, from the console. The unit's own command checks each new file before it replaces the old one. The unit is then restarted and confirmed healthy, and the previous file comes back on its own if anything fails. You choose exactly which files, and what checks them, in `runner.toml`:
+From bot-agent 0.2.13 (agent-protocol v1.18), root can let the org's owners and admins edit a root-owned config file of a unit Deploybot does not run, such as Defect Drainer's worker policy, from the console. The unit's own command checks each new file before it replaces the old one. The unit is then restarted and confirmed healthy, and the previous file comes back on its own if anything fails. You choose exactly which files, and what checks them, in `runner.toml`:
 
 ```toml
 host_files        = ["dd-policy=/etc/dd-worker/policy.toml", "dd-secrets=/etc/dd-worker/secrets.env"]
