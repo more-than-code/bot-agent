@@ -21,6 +21,10 @@ const (
 	// maxImageTimeoutSec is the largest image-task budget: 300s of pull,
 	// a 3600s job, and 60s on each side of the wait.
 	maxImageTimeoutSec = 300 + 3600 + 60 + 60
+	// failReserve is the end of a service task's budget that the health
+	// wait leaves for the failure path (v1.16): rollback, stop, log tail
+	// and status run on a context that has not expired.
+	failReserve = 60 * time.Second
 	// machineIDPath is the systemd machine id. ProtectSystem=strict still
 	// allows this file to be read.
 	machineIDPath = "/etc/machine-id"
@@ -53,9 +57,16 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 		}
 	}()
 	tmo := imageBudget(task, req.Spec)
-	deadline := a.now().Add(tmo)
+	start := a.now()
+	deadline := start.Add(tmo)
 	tctx, cancel := context.WithTimeout(ctx, tmo)
 	defer cancel()
+	// v1.16: the health wait ends failReserve before the task deadline.
+	// Its context is a child of tctx, so the failure path keeps tctx.
+	wtmo := waitBudget(tmo)
+	wctx, wcancel := context.WithTimeout(tctx, wtmo)
+	defer wcancel()
+	wait := healthWindow{ctx: wctx, by: start.Add(wtmo)}
 	// The supervisor skips an entry while any image task holds this lock.
 	// A task that finds a supervisor action running waits for it within
 	// its own timeout. A deploy or rollback clears that entry's supervisor
@@ -71,7 +82,7 @@ func (a *agent) runImage(ctx context.Context, task protocol.Task) protocol.TaskR
 	}
 	switch task.Kind {
 	case "image_deploy", "image_rollback":
-		return a.deployImage(tctx, task, req, deadline, ex, secrets)
+		return a.deployImage(tctx, task, req, deadline, wait, ex, secrets)
 	case "image_logs":
 		return a.logsImage(tctx, task, req, ex)
 	default:
@@ -109,6 +120,23 @@ func imageBudget(task protocol.Task, spec *images.ImageSpec) time.Duration {
 	return tmo
 }
 
+// waitBudget is the share of a task budget the health wait may use: all of
+// it up to failReserve, otherwise everything but the last failReserve.
+func waitBudget(tmo time.Duration) time.Duration {
+	if tmo > failReserve {
+		return tmo - failReserve
+	}
+	return tmo
+}
+
+// healthWindow is the health wait's context and deadline. Both end at
+// the same point, failReserve before the task deadline when the budget
+// is larger than that. Only waitHealthy uses it.
+type healthWindow struct {
+	ctx context.Context
+	by  time.Time
+}
+
 // logSecrets is the clipped container_logs lists for one task.
 // env is previewed. file is the registry token and secret-file pieces.
 // Each list has the v1.5 caps on its own.
@@ -135,7 +163,7 @@ func clipRedact(in []string) []string {
 	return out
 }
 
-func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
+func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, wait healthWindow, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	ref, err := images.Parse(req.Spec.Image)
 	if err != nil {
 		return a.deployResult(task, "forbidden_spec", "", nil, missingStatus(), nil, ex)
@@ -145,7 +173,7 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	// and deploy would report unchanged and leave the old files parked.
 	// Jobs have no -prev generation.
 	if task.Kind == "image_rollback" && req.Spec.Kind == "service" {
-		if res, done := a.rollbackKept(ctx, task, req, deadline, ex, secrets); done {
+		if res, done := a.rollbackKept(ctx, task, req, wait, ex, secrets); done {
 			return res
 		}
 	}
@@ -161,7 +189,7 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if task.Kind == "image_rollback" || req.Spec.Kind == "service" {
-		return a.deployService(ctx, task, req, deadline, digest, ex, secrets)
+		return a.deployService(ctx, task, req, wait, digest, ex, secrets)
 	}
 	return a.deployJob(ctx, task, req, deadline, digest, ex, secrets)
 }
@@ -171,7 +199,7 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 // done is false when this rollback must pull and deploy. A status failure
 // does not fall through: the kept digest is unknown, and deploying would
 // hide that. force does not matter; the swap is not the unchanged short-circuit.
-func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, ex redact.Exact, secrets logSecrets) (protocol.TaskResult, bool) {
+func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.ImageReq, wait healthWindow, ex redact.Exact, secrets logSecrets) (protocol.TaskResult, bool) {
 	tail := func() []string {
 		return a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	}
@@ -198,7 +226,7 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 	if rcode != "" {
 		return a.deployResult(task, outcomeFor(rcode), digest, nil, missingStatus(), tail(), ex), true
 	}
-	w := a.waitHealthy(ctx, deadline, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
+	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
 		outcome := "failed"
 		if w.code != "" {
@@ -214,7 +242,7 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 	return a.deployResult(task, "succeeded", digest, nil, w.last, tail(), ex), true
 }
 
-func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
+func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks.ImageReq, wait healthWindow, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
 	if err != nil {
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
@@ -244,7 +272,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if code != "" {
 		return a.deployResult(task, outcomeFor(code), digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
-	w := a.waitHealthy(ctx, deadline, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
+	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
 		outcome := "failed"
 		if w.code != "" {
@@ -377,13 +405,16 @@ func (a *agent) waitHealthy(ctx context.Context, deadline time.Time, req tasks.I
 	return a.waitProbes(ctx, deadline, req.Project, req.Entry, checks)
 }
 
-// waitDocker polls container_list for the new container. healthy with the
-// configured checks passing is success. starting and a null health keep
-// waiting. unhealthy, or the deadline, is not healthy. The caller rolls
+// waitDocker polls container_list and container_status for the new
+// container. healthy with the configured checks passing is success.
+// starting and a null health keep waiting. unhealthy, a restart loop
+// (restartLoop), a terminal container_status state (exited, dead, missing),
+// or the deadline, is not healthy. The caller rolls
 // back only when the pre-deploy container was running, and stops the new
-// container for every other state. A list or sleep error takes
-// that path only when the task deadline passed inside that call. Any other
+// container for every other state. A list, status or sleep error takes
+// that path only when the wait deadline passed inside that call. Any other
 // error, including a parent cancel, is returned and the caller does neither.
+// A status refusal code is returned like waitStable's.
 func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.ImageReq) healthStop {
 	name, ok := images.ContainerName(req.Project, req.Entry)
 	if !ok {
@@ -399,15 +430,30 @@ func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.Im
 		if err != nil {
 			return a.waitFail(ctx, deadline, err, last)
 		}
-		if it, found := findListed(items, name); found {
+		it, found := findListed(items, name)
+		if found {
 			last = statusFromList(it)
-			switch healthOf(it) {
-			case "unhealthy":
+			if healthOf(it) == "unhealthy" {
 				return healthStop{last: last}
-			case "healthy":
-				if len(checks) == 0 || a.probesOK(ctx, checks) {
-					return healthStop{healthy: true, last: last}
-				}
+			}
+		}
+		// v1.16: container_list has no restart count, so each poll also
+		// reads container_status. A restart loop or a container that has
+		// stopped (restart "no" after a crash) is not healthy, whatever
+		// Docker health says, as in waitStable and waitProbes.
+		resp, code, err := a.imageStatus(ctx, req.Project, req.Entry)
+		if err != nil {
+			return a.waitFail(ctx, deadline, err, last)
+		}
+		if code != "" {
+			return healthStop{code: code, last: last}
+		}
+		if terminalState(resp.Status.State) || restartLoop(resp.Status) {
+			return healthStop{last: resp.Status}
+		}
+		if found && healthOf(it) == "healthy" {
+			if len(checks) == 0 || a.probesOK(ctx, checks) {
+				return healthStop{healthy: true, last: last}
 			}
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
@@ -500,7 +546,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 			return healthStop{code: code, last: last}
 		}
 		last = resp.Status
-		if terminalState(last.State) || last.RestartCount > 0 {
+		if terminalState(last.State) || restartLoop(last) {
 			return healthStop{last: last}
 		}
 		if last.State == "running" {
@@ -535,7 +581,7 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 			return healthStop{code: code, last: last}
 		}
 		last = resp.Status
-		if terminalState(last.State) {
+		if terminalState(last.State) || restartLoop(last) {
 			return healthStop{last: last}
 		}
 		if last.State == "running" && a.probesOK(ctx, checks) {
@@ -1016,6 +1062,16 @@ func terminalState(s string) bool {
 	default:
 		return false
 	}
+}
+
+// restartLoop is a container Docker has restarted in its current run, or
+// is restarting now. Every health wait treats it as not healthy (v1.16).
+// RestartCount is Docker's count for the current run, not for the
+// container's life. A kept container that image_rollback swaps back is
+// started through the API, which resets RestartCount, so restarts from
+// before it was parked do not count (to be confirmed in the pi3 live check).
+func restartLoop(st images.ImageStatus) bool {
+	return st.RestartCount > 0 || st.State == "restarting"
 }
 
 func hostPortsOf(spec *images.ImageSpec) []int {

@@ -80,6 +80,8 @@ func TestUnchangedHealthMisses(t *testing.T) {
 		seq.pre = runningStatus(0)
 		seq.preHash = imgHash
 		seq.listEmpty = true
+		// v1.16: the Docker wait also reads container_status each poll.
+		seq.post = runningStatus(0)
 		res := mustImage(t, a, "image_deploy", specWithHealth(false, hcFast), 4)
 		assertDeploy(t, res, "rolled_back", "failed")
 		if !seq.deployed || !h.saw(images.VerbRollback) || clock.sleeps() == 0 || !clock.now().After(start) {

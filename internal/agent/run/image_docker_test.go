@@ -331,6 +331,8 @@ func (s *dockerSeq) call(verb string, body []byte) ([]byte, error) {
 			return nil, err
 		}
 		s.rollbacks++
+		// The kept container is back and running under the current name.
+		s.deployed = true
 		return images.Encode(images.IDResponse{ContainerID: "prev"}), nil
 	case images.VerbStop:
 		s.stops++

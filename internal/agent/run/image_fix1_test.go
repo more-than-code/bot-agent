@@ -126,7 +126,8 @@ func TestImagePausedWaitsOutTheTask(t *testing.T) {
 			seq.post = stateStatus(state)
 			res := mustImage(t, a, "image_deploy", serviceSpec(false, 5, 3031), 120)
 			assertDeploy(t, res, "rolled_back", "failed")
-			if clock.sleeps() != 60 || !clock.now().Equal(start.Add(120*time.Second)) {
+			// v1.16: the wait ends 60 s before the 120 s task deadline.
+			if clock.sleeps() != 30 || !clock.now().Equal(start.Add(60*time.Second)) {
 				t.Fatalf("sleeps %d now %s calls %v", clock.sleeps(), clock.now(), h.Calls())
 			}
 			if !h.saw(images.VerbRollback) {
