@@ -43,7 +43,8 @@ type socketHelper struct {
 
 func (s socketHelper) Call(ctx context.Context, verb string, body []byte) ([]byte, error) {
 	limit := programs.FrameLimit(verb)
-	if !programs.KnownVerb(verb) || len(body) > limit {
+	// docker_check is the installer's (v1.17 item 5); the agent never sends it.
+	if !programs.KnownVerb(verb) || verb == programs.VerbDockerCheck || len(body) > limit {
 		return nil, errHelper
 	}
 	frame, err := marshalFrame(verb, body)

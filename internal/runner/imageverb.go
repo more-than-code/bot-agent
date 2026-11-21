@@ -249,7 +249,7 @@ func withEntry(ctx context.Context, sys Sys, project, entry string, fn func(engi
 	if code != "" {
 		return imgErr(sys, code)
 	}
-	return fn(newEngine(dockerSock(sys)), host)
+	return fn(newEngine(dockerSock(sys), sys.Logf), host)
 }
 
 // withRead is status and logs. Those verbs do not create the per-entry lock.
@@ -264,7 +264,7 @@ func withRead(ctx context.Context, sys Sys, fn func(engine, string) []byte) []by
 	if code != "" {
 		return imgErr(sys, code)
 	}
-	return fn(newEngine(dockerSock(sys)), host)
+	return fn(newEngine(dockerSock(sys), sys.Logf), host)
 }
 
 type slot struct {
@@ -279,7 +279,7 @@ func doImageList(ctx context.Context, in []byte, sys Sys) []byte {
 	if images.Decode(in, &images.ListRequest{}) != nil {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
-	rows, err := newEngine(dockerSock(sys)).List(ctx)
+	rows, err := newEngine(dockerSock(sys), sys.Logf).List(ctx)
 	if err != nil {
 		return imgErr(sys, engReason(err))
 	}
@@ -304,7 +304,7 @@ func doPull(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte {
 	if req.RegistryAuth != nil && badCredential(req.RegistryAuth) {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
-	digest, id, err := newEngine(dockerSock(sys)).Pull(ctx, ref, req.RegistryAuth)
+	digest, id, err := newEngine(dockerSock(sys), sys.Logf).Pull(ctx, ref, req.RegistryAuth)
 	if err != nil {
 		return imgErr(sys, engReason(err))
 	}
@@ -344,6 +344,12 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, req.Env, req.Files, pol.Images, pol.AllowPublicPorts)
 		if code != "" {
 			return imgErr(sys, code)
+		}
+		// v1.17: shared networks need API 1.44. Refuse before any change.
+		if len(shared) > 0 {
+			if code := needNetworks(ctx, sys, eng); code != "" {
+				return imgErr(sys, code)
+			}
 		}
 		// The leftover -old goes before the count, so fits no longer sees it.
 		n, cur, prev, code := loadPairClearing(ctx, sys, eng, req.Project, req.Entry, host)

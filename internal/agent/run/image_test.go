@@ -522,7 +522,9 @@ func TestImageTimeoutHonoured(t *testing.T) {
 	}
 }
 
-func TestDockerLatch(t *testing.T) {
+// v1.17 item 3: docker follows every discovery pass (it was latched by the
+// first pass before).
+func TestDockerFollowsDiscovery(t *testing.T) {
 	proc, _, passwd := fixtureProc(t, 9)
 	var fail atomic.Bool
 	fail.Store(true)
@@ -548,11 +550,11 @@ func TestDockerLatch(t *testing.T) {
 		},
 	}
 	if _, complete := a.discover(context.Background()); complete || a.dockerUp() {
-		t.Fatal("first failure latched docker up or completed")
+		t.Fatal("first failure set docker up or completed")
 	}
 	fail.Store(false)
-	if _, complete := a.discover(context.Background()); !complete || a.dockerUp() {
-		t.Fatal("later success flipped docker")
+	if _, complete := a.discover(context.Background()); !complete || !a.dockerUp() {
+		t.Fatal("later success did not set docker")
 	}
 	if n := strings.Count(buf.String(), "bot-agent: container discovery failed"); n != 1 {
 		t.Fatalf("logs %d\n%s", n, buf.String())
@@ -577,11 +579,11 @@ func TestDockerLatch(t *testing.T) {
 		policy: a.policy,
 	}
 	if _, complete := up.discover(context.Background()); !complete || !up.dockerUp() {
-		t.Fatal("successful list did not latch docker")
+		t.Fatal("successful list did not set docker")
 	}
 	fail.Store(true)
-	if _, complete := up.discover(context.Background()); complete || !up.dockerUp() {
-		t.Fatal("later failure cleared docker")
+	if _, complete := up.discover(context.Background()); complete || up.dockerUp() {
+		t.Fatal("later failure kept docker")
 	}
 
 	off := &agent{

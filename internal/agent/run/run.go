@@ -250,8 +250,9 @@ type agent struct {
 	ownedOnce     atomic.Bool
 	containerOnce atomic.Bool
 	listCutOnce   atomic.Bool
-	dockerOK      bool
-	dockerKnown   bool
+	// docker is the hello.programs.docker state (agent-protocol v1.17
+	// item 3). Only discovery and the session loop touch it, under mu.
+	docker dockerFlag
 	// helperKind is the task kind while a task is talking to the helper.
 	// Empty during discovery, so those calls are not logged as task failures.
 	helperKind   string

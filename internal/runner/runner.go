@@ -75,6 +75,12 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	if images.IsVerb(verb) {
 		return handleImage(ctx, verb, in, sys)
 	}
+	if verb == programs.VerbDockerCheck {
+		if len(in) > programs.MaxFrame {
+			return images.Encode(DockerCheck{Reason: dockerCheckBadSpec})
+		}
+		return doDockerCheck(ctx, in, sys)
+	}
 	if ctx.Err() != nil {
 		return refuse(sys, programs.ReasonIO)
 	}

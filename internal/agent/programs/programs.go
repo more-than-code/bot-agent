@@ -30,6 +30,11 @@ const (
 	ReasonConflict = "conflict"
 	ReasonDocker   = "docker_unavailable"
 	ReasonImage    = "image_unavailable"
+	// ReasonNetworksDocker is container_deploy refused because the spec has
+	// shared networks and Docker speaks an API below 1.44 (agent-protocol
+	// v1.17 item 2). It passes only between the helper and the agent; the
+	// task result is outcome failed with a line that says why.
+	ReasonNetworksDocker = "shared_networks_need_docker25"
 
 	maxArgs    = 32
 	maxArgLen  = 4096

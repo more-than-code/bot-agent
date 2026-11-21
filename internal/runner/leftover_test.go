@@ -388,7 +388,7 @@ func TestRestoreSlotFailuresLogged(t *testing.T) {
 		t.Fatalf("store %q", code)
 	}
 	defer closeStore(st)
-	restoreOriginal(context.Background(), e.sys, newEngine(dockerSock(e.sys)), st, entryReq("web"), cur, prev, true, true)
+	restoreOriginal(context.Background(), e.sys, newEngine(dockerSock(e.sys), nil), st, entryReq("web"), cur, prev, true, true)
 	assertCleanLog(t, logs(), root,
 		"rollback could not restore the prev file slot",
 		"rollback could not restore the current file slot")

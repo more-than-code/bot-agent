@@ -21,7 +21,6 @@ import (
 )
 
 const (
-	engineAPI     = "/v1.47"
 	maxEngineJSON = 4 << 20
 	maxPullStream = 8 << 20
 	maxLogStream  = 1 << 20
@@ -59,6 +58,8 @@ type engine interface {
 	NetworkCreate(ctx context.Context, name, host, project string) error
 	SharedNetworkCreate(ctx context.Context, name, host, network, subnet string) error
 	EdgeVolumeCreate(ctx context.Context, name, host string) error
+	// APIVersion is the negotiated Engine API version (agent-protocol v1.17).
+	APIVersion(ctx context.Context) (apiVersion, error)
 }
 
 type listed struct {
@@ -107,9 +108,24 @@ type networkInfo struct {
 
 type engineClient struct {
 	http *http.Client
+	// logf is the helper journal (Sys.Logf); nil logs nothing.
+	logf func(string, ...any)
+	// ver is the negotiated Engine API version, set by the first request
+	// (agent-protocol v1.17 item 1). verErr is that negotiation's error.
+	ver    apiVersion
+	pinged bool
+	verErr error
+	// daemon is the version the daemon reported, zero until a ping answered.
+	// assumed is true when the ping had no usable header and daemon is the
+	// assumed apiMin.
+	daemon  apiVersion
+	assumed bool
+	// scrub is the secret values of the request in flight (a registry
+	// token, create env values). They are cut from a logged Engine message.
+	scrub []string
 }
 
-func newEngine(sock string) *engineClient {
+func newEngine(sock string, logf func(string, ...any)) *engineClient {
 	tr := &http.Transport{
 		DisableCompression: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -117,7 +133,7 @@ func newEngine(sock string) *engineClient {
 			return d.DialContext(ctx, "unix", sock)
 		},
 	}
-	return &engineClient{http: &http.Client{
+	return &engineClient{logf: logf, http: &http.Client{
 		Transport: tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -141,6 +157,8 @@ func (e *engineClient) Pull(ctx context.Context, ref images.Reference, auth *ima
 				return "", "", errBadSpec
 			}
 			hdr.Set("X-Registry-Auth", val)
+			e.scrub = []string{auth.Token}
+			defer func() { e.scrub = nil }()
 		}
 	}
 	code, body, err := e.do(ctx, http.MethodPost, "/images/create", q, hdr, nil, maxPullStream)
@@ -190,6 +208,8 @@ func (e *engineClient) Create(ctx context.Context, name string, body []byte) (st
 	}
 	q := url.Values{}
 	q.Set("name", name)
+	e.scrub = createEnvValues(body)
+	defer func() { e.scrub = nil }()
 	code, buf, err := e.do(ctx, http.MethodPost, "/containers/create", q, nil, body, maxEngineJSON)
 	if err != nil {
 		return "", errEngine
@@ -386,13 +406,27 @@ func (e *engineClient) createNamed(ctx context.Context, path, name, driver, host
 	if subnet != "" {
 		ipam = &ipamBody{Config: []ipamConfig{{Subnet: subnet}}}
 	}
+	// Below API 1.44 Docker accepts a second network with the same name
+	// unless the client asks it not to (agent-protocol v1.17 item 2).
+	// Negotiate first so the body matches the version the request uses.
+	var checkDup *bool
+	if path == "/networks/create" {
+		if err := e.negotiate(ctx); err != nil {
+			return "", err
+		}
+		if e.ver.less(apiNetworks) {
+			yes := true
+			checkDup = &yes
+		}
+	}
 	body, err := marshalJSON(struct {
-		Name   string            `json:"Name"`
-		Driver string            `json:"Driver"`
-		Labels map[string]string `json:"Labels"`
-		IPAM   *ipamBody         `json:"IPAM,omitempty"`
+		Name           string            `json:"Name"`
+		CheckDuplicate *bool             `json:"CheckDuplicate,omitempty"`
+		Driver         string            `json:"Driver"`
+		Labels         map[string]string `json:"Labels"`
+		IPAM           *ipamBody         `json:"IPAM,omitempty"`
 	}{
-		Name: name, Driver: driver, Labels: labels, IPAM: ipam,
+		Name: name, CheckDuplicate: checkDup, Driver: driver, Labels: labels, IPAM: ipam,
 	})
 	if err != nil {
 		return "", errEngine
@@ -457,7 +491,10 @@ func (e *engineClient) exchange(ctx context.Context, method, path string, q url.
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "?") || strings.Contains(path, "..") {
 		return 0, nil, false, errEngine
 	}
-	u := &url.URL{Scheme: "http", Host: "docker", Path: engineAPI + path}
+	if err := e.negotiate(ctx); err != nil {
+		return 0, nil, false, err
+	}
+	u := &url.URL{Scheme: "http", Host: "docker", Path: "/v" + e.ver.String() + path}
 	if len(q) > 0 {
 		u.RawQuery = q.Encode()
 	}
@@ -482,12 +519,17 @@ func (e *engineClient) exchange(ctx context.Context, method, path string, q url.
 	}
 	resp, err := e.http.Do(req)
 	if err != nil {
+		e.logFailure(method, path, 0, nil)
 		return 0, nil, false, errEngine
 	}
 	defer resp.Body.Close()
 	buf, cut, err := readLimit(resp.Body, limit)
 	if err != nil || (cut && strict) {
+		e.logFailure(method, path, resp.StatusCode, nil)
 		return 0, nil, cut, errEngine
+	}
+	if loggedStatus(method, path, resp.StatusCode) {
+		e.logFailure(method, path, resp.StatusCode, buf)
 	}
 	return resp.StatusCode, buf, cut, nil
 }

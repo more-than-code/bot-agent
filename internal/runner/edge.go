@@ -105,7 +105,7 @@ func doEdgeApply(ctx context.Context, in []byte, sys Sys) []byte {
 		return edgeErr(sys, code, "")
 	}
 	defer closeStore(st)
-	eng := newEngine(dockerSock(sys))
+	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
 		return edgeErr(sys, engReason(err), "")
@@ -339,7 +339,7 @@ func doEdgeStop(ctx context.Context, in []byte, sys Sys) []byte {
 	if code != "" {
 		return edgeErr(sys, code, "")
 	}
-	eng := newEngine(dockerSock(sys))
+	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
 		return edgeErr(sys, engReason(err), "")
@@ -367,7 +367,7 @@ func doEdgeStatus(ctx context.Context, in []byte, sys Sys) []byte {
 	if code != "" {
 		return edgeErr(sys, code, "")
 	}
-	eng := newEngine(dockerSock(sys))
+	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
 		return edgeErr(sys, engReason(err), "")

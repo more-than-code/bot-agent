@@ -61,7 +61,7 @@ func TestSlotAndCapRefusalBytes(t *testing.T) {
 		if string(raw) != `{"error":"`+programs.ReasonPolicy+`"}` {
 			t.Fatalf("%s", raw)
 		}
-		if len(e.fake.Calls()) != 1 || e.fake.Calls()[0].Method != "GET" {
+		if calls := afterPing(t, e.fake.Calls()); len(calls) != 1 || calls[0].Method != "GET" {
 			t.Fatal(e.fake.Calls())
 		}
 		if e.fake.ctrs["mohiguide-web"].state != "running" {

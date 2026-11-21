@@ -49,7 +49,7 @@ type UnitInfo struct {
 func FixedReason(reason string) string {
 	switch reason {
 	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
-		ReasonConflict, ReasonDocker, ReasonImage:
+		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker:
 		return reason
 	default:
 		return ReasonPolicy
@@ -72,11 +72,16 @@ func SocketLimit() int {
 	return images.MaxFrame + images.SocketSlack
 }
 
+// VerbDockerCheck is the installer's Docker check (agent-protocol v1.17
+// item 5). The helper serves it without the runner policy. The agent never
+// sends it.
+const VerbDockerCheck = "docker_check"
+
 // KnownVerb reports whether verb is one the helper implements.
 // Image verbs live in the images package so the two lists cannot drift.
 func KnownVerb(verb string) bool {
 	switch verb {
-	case "start", "stop", "restart", "status", "logs", "sockets", "list":
+	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)

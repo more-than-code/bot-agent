@@ -96,6 +96,7 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 		services = disc.Services
 	}
 	programs, caps := a.helloPrograms()
+	a.sentDocker(programs != nil && programs.Docker)
 	hello := protocol.Hello{
 		V: protocol.Version, Type: "hello",
 		HostID: a.cfg.HostID, CredentialID: a.cfg.CredentialID,
@@ -256,6 +257,12 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 					return err
 				}
 				nextDisc = now.Add(a.opt.DiscoverEvery)
+				// v1.17: a held Docker change ends the session; the
+				// next hello carries the new programs.docker. Not while
+				// a task is running or waiting.
+				if a.dockerChanged(now, a.tasksBusy()) {
+					return conn.ErrReconnect
+				}
 			}
 			hostDue := !now.Before(nextHost)
 			procDue := !now.Before(nextProc)
@@ -423,6 +430,8 @@ func (a *agent) discover(ctx context.Context) (discover.Result, bool) {
 				a.opt.Log.Printf("bot-agent: container discovery failed")
 			}
 		} else {
+			// The failure line is logged again after Docker has answered.
+			a.containerOnce.Store(false)
 			if truncated && a.listCutOnce.CompareAndSwap(false, true) {
 				a.opt.Log.Printf("bot-agent: container list truncated")
 			}

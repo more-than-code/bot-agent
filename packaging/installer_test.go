@@ -205,7 +205,7 @@ func makeBundle(t *testing.T, version string) string {
 		"printf '%s\\n' \"unexpected\" >&2\nexit 1\n"
 	writeExe(t, filepath.Join(dir, "bot-agent-v"+version+"-linux-"+arch), agent)
 	runner := "#!/bin/sh\nset -eu\nif [ \"${1:-}\" = \"version\" ] || [ \"${1:-}\" = \"--version\" ] || [ \"${1:-}\" = \"-version\" ]; then\n" +
-		"  printf '%s\\n' \"" + version + "\"\n  exit 0\nfi\nexit 0\n"
+		"  printf '%s\\n' \"" + version + "\"\n  exit 0\nfi\n" + runnerDockerCheck + "exit 0\n"
 	writeExe(t, filepath.Join(dir, "bot-agent-runner-v"+version+"-linux-"+arch), runner)
 	unitDir := filepath.Join(dir, "units")
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
@@ -222,6 +222,22 @@ func makeBundle(t *testing.T, version string) string {
 	writeSums(t, dir)
 	return dir
 }
+
+// runnerDockerCheck is the stub helper's docker_check (agent-protocol
+// v1.17): the stub dir's docker-check file when a test wrote one, else
+// Docker 27 when a docker command is on PATH and absent when not.
+const runnerDockerCheck = `if [ "${1:-}" = "docker_check" ]; then
+  cat >/dev/null
+  if [ -f "${BOT_AGENT_STUB_DIR:-}/docker-check" ]; then
+    cat "$BOT_AGENT_STUB_DIR/docker-check"
+  elif command -v docker >/dev/null 2>&1; then
+    printf '%s\n' '{"present":true,"api":"1.47","ok":true,"networks_ok":true,"reason":"ok"}'
+  else
+    printf '%s\n' '{"present":false,"api":"","ok":false,"networks_ok":false,"reason":"absent"}'
+  fi
+  exit 0
+fi
+`
 
 func copyMode(t *testing.T, src, dst string, mode os.FileMode) {
 	t.Helper()
@@ -3464,4 +3480,114 @@ func TestInstallerEnableNeedsImagesTrue(t *testing.T) {
 			t.Fatalf("%s changed the fake root", cmd)
 		}
 	}
+}
+
+// v1.17 item 5: `check` asks the bundle's helper (docker_check) and fails
+// only when the policy needs Docker (images or the edge) and it is not ok.
+func TestInstallerCheckDocker(t *testing.T) {
+	t.Parallel()
+	bundle := makeBundle(t, "0.2.0")
+	images := []string{"check", "--runner", "--project", "home-lab", "--image", "docker.io/library/*", "--enable"}
+	writeCheck := func(t *testing.T, rg *rig, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(rg.stubs, "docker-check"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("absent with images", func(t *testing.T) {
+		rg := newRig(t)
+		rg.noDocker = true
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code == 0 || !strings.Contains(res.stdout, "\ndocker: absent\n") ||
+			!strings.Contains(res.stdout, "summary: check failed: Docker is absent; the policy runs images or the edge") ||
+			strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "absent docker passed")
+		}
+	})
+
+	t.Run("docker 24 with images", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `{"present":true,"api":"1.43","ok":true,"networks_ok":false,"reason":"ok"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: API 1.43 (ok); shared networks need Docker 25 (API 1.44)\n") ||
+			!strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "docker 24")
+		}
+	})
+
+	t.Run("docker 29 with images", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `{"present":true,"api":"1.52","ok":true,"networks_ok":true,"reason":"ok"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: API 1.52 (ok)\n") || !strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "docker 29")
+		}
+	})
+
+	t.Run("too old with images", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `{"present":true,"api":"1.40","ok":false,"networks_ok":false,"reason":"too old"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code == 0 || !strings.Contains(res.stdout, "\ndocker: API 1.40 (too old: needs Docker 20.10, API 1.41)\n") ||
+			!strings.Contains(res.stdout, "summary: check failed: Docker API 1.40 is too old (needs Docker 20.10, API 1.41); the policy runs images or the edge") {
+			res.fail(t, "", "docker too old")
+		}
+	})
+
+	t.Run("not answering with images", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `{"present":true,"api":"","ok":false,"networks_ok":false,"reason":"not answering"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code == 0 || !strings.Contains(res.stdout, "\ndocker: not answering\n") ||
+			!strings.Contains(res.stdout, "summary: check failed: Docker is not answering; the policy runs images or the edge") {
+			res.fail(t, "", "docker not answering")
+		}
+	})
+
+	t.Run("absent without images or edge", func(t *testing.T) {
+		rg := newRig(t)
+		rg.noDocker = true
+		res := runBundle(t, bundle, rg, "", "check", "--runner")
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: absent\n") || !strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "no images failed on docker")
+		}
+	})
+
+	t.Run("no API-Version header", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `{"present":true,"api":"","ok":true,"networks_ok":false,"reason":"ok, API assumed 1.41"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: API unknown, assumed 1.41 (ok); shared networks need Docker 25 (API 1.44)\n") ||
+			!strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "assumed 1.41")
+		}
+	})
+
+	t.Run("docker_check runs under timeout 15", func(t *testing.T) {
+		rg := newRig(t)
+		writeExe(t, filepath.Join(rg.stubs, "timeout"), `#!/bin/sh
+printf '%s\n' "timeout $1" >> "$BOT_AGENT_STUB_LOG"
+shift
+exec "$@"
+`)
+		writeCheck(t, rg, `{"present":true,"api":"1.52","ok":true,"networks_ok":true,"reason":"ok"}`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: API 1.52 (ok)\n") {
+			res.fail(t, "", "under timeout")
+		}
+		b, err := os.ReadFile(rg.log)
+		if err != nil || !strings.Contains(string(b), "timeout 15\n") {
+			t.Fatalf("timeout not used: %s %v", b, err)
+		}
+	})
+
+	t.Run("garbled answer falls back to presence", func(t *testing.T) {
+		rg := newRig(t)
+		writeCheck(t, rg, `nonsense`)
+		res := runBundle(t, bundle, rg, "", images...)
+		if res.code != 0 || !strings.Contains(res.stdout, "\ndocker: present\n") || !strings.Contains(res.stdout, "summary: check ok") {
+			res.fail(t, "", "garbled")
+		}
+	})
 }

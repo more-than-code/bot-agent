@@ -10,7 +10,7 @@ The installer copies files only from the bundle. It does not download anything. 
 
 - A Linux host with systemd, and root on that host. `uname -m` must print `x86_64` or `aarch64`. The installer calls these `amd64` and `arm64`. It is written for a Debian-family host.
 - A terminal with a tty. From your own machine, `ssh -t <host>` gives you one. Enrol cannot show the hidden prompt without a tty.
-- Docker on the host, if it will run catalog images. A host that runs programs only does not need Docker.
+- Docker on the host, if it will run catalog images or the edge: Docker Engine 20.10 or later (API 1.41). Shared networks need Docker 25 or later (API 1.44). The agent uses the newest API version both sides speak, up to 1.47. A host that runs programs only does not need Docker.
 - An organization and a project in the console. The host joins your organization; each project then gets `metrics` or `deploy` access to it from an org owner or admin. Creating a project, creating a join token and granting host access are done in the console only; there is no MCP tool for them.
 - A join token. In the console, open the organization, then Hosts → Add a host, and create a join token, optionally granting one project access. From a project's Hosts tab, Add a host makes a token that grants that project `deploy`. Only org owners and admins can create tokens. Create it just before you enrol. The token expires, and it can be used once.
 - The server URL for enrol. Use `wss://<your-api-host>`. A dev server on loopback uses `ws://127.0.0.1:<port>` or `ws://localhost:<port>`, and those commands need `--insecure-dev`.
@@ -141,7 +141,7 @@ sudo ./install.sh check --runner
 
 The script must run as root. Otherwise it prints `must run as root` and exits 1.
 
-With `--runner`, before `runner.toml` exists, `check` tests a disabled template. That template has no image patterns, so the line is `docker: not checked`. After you set `images`, a later check prints `docker: present` or `docker: absent`.
+With `--runner`, `check` also asks the bundle's helper about Docker (`docker_check`, from bundle v0.2.12). It prints `docker: API <version> (ok)`, adds `; shared networks need Docker 25 (API 1.44)` for Docker 20.10 to 24, prints `docker: API unknown, assumed 1.41 (ok); shared networks need Docker 25 (API 1.44)` when Docker gave no `API-Version` header, or prints `docker: API <version> (too old: needs Docker 20.10, API 1.41)`, `docker: not answering` or `docker: absent`. The helper's ping has its own 5 s deadline, and `check` runs it under `timeout 15` when the `timeout` command exists. When the policy has `images` or the edge on and Docker is not ok, `check` ends with `summary: check failed: <reason>` and exits 1. When the policy needs no Docker (for example the disabled template that `check` tests before `runner.toml` exists), the line is only a report and `check` still passes. A bundle without the helper prints `docker: present` or `docker: absent`.
 
 Leave `--runner` off when this host will not run catalog workloads.
 

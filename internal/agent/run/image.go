@@ -270,7 +270,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		return a.deployResult(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResult(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), ex)
 	}
 	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
@@ -336,7 +336,10 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), tail(), ex)
 	}
 	st := resp.Status
-	if st.State != "missing" {
+	// With shared networks the helper may refuse (v1.17 item 2) and must
+	// find the previous container still there; it removes it itself after
+	// its checks.
+	if st.State != "missing" && len(req.Spec.Networks) == 0 {
 		code, err = a.removeContainer(ctx, req.Project, req.Entry)
 		if err != nil {
 			return a.deployResult(task, "failed", digest, nil, st, tail(), ex)
@@ -349,7 +352,7 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 		return a.deployResult(task, "failed", digest, nil, st, tail(), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, st, tail(), ex)
+		return a.deployResult(task, outcomeFor(code), digest, nil, st, refusalLines(code, tail()), ex)
 	}
 	jobDeadline := a.now().Add(time.Duration(req.Spec.TimeoutSec) * time.Second)
 	if deadline.Before(jobDeadline) {
@@ -868,22 +871,6 @@ func (a *agent) listContainers(ctx context.Context) ([]images.ContainerInfo, boo
 		return []images.ContainerInfo{}, resp.Truncated, nil
 	}
 	return resp.Items, resp.Truncated, nil
-}
-
-func (a *agent) noteDocker(ok bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.dockerKnown {
-		return
-	}
-	a.dockerOK = ok
-	a.dockerKnown = true
-}
-
-func (a *agent) dockerUp() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.dockerOK
 }
 
 func (a *agent) machineHost() string {

@@ -827,31 +827,101 @@ policy_check() {
   return 0
 }
 
-policy_patterns() {
-  printf '%s\n' "$1" | awk -F= '$1=="image_patterns"{print $2; exit}'
-}
-
 policy_edge() {
   printf '%s\n' "$1" | awk -F= '$1=="edge"{print $2; exit}'
 }
 
-# Docker is checked when the policy has image patterns or the edge on
-# (the edge is a container, agent-protocol v1.15).
+policy_images() {
+  printf '%s\n' "$1" | awk -F= '$1=="images"{print $2; exit}'
+}
+
+# docker_check answer field: a true/false value, or a string value.
+dc_bool() {
+  printf '%s\n' "$1" | sed -n "s/.*\"$2\":\([a-z]*\).*/\1/p"
+}
+
+dc_str() {
+  printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
+}
+
+# Docker is needed when the policy has images or the edge on (the
+# edge is a container, agent-protocol v1.15). The bundle's helper checks it
+# with docker_check (agent-protocol v1.17): present, the API version, and
+# whether shared networks work. Without the helper (or when it gives no
+# answer) only presence is checked. DOCKER_FAIL is set when the policy
+# needs Docker and the check is not ok; `check` then fails.
+DOCKER_FAIL=
 note_docker() {
-  _patterns=$1
+  _images=$1
   _edge=${2:-}
   if [ "$_edge" = "true" ]; then
     say "edge: on (needs Docker, and ports 80 and 443 free and reachable from the internet)"
   fi
-  if { [ -z "$_patterns" ] || [ "$_patterns" = "0" ]; } && [ "$_edge" != "true" ]; then
-    say "docker: not checked"
-    return 0
+  _need=0
+  if [ "$_images" = "true" ] || [ "$_edge" = "true" ]; then
+    _need=1
   fi
-  if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
-    say "docker: present"
-    return 0
+  _dbad=
+  _dc=
+  if [ -n "$RUNNER_SRC" ]; then
+    # The helper's ping has its own 5 s deadline; timeout bounds the rest.
+    if command -v timeout >/dev/null 2>&1; then
+      _dc=$(printf '{}' | timeout 15 "$RUNNER_SRC" docker_check 2>/dev/null) || _dc=
+    else
+      _dc=$(printf '{}' | "$RUNNER_SRC" docker_check 2>/dev/null) || _dc=
+    fi
   fi
-  say "docker: absent"
+  _dreason=$(dc_str "$_dc" reason)
+  _dapi=$(dc_str "$_dc" api)
+  case "$_dapi" in
+    ''|*[!0-9.]*) _dapi= ;;
+  esac
+  case "$_dreason" in
+    ok)
+      if [ "$(dc_bool "$_dc" ok)" != "true" ] || [ -z "$_dapi" ]; then
+        _dreason=
+      elif [ "$(dc_bool "$_dc" networks_ok)" = "true" ]; then
+        say "docker: API ${_dapi} (ok)"
+      else
+        say "docker: API ${_dapi} (ok); shared networks need Docker 25 (API 1.44)"
+      fi
+      ;;
+    'ok, API assumed 1.41')
+      if [ "$(dc_bool "$_dc" ok)" != "true" ]; then
+        _dreason=
+      else
+        say "docker: API unknown, assumed 1.41 (ok); shared networks need Docker 25 (API 1.44)"
+      fi
+      ;;
+    absent)
+      say "docker: absent"
+      _dbad="Docker is absent"
+      ;;
+    'not answering')
+      say "docker: not answering"
+      _dbad="Docker is not answering"
+      ;;
+    'too old')
+      if [ -n "$_dapi" ]; then
+        say "docker: API ${_dapi} (too old: needs Docker 20.10, API 1.41)"
+        _dbad="Docker API ${_dapi} is too old (needs Docker 20.10, API 1.41)"
+      else
+        _dreason=
+      fi
+      ;;
+    *) _dreason= ;;
+  esac
+  if [ -z "$_dreason" ]; then
+    if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+      say "docker: present"
+    else
+      say "docker: absent"
+      _dbad="Docker is absent"
+    fi
+  fi
+  if [ "$_need" = "1" ] && [ -n "$_dbad" ]; then
+    DOCKER_FAIL="${_dbad}; the policy runs images or the edge"
+  fi
   return 0
 }
 
@@ -872,7 +942,7 @@ check_policy_file() {
     [ -z "$_cleanup" ] || rm -f "$_cleanup"
     precheck_fail "policy check failed for ${_label}"
   fi
-  note_docker "$(policy_patterns "$_pc")" "$(policy_edge "$_pc")"
+  note_docker "$(policy_images "$_pc")" "$(policy_edge "$_pc")"
   [ -z "$_cleanup" ] || rm -f "$_cleanup"
 }
 
@@ -1018,6 +1088,10 @@ do_check() {
   fi
   if [ -f "$ENV_DEST" ]; then
     say "kept: ${ENV_HOST}"
+  fi
+  if [ -n "$DOCKER_FAIL" ]; then
+    say "summary: check failed: ${DOCKER_FAIL}"
+    exit 1
   fi
   say "summary: check ok"
 }

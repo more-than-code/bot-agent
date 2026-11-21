@@ -173,6 +173,11 @@ func emptyDocker(t *testing.T) string {
 		t.Fatal(err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/_ping" && r.Method == http.MethodGet {
+			w.Header().Set("API-Version", "1.47")
+			_, _ = w.Write([]byte("OK"))
+			return
+		}
 		if r.URL.Path == "/v1.47/containers/json" && r.Method == http.MethodGet {
 			_, _ = w.Write([]byte("[]"))
 			return
@@ -515,4 +520,25 @@ func withStderr(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+// v1.17 item 5: the installer runs `bot-agent-runner docker_check` as root
+// with {} on stdin. No policy file is needed.
+func TestDockerCheckCLI(t *testing.T) {
+	sys := runner.Sys{DockerSock: emptyDocker(t), Policy: filepath.Join(t.TempDir(), "missing.toml")}
+	var out bytes.Buffer
+	if code := run(0, []string{"docker_check"}, strings.NewReader(`{}`), &out, sys, nil); code != 0 {
+		t.Fatal(code)
+	}
+	if got := out.String(); got != `{"present":true,"api":"1.47","ok":true,"networks_ok":true,"reason":"ok"}`+"\n" {
+		t.Fatalf("%q", got)
+	}
+	out.Reset()
+	sys.DockerSock = filepath.Join(t.TempDir(), "none.sock")
+	if code := run(0, []string{"docker_check"}, strings.NewReader(`{}`), &out, sys, nil); code != 0 {
+		t.Fatal(code)
+	}
+	if got := out.String(); got != `{"present":false,"api":"","ok":false,"networks_ok":false,"reason":"absent"}`+"\n" {
+		t.Fatalf("%q", got)
+	}
 }

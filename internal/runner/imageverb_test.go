@@ -135,6 +135,17 @@ type fakeDocker struct {
 	block          chan struct{}
 	entered        chan struct{}
 	once           sync.Once
+	// api is the API-Version the fake's /_ping answers (v1.17). Requests
+	// must use /v<min(api, 1.47)>. pingCode, when set, answers the ping
+	// with that status; pingNoHeader leaves the header out.
+	api          string
+	pingCode     int
+	pingNoHeader bool
+	// pingDelay holds the ping's answer. pullMsg is the JSON message sent
+	// with pullCode; createFailMsg answers every create 500 with it.
+	pingDelay     time.Duration
+	pullMsg       string
+	createFailMsg string
 }
 
 func startFake(t *testing.T) (*fakeDocker, string) {
@@ -152,6 +163,7 @@ func startFake(t *testing.T) (*fakeDocker, string) {
 	f := &fakeDocker{
 		ctrs: map[string]*fakeCtr{}, byID: map[string]*fakeCtr{},
 		vols: map[string]*fakeVol{},
+		api:  "1.47",
 		// Docker's default bridge, so a create can overlap a real pool.
 		nets: map[string]*fakeNet{"bridge": {driver: "bridge", subnets: []string{"172.17.0.0/16"}}},
 	}
@@ -223,27 +235,67 @@ func (f *fakeDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	path := r.URL.Path
+	if r.URL.Path == "/_ping" && r.Method == http.MethodGet {
+		f.servePing(w)
+		return
+	}
+	prefix := "/v" + fakeSpoken(f.api)
+	if f.pingNoHeader {
+		prefix = "/v1.41"
+	}
+	if !strings.HasPrefix(r.URL.Path, prefix+"/") {
+		http.Error(w, "wrong version", http.StatusBadRequest)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, prefix)
 	switch {
-	case path == "/v1.47/images/create" && r.Method == http.MethodPost:
+	case path == "/images/create" && r.Method == http.MethodPost:
 		f.servePull(w, r)
-	case path == "/v1.47/containers/json" && r.Method == http.MethodGet:
+	case path == "/containers/json" && r.Method == http.MethodGet:
 		f.serveList(w)
-	case path == "/v1.47/containers/create" && r.Method == http.MethodPost:
+	case path == "/containers/create" && r.Method == http.MethodPost:
 		f.serveCreate(w, r, body)
-	case strings.HasPrefix(path, "/v1.47/containers/"):
-		f.serveContainer(w, r, strings.TrimPrefix(path, "/v1.47/containers/"))
-	case path == "/v1.47/volumes/create" && r.Method == http.MethodPost:
+	case strings.HasPrefix(path, "/containers/"):
+		f.serveContainer(w, r, strings.TrimPrefix(path, "/containers/"))
+	case path == "/volumes/create" && r.Method == http.MethodPost:
 		f.serveVolCreate(w, body)
-	case strings.HasPrefix(path, "/v1.47/volumes/") && r.Method == http.MethodGet:
-		f.serveVol(w, strings.TrimPrefix(path, "/v1.47/volumes/"))
-	case path == "/v1.47/networks/create" && r.Method == http.MethodPost:
+	case strings.HasPrefix(path, "/volumes/") && r.Method == http.MethodGet:
+		f.serveVol(w, strings.TrimPrefix(path, "/volumes/"))
+	case path == "/networks/create" && r.Method == http.MethodPost:
 		f.serveNetCreate(w, body)
-	case strings.HasPrefix(path, "/v1.47/networks/") && r.Method == http.MethodGet:
-		f.serveNet(w, strings.TrimPrefix(path, "/v1.47/networks/"))
+	case strings.HasPrefix(path, "/networks/") && r.Method == http.MethodGet:
+		f.serveNet(w, strings.TrimPrefix(path, "/networks/"))
 	default:
 		http.Error(w, "unexpected", http.StatusInternalServerError)
 	}
+}
+
+// servePing is GET /_ping: "OK" and the daemon's API-Version header.
+func (f *fakeDocker) servePing(w http.ResponseWriter) {
+	if f.pingDelay > 0 {
+		time.Sleep(f.pingDelay)
+	}
+	if !f.pingNoHeader {
+		w.Header().Set("API-Version", f.api)
+	}
+	if f.pingCode != 0 {
+		w.WriteHeader(f.pingCode)
+		return
+	}
+	_, _ = w.Write([]byte("OK"))
+}
+
+// fakeSpoken is the version a client should speak to a daemon at api:
+// min(api, 1.47). A missing or unreadable api is 1.41.
+func fakeSpoken(api string) string {
+	v, ok := parseAPIVersion(api)
+	if !ok {
+		return "1.41"
+	}
+	if apiMax.less(v) {
+		return apiMax.String()
+	}
+	return v.String()
 }
 
 func (f *fakeDocker) servePull(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +310,9 @@ func (f *fakeDocker) servePull(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.pullCode != 0 {
 		w.WriteHeader(f.pullCode)
+		if f.pullMsg != "" {
+			json.NewEncoder(w).Encode(map[string]string{"message": f.pullMsg})
+		}
 		return
 	}
 	if f.pullErr != "" {
@@ -348,6 +403,11 @@ func (f *fakeDocker) serveList(w http.ResponseWriter) {
 
 func (f *fakeDocker) serveCreate(w http.ResponseWriter, r *http.Request, body []byte) {
 	f.snapSlot("create")
+	if f.createFailMsg != "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"message": f.createFailMsg})
+		return
+	}
 	name := r.URL.Query().Get("name")
 	if _, ok := f.ctrs[name]; ok {
 		http.Error(w, "exists", http.StatusConflict)
@@ -951,7 +1011,7 @@ func TestPullQueryAndAuth(t *testing.T) {
 	if imgCode(t, raw) != "" || strings.Contains(string(raw), token) {
 		t.Fatal(string(raw))
 	}
-	calls := e.fake.Calls()
+	calls := afterPing(t, e.fake.Calls())
 	if len(calls) != 1 {
 		t.Fatal(len(calls))
 	}
@@ -975,7 +1035,7 @@ func TestPullQueryAndAuth(t *testing.T) {
 	if imgCode(t, raw) != "" {
 		t.Fatal(string(raw))
 	}
-	c := e.fake.Calls()[0]
+	c := afterPing(t, e.fake.Calls())[0]
 	q, _ = url.ParseQuery(c.Query)
 	if len(q) != 1 || q.Get("fromImage") != "ghcr.io/joe-and-his-friends/app@"+digestA || q.Get("tag") != "" {
 		t.Fatal(c.Query)
@@ -989,9 +1049,10 @@ func TestPullQueryAndAuth(t *testing.T) {
 	if imgCode(t, e.call(images.VerbPull, mustJSON(t, bare))) != "" {
 		t.Fatal("default tag")
 	}
-	q, _ = url.ParseQuery(e.fake.Calls()[0].Query)
+	pulled := afterPing(t, e.fake.Calls())[0]
+	q, _ = url.ParseQuery(pulled.Query)
 	if q.Get("tag") != "latest" || len(q) != 2 {
-		t.Fatal(e.fake.Calls()[0].Query)
+		t.Fatal(pulled.Query)
 	}
 }
 
@@ -1289,6 +1350,7 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 		t.Fatal(string(raw))
 	}
 	want := []string{
+		"GET /_ping?",
 		"GET /v1.47/containers/json?all=1",
 		// v1.13: the project network is ensured before any stop.
 		"GET /v1.47/networks/deploybot-mohiguide?",
@@ -1322,6 +1384,7 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	// v1.9 rev 3: a running original is parked on -old and removed only
 	// after -prev has started.
 	assertCalls(t, e.fake, []string{
+		"GET /_ping?",
 		"GET /v1.47/containers/json?all=1",
 		"POST /v1.47/containers/" + cur + "/stop?t=30",
 		"POST /v1.47/containers/" + cur + "/rename?name=mohiguide-web-old",
@@ -1335,7 +1398,7 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	if imgCode(t, e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))) != programs.ReasonConflict {
 		t.Fatal("missing prev")
 	}
-	if len(e.fake.Calls()) != 1 {
+	if len(afterPing(t, e.fake.Calls())) != 1 {
 		t.Fatal(e.fake.Calls())
 	}
 
@@ -1348,6 +1411,7 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 	}
 	json.Unmarshal(raw, &id)
 	assertCalls(t, e.fake, []string{
+		"GET /_ping?",
 		"GET /v1.47/containers/json?all=1",
 		"GET /v1.47/networks/deploybot-mohiguide?",
 		"POST /v1.47/networks/create?",
@@ -1362,6 +1426,19 @@ func TestDeployRollbackJobOrder(t *testing.T) {
 			t.Fatal("job removed prev")
 		}
 	}
+}
+
+// afterPing checks that the first Engine call is the v1.17 version ping and
+// returns the calls after it. No calls at all is returned as is.
+func afterPing(t *testing.T, calls []engCall) []engCall {
+	t.Helper()
+	if len(calls) == 0 {
+		return calls
+	}
+	if calls[0].Method != http.MethodGet || calls[0].Path != "/_ping" {
+		t.Fatalf("first call %s %s, want GET /_ping", calls[0].Method, calls[0].Path)
+	}
+	return calls[1:]
 }
 
 func assertCalls(t *testing.T, f *fakeDocker, want []string) {
@@ -1388,7 +1465,7 @@ func TestMaxContainersAndRemove(t *testing.T) {
 	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashD)))) != programs.ReasonPolicy {
 		t.Fatal("cap")
 	}
-	if len(e.fake.Calls()) != 1 || e.fake.Calls()[0].Method != http.MethodGet {
+	if calls := afterPing(t, e.fake.Calls()); len(calls) != 1 || calls[0].Method != http.MethodGet {
 		t.Fatal(e.fake.Calls())
 	}
 	if e.fake.ctrs["mohiguide-web"].state != "running" {
@@ -1413,6 +1490,7 @@ func TestMaxContainersAndRemove(t *testing.T) {
 		t.Fatal(string(raw))
 	}
 	assertCalls(t, e.fake, []string{
+		"GET /_ping?",
 		"GET /v1.47/containers/json?all=1",
 		"POST /v1.47/containers/" + id + "/stop?t=30",
 		"DELETE /v1.47/containers/" + id + "?v=1",
@@ -1604,7 +1682,7 @@ func TestEntryLockSerialises(t *testing.T) {
 
 func TestEngineRefusesRawTargets(t *testing.T) {
 	f, sock := startFake(t)
-	eng := newEngine(sock)
+	eng := newEngine(sock, nil)
 	ctx := context.Background()
 	if eng.Remove(ctx, "../etc") == nil {
 		t.Fatal("remove")
@@ -1943,7 +2021,7 @@ func TestCapCountsOtherContainers(t *testing.T) {
 	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, jobDeploy()))) != programs.ReasonPolicy {
 		t.Fatal("other entry")
 	}
-	if len(e.fake.Calls()) != 1 || e.fake.Calls()[0].Method != http.MethodGet {
+	if calls := afterPing(t, e.fake.Calls()); len(calls) != 1 || calls[0].Method != http.MethodGet {
 		t.Fatal(e.fake.Calls())
 	}
 
@@ -1955,7 +2033,7 @@ func TestCapCountsOtherContainers(t *testing.T) {
 	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, jobDeploy()))) != programs.ReasonPolicy {
 		t.Fatal("other project")
 	}
-	if len(e.fake.Calls()) != 1 || e.fake.Calls()[0].Method != http.MethodGet {
+	if calls := afterPing(t, e.fake.Calls()); len(calls) != 1 || calls[0].Method != http.MethodGet {
 		t.Fatal(e.fake.Calls())
 	}
 
@@ -1980,7 +2058,7 @@ func TestRollbackRechecksAllowlist(t *testing.T) {
 		if imgCode(t, raw) != programs.ReasonPolicy {
 			t.Fatalf("%s -> %s", image, raw)
 		}
-		if len(e.fake.Calls()) != 1 || e.fake.Calls()[0].Method != http.MethodGet {
+		if calls := afterPing(t, e.fake.Calls()); len(calls) != 1 || calls[0].Method != http.MethodGet {
 			t.Fatalf("%s touched docker", image)
 		}
 		if e.fake.ctrs["mohiguide-web"].state != "running" {
@@ -2000,7 +2078,7 @@ func TestPullRedirectNotFollowed(t *testing.T) {
 	if imgCode(t, raw) != programs.ReasonDocker || strings.Contains(string(raw), token) {
 		t.Fatal(string(raw))
 	}
-	calls := e.fake.Calls()
+	calls := afterPing(t, e.fake.Calls())
 	if len(calls) != 1 || calls[0].Header.Get("X-Registry-Auth") == "" {
 		t.Fatalf("calls %d", len(calls))
 	}
