@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/more-than-code/bot-agent/internal/agent/config"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/run"
@@ -75,7 +76,7 @@ func policyCmd(args []string, stdout io.Writer) error {
 // printPolicyCheck writes the effective flags, or invalid: <reason>.
 // The reason is a fixed token from the policy package. File bytes are not printed.
 func printPolicyCheck(w io.Writer, path string) error {
-	p := policy.Check(path, "", "")
+	p := checkPolicy(path)
 	if !p.Exists {
 		fmt.Fprintln(w, "invalid: missing")
 		return exitCode(1)
@@ -106,7 +107,27 @@ func printPolicyCheck(w io.Writer, path string) error {
 	}
 	// v1.15 item 1: the edge key, after the shared-network lines.
 	fmt.Fprintf(w, "edge=%t\n", p.EdgeEnabled())
+	// v1.18 item 2: the host files, in file order, after the edge line
+	// (which already follows the shared-network lines). Every field was
+	// validated by the loader; command lines are not printed.
+	fmt.Fprintf(w, "host_files=%d\n", len(p.HostFiles))
+	for _, f := range p.HostFiles {
+		// exec=unsafe (rev 1a A2): an executable is missing or not safely
+		// root-owned; applies of this file are refused until it is fixed.
+		execNote := ""
+		if !f.ExecSafe {
+			execNote = " exec=unsafe"
+		}
+		fmt.Fprintf(w, "host_file %s %s %s %s %s secret=%t health=%t%s\n",
+			f.Name, f.Path, hostfiles.FormatMode(f.Mode), f.Unit, f.RunAs.Name, f.Secret, len(f.Health) > 0, execNote)
+	}
 	return nil
+}
+
+// checkPolicy is policy.Check against the host's passwd and group. Tests
+// replace it to supply their own account files.
+var checkPolicy = func(path string) policy.Policy {
+	return policy.Check(path, "", "")
 }
 
 func safeReason(s string) string {

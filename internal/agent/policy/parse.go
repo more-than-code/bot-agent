@@ -22,10 +22,11 @@ type parsed struct {
 	sharedNets    []string
 	sharedMembers []string
 	edge          bool
+	hostFiles     hostFileKeys
 }
 
 // parseTOML accepts the v1.3 keys, the v1.4 image keys, the v1.13 shared
-// network keys and the v1.15 edge key. Unknown keys,
+// network keys, the v1.15 edge key and the v1.18 host file keys. Unknown keys,
 // duplicates, and wrong types return a fixed reason. Values are not
 // included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
@@ -136,7 +137,15 @@ func parseTOML(data []byte) (parsed, string) {
 			}
 			out.edge = v
 		default:
-			return parsed{}, "unknown_key"
+			slot := out.hostFiles.field(key)
+			if slot == nil {
+				return parsed{}, "unknown_key"
+			}
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			*slot = xs
 		}
 	}
 	if out.runAs == nil {
@@ -158,7 +167,7 @@ func knownKey(k string) bool {
 		"shared_networks", "shared_network_projects", "edge":
 		return true
 	default:
-		return false
+		return isHostFileKey(k)
 	}
 }
 
@@ -260,4 +269,33 @@ func parseString(s string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// isHostFileKey reports the eight v1.18 keys.
+func isHostFileKey(key string) bool {
+	return (&hostFileKeys{}).field(key) != nil
+}
+
+// field is the slot for one v1.18 key, nil for any other key.
+func (k *hostFileKeys) field(key string) *[]string {
+	switch key {
+	case "host_files":
+		return &k.files
+	case "host_file_modes":
+		return &k.modes
+	case "host_file_secret":
+		return &k.secret
+	case "host_file_units":
+		return &k.units
+	case "host_file_run_as":
+		return &k.runAs
+	case "host_file_checks":
+		return &k.checks
+	case "host_file_health":
+		return &k.health
+	case "host_file_idle":
+		return &k.idle
+	default:
+		return nil
+	}
 }

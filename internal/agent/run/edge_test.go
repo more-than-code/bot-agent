@@ -211,7 +211,7 @@ func TestHelloEdge(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := `"env_hash":true,"edge":{"enabled":` + map[bool]string{true: "true", false: "false"}[on] + `,"image":"` + edge.Image + `"}}`
+		want := `"env_hash":true,"edge":{"enabled":` + map[bool]string{true: "true", false: "false"}[on] + `,"image":"` + edge.Image + `"},"host_files":[]}`
 		if !strings.HasSuffix(string(b), want) {
 			t.Fatalf("%s", b)
 		}

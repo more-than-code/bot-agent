@@ -268,7 +268,7 @@ edge = true
 - The edge is a Caddy container, `deploybot-edge`, from an image pinned by digest in the agent release (Caddy 2.11.9 since bot-agent 0.2.11). It runs in the host network and binds ports 80 and 443 itself. Its certificates are in the Docker volume `deploybot-edge-data`, and its generated config is in `/var/lib/bot-agent-runner/edge/` (root only). Caddy's admin API listens only on a unix socket in that directory, never on a TCP port.
 - **Ports 80 and 443** must be free on the host and reachable from the internet, or certificates cannot be issued. A host behind NAT, such as a home Raspberry Pi, cannot use the edge yet. Turning the edge on is refused while anything else holds 80 or 443 (`port_in_use`, naming the holder when it is known), so stop an existing proxy first.
 - The key needs Docker. `install.sh check --runner` prints `edge: on (needs Docker, and ports 80 and 443 free and reachable from the internet)` and checks Docker when the key is on.
-- `edge` is `true` or `false` (the default). Anything else makes the whole file invalid, which turns programs and images off. `bot-agent policy check` prints `edge=true` or `edge=false` as its last line.
+- `edge` is `true` or `false` (the default). Anything else makes the whole file invalid, which turns programs and images off. `bot-agent policy check` prints `edge=true` or `edge=false` after the shared-network lines; the host file lines follow it.
 - Removing the key stops new configs from being applied (`edge_disabled`), but does not stop a running edge. Turn the edge off in the console first; that stops and removes the container and keeps the volume and the config directory.
 - Routes reach an image entry through its published port on `127.0.0.1`, and a program entry on its port. A route to a container port that is not published is refused.
 - The helper does not trust the config it is sent. It accepts only the exact shape Deploybot generates: one server listening on `:443`; routes with host, path and client-IP matchers (plus the Cloudflare `Cf-Connecting-Ip` header check next to a client-IP match); the `subroute`, `encode` (zstd, gzip), `reverse_proxy` and the `Cache-Control: private, no-store` handlers; upstreams on `127.0.0.1` ports 1024–65535 only; the Cloudflare `X-Forwarded-For` rewrite and deletion of the client-IP headers; and TLS policies whose issuer is ACME (with an email) or Caddy's internal CA. Keys must match exactly, repeated keys are refused, and no other `{...}` placeholder is allowed. Anything else fails `bad_spec`, and the journal names the offending part of the config.
@@ -286,6 +286,45 @@ edge = true
 docker volume create deploybot-edge-data
 docker run --rm -v <old-caddy-data>:/from:ro -v deploybot-edge-data:/to alpine cp -a /from/. /to/
 ```
+
+### Host config files
+
+From the release that adds agent-protocol v1.18, root can let the org's owners and admins edit a root-owned config file of a unit Deploybot does not run, such as Defect Drainer's worker policy, from the console. The unit's own command checks each new file before it replaces the old one. The unit is then restarted and confirmed healthy, and the previous file comes back on its own if anything fails. You choose exactly which files, and what checks them, in `runner.toml`:
+
+```toml
+host_files        = ["dd-policy=/etc/dd-worker/policy.toml", "dd-secrets=/etc/dd-worker/secrets.env"]
+host_file_modes   = ["dd-policy:0644", "dd-secrets:0600"]
+host_file_secret  = ["dd-secrets"]
+host_file_units   = ["dd-policy:dd-worker.service", "dd-secrets:dd-worker.service"]
+host_file_run_as  = ["dd-policy:dd-worker", "dd-secrets:dd-worker"]
+host_file_checks  = ["dd-policy:/usr/local/bin/dd-worker policy check --file -", "dd-secrets:/usr/local/bin/dd-worker secrets check --file -"]
+host_file_health  = ["dd-policy:/usr/local/bin/dd-worker health --wait 30s", "dd-secrets:/usr/local/bin/dd-worker health --wait 30s"]
+host_file_idle    = ["dd-policy:/usr/local/bin/dd-worker health --idle", "dd-secrets:/usr/local/bin/dd-worker health --idle"]
+```
+
+- Each key is one line. `host_files` names each file and its path; the other keys are `"<name>:<value>"`, and `host_file_secret` lists names. Modes, units, `run_as` and checks are required for every file; health, idle and secret are optional. At most 8 files.
+- **Path:** exactly `/etc/<dir>/<file>`. Both parts start with a letter, digit or `_` (no dotfiles). These directories are refused: `bot-agent`, `systemd`, `ssh`, `sudoers.d`, `pam.d`, `security`, `cron.d` and every `cron.*`, `polkit-1`, `apt`, `docker`, `caddy`, `postgresql`, `tmpfiles.d`, `sysusers.d`, `sysctl.d`, `modprobe.d`, `profile.d`, `ld.so.conf.d`, `logrotate.d`, `update-motd.d`, `udev`, `init.d`, `apparmor.d`, `dpkg`, `rsyslog.d` and `default`.
+- **The file must already exist,** owned by root (group root, or for `0640` the `run_as` account's group), with exactly the listed mode and one link. The directory and `/etc` must be root-owned and not group- or world-writable. Deploybot never creates a host file and never fixes a wrong owner or mode; it refuses the apply.
+- **Mode:** `0600`, `0640` or `0644`. A `host_file_secret` file must be `0600` or `0640`.
+- **Unit:** a `.service` name that starts with a letter or digit and is not Deploybot's own (`deploybot-*`, `bot-agent*`) or a system service (`ssh*`, `systemd-*`, `dbus*`, `docker*`, `containerd*`, `caddy*`, `postgresql*`, `networking*`, `NetworkManager*`, `tailscaled*`, `cron*`, `rsyslog*`, `polkit*`, `user@*`, `getty*`).
+- **run_as:** an account with uid and gid 1000 or above, never root. The check, idle and health commands run as that account in a short-lived systemd unit (`deploybot-hostfile-check-<name>-…`). That unit has no network, no devices, no core dumps, `/home` hidden, a private `/tmp` and a read-only filesystem; it cannot see the Docker, containerd or Podman sockets; and it has 256 MiB of memory and 64 tasks. The check reads the new file on stdin.
+- **Commands:** an absolute executable followed by at most 16 arguments, split on single spaces; no shell and no quotes. A health `--wait` may be at most 165 s.
+- **Executables must exist and stay root-owned.** The executable may be a symlink (for example to a versioned binary), but the link, its target and every directory on the way to both must be root-owned and not group- or world-writable. This is checked at the start of every apply and again right before each command. When it fails, `policy check` ends that file's line with `exec=unsafe` and applies of that file are refused (`forbidden_spec`, stage `exec`) until it is fixed. The rest of the policy (programs, images, the edge, other host files) keeps working.
+- **Check:** exit 0 means valid; exit 2 with one `bad_<reason>` line on stderr is shown to the admin as that reason; anything else is `check_error`. **Health:** exit 0 once the restarted unit is healthy, within the settle window. The window starts when the restart returns; it is 60 s by default, 30 to 180 s, and at least the health command's `--wait` plus 15 s. Without a health command, the unit must stay active, without restarting, for the whole window. **Idle:** exit 4 while the unit is busy; the console then offers "Apply anyway", which skips it.
+- Applies of files that share a unit run one at a time.
+- A `host_file_secret` file never shows its bytes or its hash in Deploybot; only whether the host still has the applied version.
+- The helper keeps the previous file in `/var/lib/bot-agent-runner/host-files/<name>.prev` (root only). To restore it by hand: `sudo install -m <mode> -o root -g root /var/lib/bot-agent-runner/host-files/<name>.prev <path>`, then restart the unit.
+- A syntax mistake in any of these lines makes the whole file invalid (`invalid: parse`), which turns programs and images off too. Run `bot-agent policy check` (or `install.sh check --runner`) before you save the file. It prints `host_files=<n>` and one `host_file <name> <path> <mode> <unit> <run_as> secret=<bool> health=<bool>` line per file, with ` exec=unsafe` at the end when an executable fails the check above.
+
+**Helper write access.** The helper unit can write only a few directories. After you add, change or remove `host_files`, run:
+
+```bash
+sudo ./install.sh upgrade --runner
+```
+
+It writes `/etc/systemd/system/bot-agent-runner@.service.d/host-files.conf`, with one `ReadWritePaths=-/etc/<dir>` line per directory (or removes it when there are no host files), and reloads systemd, even when the agent version is unchanged. If a run fails part way, or the file was edited by hand, run the same command again: it rewrites the drop-in. `install.sh check --runner` reports whether the drop-in is in sync. A symlinked `bot-agent-runner@.service.d` directory is refused.
+
+**Order of upgrades.** Upgrade the server first (api-v1 v1.44), then the agent with `install.sh upgrade --runner`. Then add the keys, run `install.sh upgrade --runner` again to write the drop-in, and restart the agent: `sudo systemctl restart bot-agent`. An older agent rejects the keys as `unknown_key`, which turns programs and images off. To go back to an older agent, remove the keys first and run `install.sh upgrade --runner` to remove the drop-in.
 
 ### Program secrets
 

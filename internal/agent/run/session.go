@@ -10,6 +10,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/more-than-code/bot-agent/internal/agent/conn"
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
@@ -172,6 +173,10 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	if err := a.sendAuto(sess, w, a.autoSent); err != nil {
 		return err
 	}
+	// v1.18 item 5: host_files_status at hello.
+	if err := a.sendHostFiles(sess, w); err != nil {
+		return err
+	}
 	return a.loop(sess, w, events, errCh)
 }
 
@@ -205,9 +210,17 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 	nextProc := now
 	nextDisc := now.Add(a.opt.DiscoverEvery)
 	nextPing := now.Add(a.pingEvery)
+	// The host_files_status timer exists only when the policy has host
+	// files, so the loop's wake-ups are otherwise what they were before v1.18.
+	hostFilesOn := a.policy.Valid && len(a.policy.HostFiles) > 0
+	nextHostFiles := now.Add(a.hostFilesEvery())
 	var health []protocol.Sample
 	for {
-		wait := earliest(a.opt.Now(), nextHost, nextProc, nextDisc, nextPing)
+		timers := []time.Time{nextHost, nextProc, nextDisc, nextPing}
+		if hostFilesOn {
+			timers = append(timers, nextHostFiles)
+		}
+		wait := earliest(a.opt.Now(), timers...)
 		tick, stop := a.arm(wait)
 		select {
 		case <-ctx.Done():
@@ -239,6 +252,13 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 			if err := a.sendAuto(ctx, w, a.autoSent); err != nil {
 				return err
 			}
+		case <-a.hostFilesWake.wake():
+			stop()
+			// After an apply: the frame now, and the 10-minute clock again.
+			if err := a.sendHostFiles(ctx, w); err != nil {
+				return err
+			}
+			nextHostFiles = a.opt.Now().Add(a.hostFilesEvery())
 		case s := <-a.healthCh:
 			stop()
 			if len(health) < 1000 {
@@ -264,6 +284,12 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 					return conn.ErrReconnect
 				}
 			}
+			if hostFilesOn && !now.Before(nextHostFiles) {
+				if err := a.sendHostFiles(ctx, w); err != nil {
+					return err
+				}
+				nextHostFiles = now.Add(a.hostFilesEvery())
+			}
 			hostDue := !now.Before(nextHost)
 			procDue := !now.Before(nextProc)
 			if hostDue || procDue {
@@ -279,6 +305,15 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 			}
 		}
 	}
+}
+
+// hostFilesEvery is the host_files_status period. Options.HostFilesEvery
+// shortens it in tests.
+func (a *agent) hostFilesEvery() time.Duration {
+	if a.opt.HostFilesEvery > 0 {
+		return a.opt.HostFilesEvery
+	}
+	return hostfiles.StatusEvery
 }
 
 func (a *agent) arm(d time.Duration) (<-chan time.Time, func()) {

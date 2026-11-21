@@ -72,6 +72,9 @@ type Policy struct {
 	Dropped        []Drop
 	// Edge is the v1.15 edge key. It is false on an invalid policy.
 	Edge bool
+	// HostFiles is the v1.18 list in file order. It is empty, not nil, on
+	// a valid policy without the keys and nil on an invalid one.
+	HostFiles []HostFile
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -138,6 +141,9 @@ type Files struct {
 	Group     string
 	UID       func(os.FileInfo) (uint32, bool)
 	SkipOwner bool
+	// Exec is the filesystem the v1.18 executable check reads. Nil is the
+	// host's. Only tests set it.
+	Exec ExecFS
 }
 
 // Check parses path with the same rules as Load, including run_as against
@@ -214,8 +220,14 @@ func Load(f Files) Policy {
 		return out
 	}
 	users := readAccounts(passwd, group)
+	hostFiles, reason := validateHostFiles(parsed.hostFiles, users, f.Exec)
+	if reason != "" {
+		out.Reason = reason
+		return out
+	}
 	kept, dropped := filterRunAs(parsed.runAs, users)
 	out.Valid = true
+	out.HostFiles = hostFiles
 	out.Enabled = parsed.enabled
 	out.AllowShell = parsed.allowShell
 	out.MaxPrograms = parsed.maxPrograms

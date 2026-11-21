@@ -1,0 +1,15 @@
+valid
+enabled=false
+programs=false
+images=false
+projects=0
+max_containers=20
+allow_public_ports=false
+image_patterns=0
+projects_overlap=false
+shared_networks=0
+edge=false
+host_files=3
+host_file dd-policy /etc/dd-worker/policy.toml 0644 dd-worker.service dd-worker secret=false health=true
+host_file dd-secrets /etc/dd-worker/secrets.env 0600 dd-worker.service dd-worker secret=true health=true
+host_file app /etc/app/app.conf 0640 app.service dd-worker secret=false health=false exec=unsafe

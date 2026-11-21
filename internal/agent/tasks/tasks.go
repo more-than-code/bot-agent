@@ -11,6 +11,7 @@ import (
 
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/probe"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -66,6 +67,20 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 			return "bad_spec", ProbeSpec{}
 		}
 		return parseEdge(task), ProbeSpec{}
+	}
+	// v1.18: an agent whose hello has no host_files refuses the kind, so
+	// the server gates on the hello. The name is checked by the helper.
+	if task.Kind == hostfiles.Kind {
+		if len(gate.Policy.HostFiles) == 0 {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, _, err := hostfiles.ParseApply(task.Spec); err != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
 	}
 	if task.Kind != "host_snapshot" && task.Kind != "probe_health" {
 		return "forbidden", ProbeSpec{}

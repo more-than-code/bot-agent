@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/tasks"
@@ -150,6 +151,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 	}
 	if edge.IsKind(task.Kind) {
 		return protocol.TaskReject{}, a.runEdge(ctx, task), true
+	}
+	if task.Kind == hostfiles.Kind {
+		return protocol.TaskReject{}, a.runHostFile(ctx, task), true
 	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true

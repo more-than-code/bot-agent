@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -57,10 +58,14 @@ func FixedReason(reason string) string {
 }
 
 // FrameLimit is the request-body cap for one verb.
-// Image and edge verbs are 2 MiB. Every other verb stays at MaxFrame.
+// Image and edge verbs are 2 MiB; the v1.18 host file verbs 160 KiB.
+// Every other verb stays at MaxFrame.
 func FrameLimit(verb string) int {
 	if images.IsVerb(verb) || edge.IsVerb(verb) {
 		return images.MaxFrame
+	}
+	if verb == hostfiles.VerbApply || verb == hostfiles.VerbStatus {
+		return hostfiles.MaxFrame
 	}
 	return MaxFrame
 }
@@ -81,7 +86,8 @@ const VerbDockerCheck = "docker_check"
 // Image verbs live in the images package so the two lists cannot drift.
 func KnownVerb(verb string) bool {
 	switch verb {
-	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck:
+	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck,
+		hostfiles.VerbApply, hostfiles.VerbStatus:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)

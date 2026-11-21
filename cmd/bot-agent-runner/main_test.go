@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
@@ -540,5 +541,38 @@ func TestDockerCheckCLI(t *testing.T) {
 	}
 	if got := out.String(); got != `{"present":false,"api":"","ok":false,"networks_ok":false,"reason":"absent"}`+"\n" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// v1.18: the host file verbs pass the envelope check.
+func TestEnvelopeHostFileVerbs(t *testing.T) {
+	for _, verb := range []string{"host_file_apply", "host_file_status"} {
+		got, req, reason := parseEnvelope([]byte(`{"verb":"` + verb + `","request":{}}`))
+		if reason != "" || got != verb || string(req) != "{}" {
+			t.Fatalf("%s: %q %s %q", verb, got, req, reason)
+		}
+	}
+}
+
+// T6: a 64 KiB host file apply fits the socket framing and reaches the
+// host file handler (this policy has no host files, so the answer is
+// forbidden_spec stage lookup); a body over the 160 KiB verb cap is bad_spec.
+func TestServeConnHostFileFrame(t *testing.T) {
+	sys, _ := enabledSys(t)
+	peer := func() (int, bool) { return 900, true }
+	content := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("k"), 64*1024))
+	line := `{"verb":"host_file_apply","request":{"name":"dd-policy","content_b64":"` + content + `"}}` + "\n"
+	var out bytes.Buffer
+	if code := serveConn(strings.NewReader(line), &out, sys, peer); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out.String(), `"outcome":"forbidden_spec"`) || !strings.Contains(out.String(), `"stage":"lookup"`) {
+		t.Fatalf("%s", out.String())
+	}
+	big := `{"verb":"host_file_apply","request":{"name":"dd-policy","content_b64":"` + strings.Repeat("A", 170*1024) + `"}}` + "\n"
+	out.Reset()
+	_ = serveConn(strings.NewReader(big), &out, sys, peer)
+	if !strings.Contains(out.String(), `"reason":"bad_spec"`) {
+		t.Fatalf("%s", out.String())
 	}
 }

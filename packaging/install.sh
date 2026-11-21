@@ -813,6 +813,170 @@ Environment=BOT_AGENT_INSECURE_DEV=1
 EOF
 }
 
+# Host config files (agent-protocol v1.18). The helper unit has
+# ProtectSystem=strict; this drop-in lets it write only the /etc/<dir>
+# directories that runner.toml's host_files name. It is written from the
+# policy on the host, never from the server, and removed when the policy
+# has no host files.
+HOSTFILES_DROPIN=/etc/systemd/system/bot-agent-runner@.service.d/host-files.conf
+HOSTFILES_DROPIN_DIR=/etc/systemd/system/bot-agent-runner@.service.d
+
+# hostfiles_dirs prints each distinct directory of the host_file lines of a
+# policy check output, in file order.
+hostfiles_dirs() {
+  printf '%s\n' "$1" | awk '
+    $1 == "host_file" && NF >= 3 {
+      p = $3
+      sub(/\/[^\/]*$/, "", p)
+      if (p ~ /^\/etc\/[A-Za-z0-9_][A-Za-z0-9._-]*$/ && !(p in seen)) {
+        seen[p] = 1
+        print p
+      }
+    }'
+}
+
+hostfiles_count() {
+  printf '%s\n' "$1" | awk -F= '$1=="host_files"{print $2; exit}'
+}
+
+# write_hostfiles_dropin FILE DIRS writes the drop-in for DIRS (one per line).
+write_hostfiles_dropin() {
+  {
+    printf '%s\n' "# Written by install.sh from host_files in /etc/bot-agent/runner.toml (agent-protocol v1.18)."
+    printf '%s\n' "# Rerun install.sh upgrade --runner after changing host_files."
+    printf '%s\n' "[Service]"
+    printf '%s\n' "$2" | while IFS= read -r _hd; do
+      [ -n "$_hd" ] || continue
+      printf 'ReadWritePaths=-%s\n' "$_hd"
+    done
+  } > "$1"
+}
+
+# hostfiles_dropin_state prints none, in_sync, missing, differs or stale
+# for a policy check output: what the drop-in on the host is compared with
+# the one that output asks for.
+hostfiles_dropin_state() {
+  _hs_dirs=$(hostfiles_dirs "$1")
+  _hs_dest=$(hostpath "$HOSTFILES_DROPIN")
+  if [ -z "$_hs_dirs" ]; then
+    if [ -e "$_hs_dest" ] || [ -h "$_hs_dest" ]; then
+      printf '%s\n' stale
+    else
+      printf '%s\n' none
+    fi
+    return 0
+  fi
+  if [ ! -f "$_hs_dest" ] || [ -h "$_hs_dest" ]; then
+    printf '%s\n' missing
+    return 0
+  fi
+  _hs_tmp=$(mktemp) || return 1
+  write_hostfiles_dropin "$_hs_tmp" "$_hs_dirs"
+  if cmp -s "$_hs_tmp" "$_hs_dest"; then
+    printf '%s\n' in_sync
+  else
+    printf '%s\n' differs
+  fi
+  rm -f "$_hs_tmp"
+}
+
+# report_hostfiles is the check line for the host files of the last
+# policy check. It does not fail the check.
+report_hostfiles() {
+  if [ "$WANT_RUNNER" != "1" ]; then
+    return 0
+  fi
+  _rh_n=$(hostfiles_count "$LAST_POLICY_CHECK")
+  [ -n "$_rh_n" ] || _rh_n=0
+  _rh_state=$(hostfiles_dropin_state "$LAST_POLICY_CHECK") || _rh_state=unknown
+  case "$_rh_state" in
+    none) say "host files: 0" ;;
+    in_sync) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: in sync" ;;
+    missing) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: missing (run install.sh upgrade --runner)" ;;
+    differs) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: differs (run install.sh upgrade --runner)" ;;
+    stale) say "host files: 0; drop-in ${HOSTFILES_DROPIN}: present but not needed (run install.sh upgrade --runner)" ;;
+    *) say "host files: ${_rh_n}; drop-in: unknown" ;;
+  esac
+  printf '%s\n' "$(hostfiles_dirs "$LAST_POLICY_CHECK")" | while IFS= read -r _rh_d; do
+    [ -n "$_rh_d" ] || continue
+    say "host files: helper may write ${_rh_d}"
+  done
+}
+
+# sync_hostfiles_dropin writes, keeps or removes the drop-in to match the
+# installed policy (or the staged --runner-config before it is installed),
+# then daemon-reload when it changed. Only with the runner.
+sync_hostfiles_dropin() {
+  if [ "$WANT_RUNNER" != "1" ]; then
+    return 0
+  fi
+  _sh_pc=
+  if [ -f "$POLICY_DEST" ] && [ ! -h "$POLICY_DEST" ]; then
+    _sh_pc=$(policy_check "$POLICY_DEST") || fail "policy check failed for ${POLICY_HOST}"
+  elif [ -n "$RUNNER_CONFIG" ]; then
+    _sh_pc=$(policy_check "$RUNNER_CONFIG") || fail "policy check failed for ${RUNNER_CONFIG_LABEL}"
+  fi
+  _sh_dirs=$(hostfiles_dirs "$_sh_pc")
+  _sh_dest=$(hostpath "$HOSTFILES_DROPIN")
+  _sh_dd=$(hostpath "$HOSTFILES_DROPIN_DIR")
+  refuse_dir_symlink "$_sh_dd" "$HOSTFILES_DROPIN_DIR" || fail "refusing symlink ${HOSTFILES_DROPIN_DIR}"
+  if [ -h "$_sh_dest" ]; then
+    fail "refusing symlink ${HOSTFILES_DROPIN}"
+  fi
+  if [ -z "$_sh_dirs" ]; then
+    if [ ! -e "$_sh_dest" ]; then
+      return 0
+    fi
+    if [ "$DRY" = "1" ]; then
+      say "dry-run: delete ${HOSTFILES_DROPIN}"
+      say "dry-run: systemctl daemon-reload"
+      return 0
+    fi
+    rm -f "$_sh_dest" || fail "cannot delete ${HOSTFILES_DROPIN}"
+    rmdir "$_sh_dd" 2>/dev/null || true
+    say "deleted: ${HOSTFILES_DROPIN}"
+    systemctl daemon-reload || fail "daemon-reload failed"
+    say "daemon-reload"
+    return 0
+  fi
+  _sh_tmp=$(mktemp) || fail "mktemp failed"
+  write_hostfiles_dropin "$_sh_tmp" "$_sh_dirs"
+  if [ -f "$_sh_dest" ] && cmp -s "$_sh_tmp" "$_sh_dest"; then
+    rm -f "$_sh_tmp"
+    say "unchanged: ${HOSTFILES_DROPIN}"
+    return 0
+  fi
+  if [ "$DRY" = "1" ]; then
+    rm -f "$_sh_tmp"
+    say "dry-run: write ${HOSTFILES_DROPIN} mode 0644 owner root:root"
+    printf '%s\n' "$_sh_dirs" | while IFS= read -r _sh_d; do
+      say "dry-run: ReadWritePaths=-${_sh_d}"
+    done
+    say "dry-run: systemctl daemon-reload"
+    return 0
+  fi
+  if ! ensure_owned_dir "$_sh_dd" "$HOSTFILES_DROPIN_DIR" 0755 root:root; then
+    rm -f "$_sh_tmp"
+    fail "cannot create ${HOSTFILES_DROPIN_DIR}"
+  fi
+  if ! atomic_start "$_sh_dest" "$HOSTFILES_DROPIN"; then
+    rm -f "$_sh_tmp"
+    fail "cannot stage ${HOSTFILES_DROPIN}"
+  fi
+  if ! cp "$_sh_tmp" "$ATOMIC_TMP"; then
+    rm -f "$_sh_tmp" "$ATOMIC_TMP"
+    fail "copy failed ${HOSTFILES_DROPIN}"
+  fi
+  rm -f "$_sh_tmp"
+  atomic_finish 0644 root:root || fail "rename failed ${HOSTFILES_DROPIN}"
+  say "wrote: ${HOSTFILES_DROPIN}"
+  printf '%s\n' "$_sh_dirs" | while IFS= read -r _sh_d; do
+    say "host files: helper may write ${_sh_d}"
+  done
+  systemctl daemon-reload || fail "daemon-reload failed"
+  say "daemon-reload"
+}
+
 # policy_check prints the bot-agent policy check output.
 # Returns 0 when the first line is valid.
 policy_check() {
@@ -1086,6 +1250,7 @@ do_check() {
   else
     say "policy: not checked"
   fi
+  report_hostfiles
   if [ -f "$ENV_DEST" ]; then
     say "kept: ${ENV_HOST}"
   fi
@@ -1624,6 +1789,7 @@ EOF
     if [ "$GEN_POLICY" = "1" ]; then
       say "kept: ${POLICY_HOST}"
     fi
+    sync_hostfiles_dropin
     say "already installed, nothing changed"
     say_next_enroll
     say "summary: already installed ${VER}"
@@ -1637,6 +1803,7 @@ EOF
     if [ "$WANT_RUNNER" = "1" ]; then
       say "dry-run: systemd-tmpfiles --create /etc/tmpfiles.d/bot-agent-runner.conf"
     fi
+    sync_hostfiles_dropin
     say "summary: dry-run install ${VER}"
     exit 0
   fi
@@ -1651,6 +1818,7 @@ EOF
     systemd-tmpfiles --create "$(hostpath /etc/tmpfiles.d/bot-agent-runner.conf)" || fail "tmpfiles failed"
     say "tmpfiles: applied"
   fi
+  sync_hostfiles_dropin
   say "units: disabled"
   say_next_enroll
   say "summary: installed ${VER}"
@@ -2103,6 +2271,7 @@ do_upgrade() {
   fi
   refuse_managed_symlinks
   if [ -n "$installed_ver" ] && [ "$installed_ver" = "$VER" ] && [ "$FORCE" != "1" ]; then
+    sync_hostfiles_dropin
     say "already at ${VER}, nothing changed"
     say "summary: already at ${VER}"
     exit 0
@@ -2130,6 +2299,7 @@ EOF
     say "dry-run: systemctl daemon-reload"
     sync_runner_socket upgrade
     say_restart_plan
+    sync_hostfiles_dropin
     say "summary: dry-run upgrade ${installed_ver} -> ${VER}"
     exit 0
   fi
@@ -2175,6 +2345,7 @@ EOF
     rollback_unverified "verify failed, rolling back"
   fi
   ROLLBACK_ARMED=0
+  sync_hostfiles_dropin
   say "summary: upgraded ${installed_ver} -> ${VER}"
 }
 
@@ -2417,7 +2588,8 @@ delete_managed_files() {
     /etc/systemd/system/bot-agent-runner.socket \
     /etc/systemd/system/bot-agent-runner@.service \
     /etc/tmpfiles.d/bot-agent-runner.conf \
-    /etc/systemd/system/bot-agent.service.d/insecure-dev.conf
+    /etc/systemd/system/bot-agent.service.d/insecure-dev.conf \
+    "$HOSTFILES_DROPIN"
   do
     _dest=$(hostpath "$_path")
     if [ -f "$_dest" ] || [ -f "$_dest.prev" ]; then
@@ -2435,14 +2607,16 @@ delete_managed_files() {
       fi
     fi
   done
-  _dd=$(hostpath /etc/systemd/system/bot-agent.service.d)
-  if [ -d "$_dd" ]; then
-    if [ "$DRY" = "1" ]; then
-      say "dry-run: rmdir /etc/systemd/system/bot-agent.service.d"
-    else
-      rmdir "$_dd" 2>/dev/null || true
+  for _dd_host in /etc/systemd/system/bot-agent.service.d "$HOSTFILES_DROPIN_DIR"; do
+    _dd=$(hostpath "$_dd_host")
+    if [ -d "$_dd" ] && [ ! -h "$_dd" ]; then
+      if [ "$DRY" = "1" ]; then
+        say "dry-run: rmdir ${_dd_host}"
+      else
+        rmdir "$_dd" 2>/dev/null || true
+      fi
     fi
-  fi
+  done
 }
 
 purge_one() {

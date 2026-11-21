@@ -72,6 +72,14 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	}
 	p.EnvHash = true
 	p.Edge = &protocol.EdgeHello{Enabled: edgeOn(a.policy), Image: edge.Image}
+	p.HostFiles = []protocol.HostFileHello{}
+	if a.policy.Valid {
+		for _, f := range a.policy.HostFiles {
+			p.HostFiles = append(p.HostFiles, protocol.HostFileHello{
+				Name: f.Name, Path: f.Path, Secret: f.Secret, Unit: f.Unit, Health: len(f.Health) > 0,
+			})
+		}
+	}
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

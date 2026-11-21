@@ -200,6 +200,10 @@ func makeBundle(t *testing.T, version string) string {
 	agent := "#!/bin/sh\nset -eu\ncmd=${1:-}\n" +
 		"if [ \"$cmd\" = \"version\" ] || [ \"$cmd\" = \"--version\" ] || [ \"$cmd\" = \"-version\" ]; then\n" +
 		"  printf '%s\\n' \"" + version + "\"\n  exit 0\nfi\n" +
+		// v1.18 tests stand in a policy check output: the host's passwd has
+		// no run_as account the suite can rely on.
+		"if [ \"$cmd\" = \"policy\" ] && [ -f \"${BOT_AGENT_STUB_DIR:-}/policy-check\" ]; then\n" +
+		"  cat \"$BOT_AGENT_STUB_DIR/policy-check\"\n  exit 0\nfi\n" +
 		"if [ \"$cmd\" = \"policy\" ] || [ \"$cmd\" = \"init\" ]; then\n" +
 		"  exec " + shSingle(t, realAgent) + " \"$@\"\nfi\n" +
 		"printf '%s\\n' \"unexpected\" >&2\nexit 1\n"

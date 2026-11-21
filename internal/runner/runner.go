@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -51,7 +52,8 @@ type Sys struct {
 	// /var/lib/bot-agent-runner/files when euid is 0, and skips the store
 	// otherwise. Never read from a request or runner.toml.
 	fileStore string
-	// fileOwner, when set, is the uid/gid the store check expects.
+	// fileOwner, when set, is the uid/gid the store check expects, and the
+	// owner of /etc, a host-file directory and a host file (v1.18).
 	// Nil means 0:0. Tests that cannot chown to root set the current ids.
 	fileOwner *fileIDs
 	// fileCheck, when set, is the uid/gid a file in a slot must have.
@@ -63,12 +65,27 @@ type Sys struct {
 	// /var/lib/bot-agent-runner/edge when euid is 0; edge.apply and
 	// edge.status refuse otherwise. Never read from a request.
 	edgeStore string
+	// RunUnit runs /usr/bin/systemd-run with args (v1.18 host files):
+	// stdin nil is /dev/null. It returns the exit status and at most
+	// MaxStderr+1 bytes of stderr; err is set when there is no exit status.
+	RunUnit func(ctx context.Context, args []string, stdin *os.File) (int, []byte, error)
+	// hostFault, when set, fails a named host-file step ("dir_fsync",
+	// "rollback_write", "rollback_swap"). Only tests set it.
+	hostFault func(step string) error
+	// execFS is the filesystem the executable check reads. Nil is the
+	// host's. sleep and now replace the settle wait and the clock in tests.
+	execFS policy.ExecFS
+	sleep  func(context.Context, time.Duration)
+	now    func() time.Time
 }
 
 // Handle runs one verb. in is the raw JSON object from stdin.
 // The result is one JSON object and never contains env values.
 func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	sys.logVerb = verb
+	if verb == hostfiles.VerbApply || verb == hostfiles.VerbStatus {
+		return handleHostFile(ctx, verb, in, sys)
+	}
 	if edge.IsVerb(verb) {
 		return handleEdge(ctx, verb, in, sys)
 	}

@@ -60,12 +60,17 @@ type Options struct {
 	GroupPath  string
 	HelperPath string
 	PolicyUID  func(os.FileInfo) (uint32, bool)
+	// PolicyExec is the filesystem the v1.18 executable check reads. Nil
+	// is the host's; only tests set it.
+	PolicyExec policy.ExecFS
 	Helper     Helper
 	// MachineID is the file whose contents feed the container host label.
 	// Empty means /etc/machine-id. Tests set a fixture path.
 	MachineID string
 	// SuperviseEvery is the health supervisor poll. Zero means 15s.
 	SuperviseEvery time.Duration
+	// HostFilesEvery is the host_files_status period. Zero means 10 minutes.
+	HostFilesEvery time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -132,6 +137,7 @@ func Run(ctx context.Context, opt Options) error {
 	}
 	pol := policy.Load(policy.Files{
 		Policy: opt.PolicyPath, Passwd: opt.Passwd, Group: opt.GroupPath, UID: opt.PolicyUID,
+		Exec: opt.PolicyExec,
 	})
 	if pol.Exists && !pol.Valid {
 		opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
@@ -280,6 +286,9 @@ type agent struct {
 	// autoSent is the auto_action ids sent on the current connection.
 	// Only the session goroutine touches it.
 	autoSent map[string]bool
+	// hostFilesWake is signalled after each host_file_apply so the session
+	// sends host_files_status (agent-protocol v1.18 item 5).
+	hostFilesWake wakeSignal
 }
 
 type writer struct {

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"time"
+
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
 const (
@@ -127,6 +129,26 @@ type Programs struct {
 	// Edge is the v1.15 edge summary, sent whenever the programs object
 	// is sent. Older agents omit it; the server reads that as disabled.
 	Edge *EdgeHello `json:"edge"`
+	// HostFiles is the v1.18 list from a valid policy, in file order, never
+	// null. No content and no command lines.
+	HostFiles []HostFileHello `json:"host_files"`
+}
+
+// HostFileHello is one hello.programs.host_files item (agent-protocol
+// v1.18 item 3).
+type HostFileHello struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Secret bool   `json:"secret"`
+	Unit   string `json:"unit"`
+	Health bool   `json:"health"`
+}
+
+// HostFilesStatus is the v1.18 host_files_status frame (item 5).
+type HostFilesStatus struct {
+	V     int                    `json:"v"`
+	Type  string                 `json:"type"`
+	Files []hostfiles.FileStatus `json:"files"`
 }
 
 // EdgeHello is hello.programs.edge (agent-protocol v1.15 item 2). Enabled

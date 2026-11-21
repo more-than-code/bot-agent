@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
 var (
@@ -74,6 +76,20 @@ func ValidateAgent(raw []byte) error {
 		return nil
 	case "task_result":
 		return checkTaskResult(raw)
+	case hostfiles.FrameStatus:
+		var f HostFilesStatus
+		if err := dec.Decode(&f); err != nil {
+			return err
+		}
+		if !hostfiles.ValidStatus(hostfiles.StatusResult{Files: f.Files}) {
+			return fmt.Errorf("host_files_status")
+		}
+		for _, x := range f.Files {
+			if x.SHA256 != "" && x.Size == nil {
+				return fmt.Errorf("host_files_status size")
+			}
+		}
+		return nil
 	case "auto_action":
 		var f AutoAction
 		if err := dec.Decode(&f); err != nil {
@@ -161,8 +177,28 @@ func checkHello(f Hello) error {
 		if e := f.Programs.Edge; e != nil && !edgeImageRE.MatchString(e.Image) {
 			return fmt.Errorf("edge image")
 		}
+		if err := checkHostFiles(f.Programs.HostFiles); err != nil {
+			return err
+		}
 	}
 	return checkDiscovered(f.Services)
+}
+
+// checkHostFiles bounds the v1.18 list. A nil list is allowed so an older
+// shape still validates; the daemon always sends [].
+func checkHostFiles(list []HostFileHello) error {
+	if len(list) > hostfiles.MaxFiles {
+		return fmt.Errorf("host_files")
+	}
+	for _, f := range list {
+		if !hostfiles.ValidName(f.Name) || !hostfiles.ValidUnit(f.Unit) {
+			return fmt.Errorf("host_files")
+		}
+		if _, _, ok := hostfiles.ValidPath(f.Path); !ok {
+			return fmt.Errorf("host_files path")
+		}
+	}
+	return nil
 }
 
 // checkSharedNetworks bounds the v1.13 list. A nil list is allowed so an
