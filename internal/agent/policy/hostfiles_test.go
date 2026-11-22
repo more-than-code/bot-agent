@@ -79,6 +79,13 @@ host_file_idle    = ["dd-policy:/usr/local/bin/dd-worker health --idle", "dd-sec
 
 func loadHostPolicy(t *testing.T, body string, fsys ExecFS) Policy {
 	t.Helper()
+	return loadHostPolicyAccounts(t, body, fsys,
+		"root:x:0:0:root:/root:/bin/sh\ndaemon:x:1:1::/:/bin/false\ndd-worker:x:1500:1500::/var/lib/dd-worker:/usr/sbin/nologin\nlowgid:x:1600:99::/:/bin/false\n",
+		"root:x:0:\nusers:x:100:\ndd-worker:x:1500:\n")
+}
+
+func loadHostPolicyAccounts(t *testing.T, body string, fsys ExecFS, passwdBody, groupBody string) Policy {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "runner.toml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -86,13 +93,70 @@ func loadHostPolicy(t *testing.T, body string, fsys ExecFS) Policy {
 	}
 	passwd := filepath.Join(dir, "passwd")
 	group := filepath.Join(dir, "group")
-	if err := os.WriteFile(passwd, []byte("root:x:0:0:root:/root:/bin/sh\ndaemon:x:1:1::/:/bin/false\ndd-worker:x:1500:1500::/var/lib/dd-worker:/usr/sbin/nologin\nlowgid:x:1600:100::/:/bin/false\n"), 0o644); err != nil {
+	if err := os.WriteFile(passwd, []byte(passwdBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(group, []byte("root:x:0:\nusers:x:100:\ndd-worker:x:1500:\n"), 0o644); err != nil {
+	if err := os.WriteFile(group, []byte(groupBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return Load(Files{Policy: path, Passwd: passwd, Group: group, SkipOwner: true, Exec: fsys})
+}
+
+// Spec A8: host_file_run_as accepts a service account (uid and primary gid
+// 100 or above), but never root, group root, nobody, nogroup or bot-agent.
+func TestHostFilesRunAs(t *testing.T) {
+	passwd := "root:x:0:0:root:/root:/bin/sh\n" +
+		"daemon:x:1:1::/:/bin/false\n" +
+		"www-data:x:33:33::/var/www:/bin/false\n" +
+		"dd-worker:x:994:989::/var/lib/dd-worker:/usr/sbin/nologin\n" +
+		"joe:x:1000:1000::/home/joe:/bin/sh\n" +
+		"rootgrp:x:994:0::/:/bin/false\n" +
+		"nobody:x:65534:65534::/nonexistent:/bin/false\n" +
+		"nogrp:x:1700:65534::/:/bin/false\n" +
+		"bot-agent:x:995:990::/var/lib/bot-agent:/bin/false\n" +
+		"uid99:x:99:994::/:/bin/false\n" +
+		"uid100:x:100:994::/:/bin/false\n" +
+		"gid99:x:994:99::/:/bin/false\n" +
+		"gid100:x:994:100::/:/bin/false\n" +
+		"nobodyuid:x:65534:994::/:/bin/false\n" +
+		"nobodygid:x:1700:65534::/:/bin/false\n" +
+		"rootname:x:1800:1800::/:/bin/false\n" +
+		"nogroupname:x:1900:1900::/:/bin/false\n" +
+		"agentuid:x:995:994::/:/bin/false\n" +
+		"agentgid:x:1950:990::/:/bin/false\n"
+	group := "root:x:0:\ndaemon:x:1:\nwww-data:x:33:\ndd-worker:x:989:\njoe:x:1000:\nnogroup:x:65534:\nbot-agent:x:990:\n" +
+		"svc:x:994:\ngid99:x:99:\nusers:x:100:\nnobody:x:65534:\nroot:x:1800:\nnogroup:x:1900:\n"
+	policyFor := func(account string) string {
+		return "host_files = [\"a=/etc/app/a.conf\"]\n" +
+			"host_file_modes = [\"a:0644\"]\n" +
+			"host_file_units = [\"a:app.service\"]\n" +
+			"host_file_run_as = [\"a:" + account + "\"]\n" +
+			"host_file_checks = [\"a:/usr/bin/true\"]\n"
+	}
+	for _, c := range []struct {
+		account  string
+		uid, gid uint32
+	}{{"dd-worker", 994, 989}, {"joe", 1000, 1000}, {"uid100", 100, 994}, {"gid100", 994, 100}} {
+		t.Run("accept "+c.account, func(t *testing.T) {
+			p := loadHostPolicyAccounts(t, policyFor(c.account), ddFS(), passwd, group)
+			if !p.Valid || len(p.HostFiles) != 1 {
+				t.Fatalf("valid=%t reason=%q files=%+v", p.Valid, p.Reason, p.HostFiles)
+			}
+			ra := p.HostFiles[0].RunAs
+			if ra.Name != c.account || ra.UID != c.uid || ra.GID != c.gid {
+				t.Fatalf("run_as %+v", ra)
+			}
+		})
+	}
+	for _, account := range []string{"root", "daemon", "www-data", "rootgrp", "nobody", "nogrp", "bot-agent", "nosuch",
+		"uid99", "gid99", "nobodyuid", "nobodygid", "rootname", "nogroupname", "agentuid", "agentgid"} {
+		t.Run("refuse "+account, func(t *testing.T) {
+			p := loadHostPolicyAccounts(t, policyFor(account), ddFS(), passwd, group)
+			if p.Valid || p.Reason != "parse" || p.HostFiles != nil {
+				t.Fatalf("got valid=%t reason=%q", p.Valid, p.Reason)
+			}
+		})
+	}
 }
 
 func TestHostFilesValidDD(t *testing.T) {

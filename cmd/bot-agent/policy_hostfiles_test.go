@@ -10,17 +10,17 @@ import (
 )
 
 // withAccounts points policy check at a passwd and group holding dd-worker
-// (uid and gid 1500). The executables are /bin/sh, which is root-owned on
-// every host the suite runs on.
+// (uid 994, gid 989: a system account, spec A8). The executables are
+// /bin/sh, which is root-owned on every host the suite runs on.
 func withAccounts(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	passwd := filepath.Join(dir, "passwd")
 	group := filepath.Join(dir, "group")
-	if err := os.WriteFile(passwd, []byte("root:x:0:0::/root:/bin/sh\ndd-worker:x:1500:1500::/:/bin/false\n"), 0o644); err != nil {
+	if err := os.WriteFile(passwd, []byte("root:x:0:0::/root:/bin/sh\ndd-worker:x:994:989::/:/bin/false\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(group, []byte("root:x:0:\ndd-worker:x:1500:\n"), 0o644); err != nil {
+	if err := os.WriteFile(group, []byte("root:x:0:\ndd-worker:x:989:\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	old := checkPolicy

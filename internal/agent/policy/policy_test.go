@@ -67,9 +67,11 @@ func TestRunAsDropsRootLowUIDAndMissing(t *testing.T) {
 	write(passwd, ""+
 		"root:x:0:0:root:/root:/bin/bash\n"+
 		"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"+
+		"dd-worker:x:994:989::/var/lib/dd-worker:/usr/sbin/nologin\n"+
 		"joe:x:1000:1000:Joe:/home/joe:/bin/bash\n")
-	write(group, "root:x:0:\ndaemon:x:1:\njoe:x:1000:\n")
-	body := []byte("enabled = true\nrun_as = [\"root\", \"daemon\", \"ghost\", \"joe\", \"joe\"]\n")
+	write(group, "root:x:0:\ndaemon:x:1:\ndd-worker:x:989:\njoe:x:1000:\n")
+	// dd-worker (994) is fine for host_file_run_as (spec A8) but not for programs.
+	body := []byte("enabled = true\nrun_as = [\"root\", \"daemon\", \"dd-worker\", \"ghost\", \"joe\", \"joe\"]\n")
 	path := filepath.Join(dir, "runner.toml")
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
@@ -85,7 +87,7 @@ func TestRunAsDropsRootLowUIDAndMissing(t *testing.T) {
 	for _, d := range p.Dropped {
 		got[d.Name] = d.Reason
 	}
-	if got["root"] != "root" || got["daemon"] != "uid" || got["ghost"] != "missing" {
+	if got["root"] != "root" || got["daemon"] != "uid" || got["dd-worker"] != "uid" || got["ghost"] != "missing" {
 		t.Fatalf("dropped %+v", p.Dropped)
 	}
 	if _, ok := p.Accounts["joe"]; !ok || p.Accounts["joe"].Home != "/home/joe" || p.Accounts["joe"].Group != "joe" {

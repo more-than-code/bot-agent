@@ -231,8 +231,7 @@ func validateHostFiles(k hostFileKeys, users map[string]Account, fs ExecFS) ([]H
 		return nil, "parse"
 	}
 	if !pairs(k.runAs, func(f *HostFile, v string) bool {
-		kept, _ := filterRunAs([]string{v}, users)
-		if len(kept) != 1 {
+		if !hostFileRunAsOK(v, users) {
 			return false
 		}
 		f.RunAs = users[v]
@@ -279,4 +278,38 @@ func validateHostFiles(k hostFileKeys, users map[string]Account, fs ExecFS) ([]H
 		out[i].ExecSafe = f.CommandsSafe(fs)
 	}
 	return out, ""
+}
+
+const (
+	// hostFileMinID is the uid and primary gid floor for host_file_run_as
+	// (spec A8). It keeps out root and the static system accounts 1-99.
+	hostFileMinID = 100
+	// nobodyID is the uid of nobody and the gid of nogroup.
+	nobodyID = 65534
+	// agentAccount is the agent's own account, which never runs host-file commands.
+	agentAccount = "bot-agent"
+)
+
+// hostFileRunAsOK reports whether name may run a host file's check, idle and
+// health commands (spec A8, agent-protocol v1.18.1). Unlike programs'
+// filterRunAs it accepts a service account such as dd-worker (uid 994): it
+// needs an existing account with uid and primary gid of at least 100, a
+// primary group other than root, and not nobody, nogroup or bot-agent (nor
+// an alias sharing bot-agent's uid or primary gid).
+func hostFileRunAsOK(name string, users map[string]Account) bool {
+	ac, ok := users[name]
+	if !ok || name == agentAccount || name == "nobody" {
+		return false
+	}
+	if agent, ok := users[agentAccount]; ok && (ac.UID == agent.UID || ac.GID == agent.GID) {
+		return false
+	}
+	if ac.UID < hostFileMinID || ac.UID == nobodyID {
+		return false
+	}
+	// A missing group name is the decimal gid, so "0" is caught here too.
+	if ac.GID < hostFileMinID || ac.GID == nobodyID || ac.Group == "root" || ac.Group == "0" || ac.Group == "nogroup" {
+		return false
+	}
+	return true
 }
