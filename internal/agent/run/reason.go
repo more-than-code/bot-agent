@@ -107,3 +107,49 @@ func probeWhy(c protocol.HealthCheck, res probe.Result) string {
 	}
 	return why
 }
+
+// v1.21 item 4 reasons. The key is a validated env key name from the
+// helper, never a value.
+const (
+	whyHostEnvFile  = "host_env_file: the host env file for this entry is missing or fails its checks (root:root, mode 0600, one link, at most 64 KiB, KEY=VALUE lines)"
+	whyHostEnvImage = "host_env_image: the host env file of this entry is bound to other images (host_env_images in runner.toml)"
+	envKeyMaxBytes  = 128
+)
+
+// detailWhy is the reason for a container_deploy refusal with a v1.21
+// detail, or "" when the detail is absent or not one the agent knows.
+func detailWhy(r imageRefusalBody) string {
+	switch {
+	case r.detail == images.DetailHostEnvFile && r.code == programs.ReasonPolicy:
+		return whyHostEnvFile
+	case r.detail == images.DetailHostEnvImage && r.code == programs.ReasonPolicy:
+		return whyHostEnvImage
+	case r.detail == images.DetailEnvConflict && r.code == programs.ReasonBadSpec && validEnvKeyName(r.key):
+		return "env_conflict " + r.key + ": the host env file sets a key that the entry's env also sets or that no container env may set"
+	default:
+		return ""
+	}
+}
+
+// refusalWhy prefers the v1.21 detail sentence over the code's sentence.
+func refusalWhy(code, detail string) string {
+	if detail != "" {
+		return detail
+	}
+	return codeWhy(code)
+}
+
+// validEnvKeyName is the host env key rule ^[A-Za-z_][A-Za-z0-9_]{0,127}$.
+func validEnvKeyName(k string) bool {
+	if k == "" || len(k) > envKeyMaxBytes {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		alpha := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		if !alpha && (i == 0 || c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}

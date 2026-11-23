@@ -32,6 +32,10 @@ func (a *agent) handleTask(ctx context.Context, w *writer, raw []byte) {
 		_ = w.Send(ctx, res)
 		return
 	}
+	if res, ok := a.storedResult(task.TaskID); ok {
+		_ = w.Send(ctx, res)
+		return
+	}
 	// Cheap checks run here, before any goroutine. A task already running or
 	// waiting is left to that goroutine so a second frame cannot reject it.
 	if code, _ := a.classify(task); code != "" {
@@ -56,9 +60,15 @@ func (a *agent) handleTask(ctx context.Context, w *writer, raw []byte) {
 	}
 	a.taskWaiting++
 	a.taskMu.Unlock()
-	go a.runAdmitted(ctx, w, task)
+	if detachedKind(task.Kind) {
+		a.noteStarted(task.TaskID, a.currentConn())
+	}
+	go a.runAdmitted(a.taskBase(ctx, task.Kind), w, task)
 }
 
+// runAdmitted runs one admitted task on ctx: the session's, or Run's for a
+// detached kind (v1.21 item 5), whose result is stored before it is sent on
+// whichever connection is current then.
 func (a *agent) runAdmitted(ctx context.Context, w *writer, task protocol.Task) {
 	defer a.inflight.done(task.TaskID)
 	select {
@@ -82,9 +92,27 @@ func (a *agent) runAdmitted(ctx context.Context, w *writer, task protocol.Task) 
 	if a.opt.OnTaskStart != nil {
 		a.opt.OnTaskStart()
 	}
-	if rej, res, ok := a.execute(ctx, task); !ok {
+	rej, res, ok := a.execute(ctx, task)
+	detached := detachedKind(task.Kind)
+	switch {
+	case detached && a.stopping():
+		// v1.21 item 7: the agent is stopping and the result says only
+		// that the work was cut off. Nothing is stored or sent; the API's
+		// sweep settles the task.
+		a.forgetStarted(task.TaskID)
+		a.opt.Log.Printf("bot-agent: agent stopping; no result for task id=%s", quoteLog(task.TaskID))
+	case !ok && detached:
+		// The reject goes to the connection that is current now.
+		a.forgetStarted(task.TaskID)
+		a.sendCurrent(rej)
+	case !ok:
 		_ = w.Send(ctx, rej)
-	} else {
+	case detached:
+		// late is worked out before keepDetached may drop the record.
+		out := a.withLate(res)
+		a.keepDetached(res)
+		a.sendCurrent(out)
+	default:
 		a.storeResult(res)
 		_ = w.Send(ctx, res)
 	}

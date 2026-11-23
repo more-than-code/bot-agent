@@ -35,6 +35,9 @@ type Server struct {
 	Now func() time.Time
 	// RedirectTo, when set, answers every request with 302 and does not upgrade.
 	RedirectTo string
+	// AckResults, when set, also answers each task_result with the v1.21
+	// task_result_ack. Off, the server behaves like an older API.
+	AckResults bool
 
 	mu           sync.Mutex
 	frameWait    *sync.Cond
@@ -49,6 +52,7 @@ type Server struct {
 	autoAcks     []string
 	ackMetrics   bool
 	taskAcks     []string
+	resultAcks   []string
 	w            *wsWriter
 	sentKind     map[string]string
 	http         *http.Server
@@ -162,6 +166,20 @@ func (s *Server) TaskAcks() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.taskAcks...)
+}
+
+// SetAckResults turns the v1.21 task_result_ack on or off.
+func (s *Server) SetAckResults(v bool) {
+	s.mu.Lock()
+	s.AckResults = v
+	s.mu.Unlock()
+}
+
+// ResultAcks are task ids whose task_result_ack was written.
+func (s *Server) ResultAcks() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.resultAcks...)
 }
 
 // CloseConn drops the current WebSocket, if any.
@@ -416,6 +434,16 @@ func (s *Server) serveSession(w *wsWriter) {
 				s.mu.Lock()
 				s.taskAcks = append(s.taskAcks, head.TaskID)
 				s.mu.Unlock()
+			}
+			s.mu.Lock()
+			ackResult := s.AckResults
+			s.mu.Unlock()
+			if ackResult {
+				if err := w.write(ctx, protocol.TaskResultAck{V: protocol.Version, Type: "task_result_ack", TaskID: head.TaskID}); err == nil {
+					s.mu.Lock()
+					s.resultAcks = append(s.resultAcks, head.TaskID)
+					s.mu.Unlock()
+				}
 			}
 		case "auto_action":
 			var head struct {

@@ -18,6 +18,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
+	"github.com/more-than-code/bot-agent/internal/agent/results"
 	"github.com/more-than-code/bot-agent/internal/agent/spool"
 )
 
@@ -143,9 +144,15 @@ func Run(ctx context.Context, opt Options) error {
 	pol := policy.Load(policy.Files{
 		Policy: opt.PolicyPath, Passwd: opt.Passwd, Group: opt.GroupPath, UID: opt.PolicyUID,
 		Exec: opt.PolicyExec,
+		// v1.21: the host env files are root 0600; the helper reads them.
+		SkipEnvFiles: true,
 	})
 	if pol.Exists && !pol.Valid {
-		opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
+		if pol.ReasonEntry != "" {
+			opt.Log.Printf("bot-agent: runner policy invalid: %s %s", quoteLog(pol.Reason), quoteLog(pol.ReasonEntry))
+		} else {
+			opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
+		}
 	}
 	for _, d := range pol.Dropped {
 		opt.Log.Printf("bot-agent: runner policy dropped run_as %s", quoteLog(d.Name))
@@ -178,12 +185,20 @@ func Run(ctx context.Context, opt Options) error {
 	if err != nil {
 		return err
 	}
+	// v1.21 item 5: detached task results. Without the directory the
+	// agent still runs; those results are kept in memory as before.
+	rs, err := results.Open(cfg.StateDir, opt.Now)
+	if err != nil {
+		opt.Log.Printf("bot-agent: results directory unavailable; task results kept in memory")
+		rs = nil
+	}
 	a := &agent{
-		opt:    opt,
-		cfg:    cfg,
-		host:   host,
-		spool:  sp,
-		policy: pol,
+		opt:     opt,
+		cfg:     cfg,
+		host:    host,
+		spool:   sp,
+		results: rs,
+		policy:  pol,
 		col: collect.New(collect.Roots{
 			Proc: opt.ProcRoot, Sys: opt.SysRoot, Passwd: opt.Passwd,
 		}, opt.StatFS),
@@ -315,6 +330,14 @@ type agent struct {
 	polling    bool
 	pollUntil  time.Time
 	pollSawNew bool
+	// results is the v1.21 store of detached task results; nil when the
+	// directory could not be opened. connSeq numbers acknowledged
+	// connections, curW is the current one's writer, and taskConn is the
+	// connection each detached task started on. All three under mu.
+	results  *results.Store
+	connSeq  uint64
+	curW     *writer
+	taskConn map[string]uint64
 }
 
 type writer struct {

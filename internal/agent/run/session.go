@@ -172,7 +172,13 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	if err := w.Send(sess, protocol.Ping{V: protocol.Version, Type: "ping", TS: protocol.FormatTime(a.opt.Now())}); err != nil {
 		return err
 	}
+	// v1.21 item 5: this connection is now the one detached results go to.
+	a.beginConn(w)
+	defer a.endConn(w)
 	if err := a.replay(sess, w); err != nil {
+		return err
+	}
+	if err := a.replayStored(sess, w); err != nil {
 		return err
 	}
 	a.autoSent = map[string]bool{}
@@ -374,6 +380,9 @@ func (a *agent) onEvent(ctx context.Context, w *writer, ev incoming) (bool, erro
 			return false, nil
 		}
 		a.pending.ack(ack.TaskID)
+		return false, nil
+	case "task_result_ack":
+		a.onResultAck(ev.raw)
 		return false, nil
 	case "auto_action_ack":
 		a.onAutoAck(ev.raw)

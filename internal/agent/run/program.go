@@ -81,6 +81,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 		}
 	}
 	p.AgentUpgrade = a.policy.AgentUpgradeEnabled()
+	p.HostNetwork = a.policy.HostNetworkEnabled()
 	if p.Enabled {
 		caps = append(caps, "programs")
 	}

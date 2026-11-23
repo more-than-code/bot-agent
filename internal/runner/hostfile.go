@@ -46,7 +46,7 @@ func handleHostFile(ctx context.Context, verb string, in []byte, sys Sys) []byte
 
 func (sys Sys) loadHostPolicy() policy.Policy {
 	return policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, Exec: sys.execFS,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, Exec: sys.execFS, SkipEnvFiles: true,
 	})
 }
 

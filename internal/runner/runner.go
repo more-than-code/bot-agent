@@ -78,6 +78,9 @@ type Sys struct {
 	execFS policy.ExecFS
 	sleep  func(context.Context, time.Duration)
 	now    func() time.Time
+	// envOwner replaces a host env file's uid and gid (v1.21). Nil reads
+	// the stat; tests set it because they cannot chown to root.
+	envOwner policy.HostEnvOwner
 }
 
 // Handle runs one verb. in is the raw JSON object from stdin.
@@ -131,7 +134,7 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	// One policy snapshot, read under the lock, for the request check and the
 	// restart re-check.
 	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true,
 	})
 	if verb == "list" {
 		return doList(ctx, in, pol, sys)
