@@ -81,6 +81,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 		}
 	}
 	p.AgentUpgrade = a.policy.AgentUpgradeEnabled()
+	p.HostNetwork = a.policy.HostNetworkEnabled()
 	p.ConsolePolicy = a.policy.ConsoleManaged()
 	if p.ConsolePolicy {
 		p.ImagePatterns = append([]string{}, a.policy.Images...)

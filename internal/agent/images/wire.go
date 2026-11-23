@@ -212,8 +212,31 @@ type ListResponse struct {
 type ListRequest struct{}
 
 // ErrorBody is the image-verb refusal. Program verbs use a different shape.
+// Detail and Key are agent-protocol v1.21 item 4, sent only by
+// container_deploy: detail env_conflict with the key name, or detail
+// host_env_file. Never a value or a path.
 type ErrorBody struct {
-	Error string `json:"error"`
+	Error  string `json:"error"`
+	Detail string `json:"detail,omitempty"`
+	Key    string `json:"key,omitempty"`
+}
+
+// Refusal details (agent-protocol v1.21 item 4).
+const (
+	DetailEnvConflict = "env_conflict"
+	DetailHostEnvFile = "host_env_file"
+	// DetailHostEnvImage is a deploy of an image the entry's
+	// host_env_images pattern does not match (v1.21 item 7).
+	DetailHostEnvImage = "host_env_image"
+)
+
+// EncodeErrorDetail is {"error":code,"detail":detail[,"key":key]}.
+func EncodeErrorDetail(code, detail, key string) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(ErrorBody{Error: code, Detail: detail, Key: key})
+	return bytes.TrimRight(buf.Bytes(), "\n")
 }
 
 // Decode reads one JSON object into dest. Unknown fields and a second value

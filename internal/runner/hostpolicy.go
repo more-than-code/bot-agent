@@ -15,7 +15,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
 
-// Paths of the v1.21 console host policy, relative to Sys.Root.
+// Paths of the v1.22 console host policy, relative to Sys.Root.
 const (
 	policyStateRel = "var/lib/bot-agent-runner/policy"
 	helloMarkerRel = "var/lib/bot-agent/last_hello"
@@ -48,7 +48,7 @@ func (sys Sys) policyFilePath() string {
 	return joinRoot(sys.Root, "etc/bot-agent/runner.toml")
 }
 
-// handleHostPolicy serves host_policy_apply (agent-protocol v1.21 item 3).
+// handleHostPolicy serves host_policy_apply (agent-protocol v1.22 item 3).
 // The checks run in the contract's order; on success the new file is
 // staged under the state directory and the transient unit starts. The
 // helper itself never writes /etc/bot-agent: its sandbox cannot.
@@ -155,7 +155,7 @@ func unitActive(ctx context.Context, sys Sys, unit string) (bool, error) {
 }
 
 // PolicyRun is `bot-agent-runner policy-run <base_hash> <new_hash>`
-// (agent-protocol v1.21 item 4), run as root in the transient unit:
+// (agent-protocol v1.22 item 4), run as root in the transient unit:
 //  1. wait RestartDelay so the agent can send the accepted task result;
 //  2. runner.toml must still hash to base_hash and the staged file to
 //     new_hash, and the staged file must still be a valid opted-in policy,

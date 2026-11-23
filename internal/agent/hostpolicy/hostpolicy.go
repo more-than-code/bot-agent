@@ -1,5 +1,5 @@
-// Package hostpolicy is the shared wire model of the v1.21 console host
-// policy (docs/contracts/agent-protocol-v1.md "v1.21 host policy from the
+// Package hostpolicy is the shared wire model of the v1.22 console host
+// policy (docs/contracts/agent-protocol-v1.md "v1.22 host policy from the
 // console"): the task kind, the helper verb, the request, the reply and the
 // result file. The agent and the helper both import it.
 //
@@ -45,7 +45,7 @@ const (
 	// StateAccepted is the only success state of the verb.
 	StateAccepted = "accepted"
 
-	// Refusal codes added by v1.21 (the others are the programs ones:
+	// Refusal codes added by v1.22 (the others are the programs ones:
 	// policy_denied, bad_spec, io_error).
 	ReasonConflict = "conflict"
 	ReasonBusy     = "busy"

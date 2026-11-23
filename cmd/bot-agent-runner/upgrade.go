@@ -21,7 +21,7 @@ func upgradeRun(version string, sys runner.Sys) int {
 	}
 	// The only proxy is the root-owned runner.toml key; nothing is taken
 	// from the agent's env file or the process environment.
-	pol := policy.Load(policy.Files{Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID})
+	pol := policy.Load(policy.Files{Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true})
 	proxy, err := upgrade.ProxyFunc(pol.AgentUpgradeProxy)
 	if err != nil {
 		sys.Logf("bot-agent-runner: upgrade-run bad agent_upgrade_https_proxy")

@@ -9,7 +9,7 @@ import (
 )
 
 // policyRun is `bot-agent-runner policy-run <base_hash> <new_hash>`
-// (agent-protocol v1.21 item 4). Both hashes are checked again here
+// (agent-protocol v1.22 item 4). Both hashes are checked again here
 // because the subcommand can be run by hand.
 func policyRun(baseHash, newHash string, sys runner.Sys) int {
 	if !isHex64(baseHash) || !isHex64(newHash) {

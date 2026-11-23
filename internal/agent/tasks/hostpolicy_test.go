@@ -9,7 +9,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
-// v1.21 item 2: forbidden unless the hello had console_policy true.
+// v1.22 item 2: forbidden unless the hello had console_policy true.
 func TestDecideHostPolicy(t *testing.T) {
 	host := "11111111-1111-4111-8111-111111111111"
 	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)

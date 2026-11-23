@@ -168,6 +168,10 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	if code := sharedNetworks(pol, req); code != "" {
 		return req, code
 	}
+	// v1.21 item 3: network "host" only for a host_network_projects slug.
+	if req.Spec.HostNetwork() && !pol.HostNetworkAllowed(req.Project) {
+		return req, "policy_denied"
+	}
 	return req, ""
 }
 

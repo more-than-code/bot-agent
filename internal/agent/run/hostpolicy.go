@@ -14,7 +14,7 @@ import (
 const hostPolicyTimeout = 30 * time.Second
 
 // runHostPolicy forwards a host_policy_apply task to the helper
-// (agent-protocol v1.21 item 2). Success is state succeeded with
+// (agent-protocol v1.22 item 2). Success is state succeeded with
 // {"state":"accepted","new_hash":...}: the transient unit then restarts
 // this agent, and the server learns the outcome from the next hello's
 // policy_hash. A refusal is state failed with policy_denied, bad_spec,

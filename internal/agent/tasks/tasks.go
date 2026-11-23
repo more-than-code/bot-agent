@@ -98,7 +98,7 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 		}
 		return "", ProbeSpec{}
 	}
-	// v1.21 item 2: refused when this agent's hello had console_policy
+	// v1.22 item 2: refused when this agent's hello had console_policy
 	// false. The helper checks the policy, the base hash and the result.
 	if task.Kind == hostpolicy.Kind {
 		if !gate.Policy.ConsoleManaged() {

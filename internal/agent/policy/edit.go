@@ -5,7 +5,7 @@ import (
 )
 
 // Managed is the part of runner.toml the console may change on a host whose
-// root set console_policy = true (agent-protocol v1.21): edge, images and
+// root set console_policy = true (agent-protocol v1.22): edge, images and
 // projects. Nothing else in the file is touched.
 type Managed struct {
 	Edge     bool

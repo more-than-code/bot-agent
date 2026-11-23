@@ -81,7 +81,7 @@ func edgeOK(v any) []byte {
 
 func doEdgeApply(ctx context.Context, in []byte, sys Sys) []byte {
 	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true,
 	})
 	// A release still carrying the placeholder digest never runs an edge.
 	if !pol.EdgeEnabled() || !edge.ImagePinned() {

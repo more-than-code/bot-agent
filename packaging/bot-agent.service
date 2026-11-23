@@ -23,7 +23,9 @@ AmbientCapabilities=
 ReadWritePaths=/var/lib/bot-agent /etc/bot-agent
 # Hide the root-only file store. The leading '-' lets a host without Docker or that directory start.
 InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/var/lib/bot-agent-runner
-StateDirectory=bot-agent
+# results/ holds detached task results until the server acks them
+# (agent-protocol v1.21 item 5). systemd creates both, owned by bot-agent.
+StateDirectory=bot-agent bot-agent/results
 StateDirectoryMode=0700
 
 [Install]

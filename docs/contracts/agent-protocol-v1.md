@@ -622,7 +622,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
 3. For `rolled_back` and `rollback_failed` the reason is why the new container failed; the server adds what happened next. A job's non-zero exit stays in `exit_code` with no reason.
 4. **Servers:** an API before v1.47 ignores the key (the payload is read by field). API v1.47 stores it as the deploy's reason, after its own exact-value redaction, and falls back to a reason it works out from the outcome and status when the key is absent or not one line of at most 512 bytes. No other frame changes.
 
-## v1.20 agent upgrade from the server (renumbered from v1.19 on 2026-11-23 because of the clash above) (2026-11-23, approved spec `docs/spec-agent-self-upgrade.md` rev 1; additive, gated; not yet implemented)
+## v1.20 agent upgrade from the server (renumbered from v1.19 on 2026-11-23 because of the clash above; implemented on work-agent-selfupgrade, not yet merged) (2026-11-23, approved spec `docs/spec-agent-self-upgrade.md` rev 1; additive, gated; not yet implemented)
 1. **`runner.toml` keys:**
    - `agent_upgrade = true|false` (bool; missing = false).
    - Optional `agent_upgrade_https_proxy = "http(s)://host:port"`: no userinfo or path, at most 256 bytes; anything else makes the policy invalid with `parse`. `policy check` prints `agent_upgrade_https_proxy=<set|unset>`.
@@ -679,3 +679,42 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - A missing or old marker fails the verify, so the existing rollback runs. The rollback's verify keeps the existing checks (active, `NRestarts` 0, version) and does **not** wait for the marker: an agent older than 0.2.15 never writes it, and with the server down no agent can say hello. A rollback whose verify passes is `rolled_back`; a failed rollback verify is `failed` `install_failed`.
    - `install.sh` documents the marker check. A plain SSH upgrade gets it as well.
 9. **Bootstrap:** this needs bot-agent 0.2.15 or later, installed once by the host owner, with `agent_upgrade = true` in `runner.toml`.
+
+## v1.21 containers that deploy Deploybot (2026-11-23, approved spec `docs/spec-deploybot-on-containers.md` rev 1; additive, gated by `runner.toml`; implemented on work-agent-containers, not yet merged)
+1. **`runner.toml` keys** (an older agent refuses both as `unknown_key`):
+   - `host_network_projects = ["<slug>", …]` (default empty). Each slug must also be in `projects`, else the policy is invalid with `parse`. At most 8.
+   - `host_env_files = ["<project>/<entry>=<path>", …]` (default empty), at most 32. `<project>` is a slug in `projects`; `<entry>` is a catalog entry name (the catalog name rules). `<path>` is absolute, directly under a directory of `/etc/` (`/etc/<dir>/<name>.env`), with no `..`. The file must be a regular file (not a symlink), owned by root:root, mode 0600, nlink 1, at most 64 KiB, and made of `KEY=VALUE` lines (key `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; blank lines and `#` comments allowed; no duplicate keys). Any failure makes the policy invalid with `host_env_file` and the entry name; the value is never printed.
+   - `policy check` prints `host_network_projects=<comma list or none>` and one line per env file: `host_env_file <project>/<entry> keys=<n> sha256=<first 12 hex of the file>`, never a value.
+2. **Hello:** `programs.host_network` (bool): true only when the policy is valid and `host_network_projects` is non-empty. Absent without a `programs` block, read as false.
+3. **ImageSpec `network`** (optional string; absent = today's behaviour; the only other value is `"host"`):
+   - Allowed only when the task's project is in `host_network_projects`, else the task fails `policy_denied`.
+   - With `"host"`: the container runs with Docker network mode `host`; `ports` are not published, and each `ports[].host` is only the loopback port the health check uses; `networks` (shared networks, v1.13) must be empty, else `bad_spec`. User, filesystem, memory limit, log limit and health policy are unchanged.
+   - The spec hash covers `network`, so changing it is not `unchanged`.
+4. **Host env files at deploy and run** (image deploy, rollback and job run of an entry that has a `host_env_files` line):
+   - The helper re-reads and re-checks the file at that moment (item 1 rules), else the task fails `policy_denied` with reason `host_env_file`.
+   - Its keys are added to the container's environment. A key that is also in the entry's own env (env set or spec env) fails the task `bad_spec` with reason `env_conflict` and the key name, never the value. A key on the API's env denylist is refused the same way.
+   - The env hash (v1.14) includes the file's sha256, so a changed file is not `unchanged`; the file's values never appear in previews (v1.7), results, logs or `deploy_history`.
+5. **Deploys finish on the host:**
+   - An image deploy, its health wait and its automatic rollback (and a job run) continue when the API connection drops or the agent restarts its session; they run to their own timeout.
+   - The final result (the same body as the task's result frame) is written to `/var/lib/bot-agent/results/<task_id>.json` (0600, owner `bot-agent`) before it is sent. At most 100 files and 7 days; the oldest go first.
+   - After each hello, the agent sends every stored result in the normal task-result frame with its original `task_id`, plus `"late": true` when the task was started on an earlier connection. It deletes a file when the API answers with frame **`task_result_ack {"task_id"}`**; an API that never acks (older) leaves the files to the cap and age limit.
+6. **Clarifications from implementation (2026-11-23, before release):**
+   - The agent itself (unprivileged) checks only the `host_env_files` lines; the file checks of item 1 are done by the root helper (at every deploy, rollback and run) and by `policy check` (run as root). So a hello can report a valid policy while the helper refuses a bad file with `policy_denied` / `host_env_file`.
+   - A malformed line (no `<project>/<entry>=<path>` shape) or more than 32 lines is `parse`; other line or file failures are `host_env_file` with the entry name. Two entries may name the same file; a repeated entry is refused.
+   - A changed host env file is noticed only when the task carries `env_hash` (v1.14): the helper keeps the file's sha256 in the container label `dev.deploybot.host_env_sha256`, and `container_status` reports `env_hash` only while that label matches the current file. The kept-container rollback does not re-check the file, so an automatic rollback always works.
+   - Helper refusals carry `{"error","detail","key"}`; the agent turns them into fixed v1.19 reason sentences (`env_conflict <KEY>: …`, `host_env_file: …`) that never contain a value. The helper also redacts the entry's host env values (6 bytes or longer) from that entry's container logs.
+   - "Detached" covers `image_deploy` (a job run is one) and `image_rollback`. If the agent process stops, the work stops too; a stored result is sent after the restart with `"late": true`.
+   - With `network: "host"`, `ports[].public` is accepted and has no effect (nothing is published).
+   - Only `task_result_ack` deletes a stored result; the older `task_ack` does not.
+7. **Review changes (2026-11-23, before release; supersede item 6 where they differ):**
+   - **Image binding:** every `host_env_files` line needs a matching `host_env_images = ["<project>/<entry>=<image pattern>", …]` line (same pattern syntax as `images`; it must also be within `images`), else the policy is invalid with `host_env_file`. The helper refuses a deploy, rollback-by-pull or run whose image does not match with `policy_denied` / `host_env_image`. The env file's secrets reach only images the host owner named for that entry.
+   - **The helper loads lines only:** every helper verb loads the policy without reading env files; the files are read only when merging (deploy, run), for status `env_hash`, and for log redaction, and by `policy check`. A bad file therefore refuses only deploys of its entry (`policy_denied` / `host_env_file`); rollback, stop, start, status, logs, list, programs, edge, host files and agent upgrade keep working.
+   - **No overlap with host files:** a `host_env_files` path equal to a `host_files` path, or inside a `host_files` directory, makes the policy invalid with `host_env_file`. The env file's directory and `/etc` must be root-owned and not group/world-writable; the file is opened with `O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`.
+   - **Host mode hardening:** a host-network container gets `CapDrop: ["NET_RAW"]` and `SecurityOpt: ["no-new-privileges"]`. It still shares loopback and abstract unix sockets with the host; the host owner allows it per project knowing that.
+   - **Manual rollback and start re-check:** a manual rollback, start or restart of a host-network container is refused `policy_denied` when its project is no longer in `host_network_projects`. The automatic rollback inside a deploy still runs for an allowed project.
+   - **Log redaction fails closed:** logs of an entry with a host env file are redacted only when the file's sha256 equals the container's `dev.deploybot.host_env_sha256` label; otherwise (changed or unreadable file) the lines are withheld with one line saying so. Values under 6 bytes are not redacted (documented; do not put short secrets in a host env file).
+   - **Stopping agent:** a detached task interrupted by the agent stopping stores and sends no result; the API's sweep settles it (api-v1 v1.50 item 8). A reject of an admitted detached task goes to the current connection.
+   - **Hello:** `programs.host_network` is sent only when true; an API older than v1.50 never sees it. Upgrade the server first anyway.
+   - **Health in host mode:** `ports[].host` probes reach whatever listens on that loopback port; use a Docker healthcheck in the image (the Deploybot images have one) so another process on the port cannot mask a broken deploy.
+   - **At rest:** stored results may hold up to the deploy's log tail (already redacted) for up to 7 days, 0600 under the agent's state directory.
+

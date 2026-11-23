@@ -90,6 +90,10 @@ func TestServiceGainsNoCapability(t *testing.T) {
 	if !strings.Contains(text, "InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/var/lib/bot-agent-runner\n") {
 		t.Fatal("docker sockets and the managed-file store are not hidden")
 	}
+	// v1.21 item 5: the results directory, 0700 and owned by bot-agent.
+	if !strings.Contains(text, "StateDirectory=bot-agent bot-agent/results\n") || !strings.Contains(text, "StateDirectoryMode=0700\n") {
+		t.Fatal("results state directory missing")
+	}
 }
 
 func TestExamplePolicyIsDisabled(t *testing.T) {

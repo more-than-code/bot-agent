@@ -46,7 +46,7 @@ func run(euid int, args []string, in io.Reader, out io.Writer, sys runner.Sys, p
 	if len(args) == 2 && args[0] == agentupgrade.RunSubcommand {
 		return upgradeRun(args[1], sys)
 	}
-	// v1.21 item 4: the transient policy unit runs this as root.
+	// v1.22 item 4: the transient policy unit runs this as root.
 	if len(args) == 3 && args[0] == hostpolicy.RunSubcommand {
 		return policyRun(args[1], args[2], sys)
 	}
@@ -93,7 +93,7 @@ func noteOverlap(sys runner.Sys) {
 		return
 	}
 	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true,
 	})
 	a, b, ok := policy.OverlappingProjects(pol.Projects)
 	if !ok {

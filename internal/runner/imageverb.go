@@ -31,7 +31,7 @@ func handleImage(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 		return imgErr(sys, programs.ReasonBadSpec)
 	}
 	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true,
 	})
 	// container_list also serves edge discovery (agent-protocol v1.15
 	// item 5), so a host with only the edge on may list.
@@ -332,6 +332,16 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	if code != "" {
 		return imgErr(sys, code)
 	}
+	// v1.21 item 4: the host env file is read and checked again now, and
+	// merged into a copy of the request env. Its values go only into the
+	// create body, whose env values the engine scrubs from its log lines.
+	env, hostEnvSum, refusal := hostEnvMerge(req, pol, sys)
+	if refusal != nil {
+		return refusal
+	}
+	if hostEnvSum != "" {
+		defer clearMap(env)
+	}
 	if err := ensureRuntime(sys.Root); err != nil {
 		return imgErr(sys, programs.ReasonDocker)
 	}
@@ -341,7 +351,7 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	}
 	defer unlock()
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, req.Env, req.Files, pol.Images, pol.AllowPublicPorts)
+		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, env, req.Files, pol.Images, pol.AllowPublicPorts, hostEnvSum)
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -396,6 +406,10 @@ func precheckDeploy(req images.DeployRequest, pol policy.Policy) ([]policy.Share
 		if p.Public && !pol.AllowPublicPorts {
 			return nil, programs.ReasonPolicy
 		}
+	}
+	// v1.21 item 3 re-check: network "host" only for a listed project.
+	if req.Spec.HostNetwork() && !pol.HostNetworkAllowed(req.Project) {
+		return nil, programs.ReasonPolicy
 	}
 	// v1.13 re-check: each shared network is defined and lists the project.
 	var shared []policy.SharedNetwork
@@ -557,6 +571,9 @@ func doRollback(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 		}
 		if !prev.found {
 			return imgErr(sys, programs.ReasonConflict)
+		}
+		if hostNetDenied(pol, req.Project, prev.labels) {
+			return imgErr(sys, programs.ReasonPolicy)
 		}
 		if code := allowPinned(prev.image, pol.Images); code != "" {
 			return imgErr(sys, code)
@@ -799,6 +816,12 @@ func doStartCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []by
 		if !cur.found {
 			return encodeAction(missingStatus()), ""
 		}
+		// v1.21 item 7: a host-network container runs again only while
+		// its project is still allowed. The label check made the project
+		// label the request's.
+		if hostNetDenied(pol, cur.labels[images.LabelProject], cur.labels) {
+			return nil, programs.ReasonPolicy
+		}
 		if err := eng.Start(ctx, cur.id); err != nil {
 			return nil, engReason(err)
 		}
@@ -822,6 +845,12 @@ func doRestartCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []
 	return mutateOne(ctx, in, pol, sys, func(ctx context.Context, eng engine, cur slot) ([]byte, string) {
 		if !cur.found {
 			return encodeAction(missingStatus()), ""
+		}
+		// v1.21 item 7: a host-network container runs again only while
+		// its project is still allowed. The label check made the project
+		// label the request's.
+		if hostNetDenied(pol, cur.labels[images.LabelProject], cur.labels) {
+			return nil, programs.ReasonPolicy
 		}
 		// v1.9 rev 3: once the stop is issued, the start follows on its own
 		// bounded context even if the caller has gone. Starting a container
@@ -855,8 +884,14 @@ func doStatusCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []b
 		if code != "" {
 			return imgErr(sys, code)
 		}
+		// v1.21 item 4: env_hash holds only while the host env file the
+		// container was created with is the entry's file now.
+		hostSum, hostOK := hostEnvCurrent(pol, sys, req.Project, req.Entry)
 		// List row only. Inspect of -prev would also return env and mounts.
 		view := prevView(prev)
+		if view != nil {
+			view.EnvHash = envHashFor(prev.labels, hostSum, hostOK)
+		}
 		if !cur.found {
 			return images.Encode(images.StatusResult{Status: missingStatus(), Prev: view})
 		}
@@ -864,7 +899,7 @@ func doStatusCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []b
 		if code != "" {
 			return imgErr(sys, code)
 		}
-		return images.Encode(images.StatusResult{Status: st, SpecHash: specHashOf(labels), FilesHash: filesHashOf(labels), EnvHash: envHashOf(labels), Prev: view})
+		return images.Encode(images.StatusResult{Status: st, SpecHash: specHashOf(labels), FilesHash: filesHashOf(labels), EnvHash: envHashFor(labels, hostSum, hostOK), Prev: view})
 	})
 }
 
@@ -907,7 +942,17 @@ func doLogsCtr(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byt
 			return imgErr(sys, engReason(err))
 		}
 		text, cutDemux := demux(raw)
-		ex := redact.Merge(redact.NewExact(req.Redact...), redact.NewExactEnv(req.RedactEnv...))
+		// v1.21 items 4 and 7: the entry's host env values are redacted
+		// too (the agent never has them), and the lines are withheld when
+		// the file no longer matches the container's.
+		hostVals, withhold := hostEnvLogs(pol, sys, req.Project, req.Entry, cur.labels)
+		if withhold {
+			return images.Encode(images.LogsResponse{Container: name, Lines: []string{withheldLine}, Truncated: false})
+		}
+		ex := redact.Merge(redact.NewExact(append(hostVals, req.Redact...)...), redact.NewExactEnv(req.RedactEnv...))
+		for i := range hostVals {
+			hostVals[i] = ""
+		}
 		lines, cutJournal := redact.JournalTask(splitLines(text), ex)
 		ex.Clear()
 		if lines == nil {
