@@ -137,6 +137,33 @@ func Match(ref Reference, patterns []string) bool {
 	return false
 }
 
+// PatternWithin reports whether every reference pattern p matches is also
+// matched by one of patterns: same host and length, and each component of
+// p equals the other's or the other's is "*" (v1.21 host_env_images).
+func PatternWithin(p string, patterns []string) bool {
+	host, comps, ok := splitPattern(p)
+	if !ok {
+		return false
+	}
+	for _, q := range patterns {
+		qhost, qcomps, ok := splitPattern(q)
+		if !ok || qhost != host || len(qcomps) != len(comps) {
+			continue
+		}
+		within := true
+		for i, c := range qcomps {
+			if c != "*" && c != comps[i] {
+				within = false
+				break
+			}
+		}
+		if within {
+			return true
+		}
+	}
+	return false
+}
+
 func matchOne(ref Reference, p string) bool {
 	host, comps, ok := splitPattern(p)
 	if !ok || host != ref.Host || len(comps) != len(ref.Path) {

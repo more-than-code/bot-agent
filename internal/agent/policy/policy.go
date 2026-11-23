@@ -81,6 +81,16 @@ type Policy struct {
 	// AgentUpgradeProxy is agent_upgrade_https_proxy (v1.20 item 1), the
 	// only proxy the upgrade download uses. Empty when unset or invalid.
 	AgentUpgradeProxy string
+	// HostNetworkProjects is the v1.21 host_network_projects list. It is
+	// empty, not nil, on a valid policy without the key.
+	HostNetworkProjects []string
+	// HostEnvFiles is the v1.21 host_env_files list in file order, empty
+	// on a valid policy without the key. Keys and SHA256 are set only when
+	// the loader read the files (Files.SkipEnvFiles false).
+	HostEnvFiles []HostEnvFile
+	// ReasonEntry is "<project>/<entry>" when Reason is host_env_file and
+	// the line named a valid entry; empty otherwise. Never a path or value.
+	ReasonEntry string
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -157,6 +167,17 @@ type Files struct {
 	// Exec is the filesystem the v1.18 executable check reads. Nil is the
 	// host's. Only tests set it.
 	Exec ExecFS
+	// SkipEnvFiles checks host_env_files lines without reading the files
+	// (agent-protocol v1.21 item 7). The agent and every helper verb set
+	// it; only policy check reads them here. The helper reads an entry's
+	// file itself when it merges, reports env_hash or redacts logs.
+	SkipEnvFiles bool
+	// EnvOwner replaces the uid and gid of a host env file. Production
+	// leaves it nil; tests set it because they cannot chown to root.
+	EnvOwner HostEnvOwner
+	// EnvRoot is a filesystem prefix for the host env file paths. Only
+	// the helper's tests set it (through Sys.Root); "" is the host.
+	EnvRoot string
 }
 
 // Check parses path with the same rules as Load, including run_as against
@@ -232,10 +253,21 @@ func Load(f Files) Policy {
 		out.Reason = reason
 		return out
 	}
+	hostNet, reason := validateHostNetwork(parsed.hostNetwork, parsed.projects)
+	if reason != "" {
+		out.Reason = reason
+		return out
+	}
 	users := readAccounts(passwd, group)
 	hostFiles, reason := validateHostFiles(parsed.hostFiles, users, f.Exec)
 	if reason != "" {
 		out.Reason = reason
+		return out
+	}
+	hostEnv, reason, entry := validateHostEnvFiles(parsed.hostEnv, parsed.hostEnvImgs, parsed.projects, parsed.images, hostFiles, !f.SkipEnvFiles, f.EnvRoot, f.EnvOwner)
+	if reason != "" {
+		out.Reason = reason
+		out.ReasonEntry = entry
 		return out
 	}
 	kept, dropped := filterRunAs(parsed.runAs, users)
@@ -255,6 +287,8 @@ func Load(f Files) Policy {
 	out.Edge = parsed.edge
 	out.AgentUpgrade = parsed.agentUpgrade
 	out.AgentUpgradeProxy = parsed.upgradeProxy
+	out.HostNetworkProjects = hostNet
+	out.HostEnvFiles = hostEnv
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

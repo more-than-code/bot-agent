@@ -344,7 +344,7 @@ func literalSpec() images.ImageSpec {
 
 func literalCreate(project string, spec images.ImageSpec) ([]byte, string) {
 	return buildCreate(project, "web", digestA, hashC, "", "0123456789abcdef", spec,
-		map[string]string{"A": "b"}, nil, []string{"ghcr.io/joe-and-his-friends/*"}, false)
+		map[string]string{"A": "b"}, nil, []string{"ghcr.io/joe-and-his-friends/*"}, false, "")
 }
 
 // v1.13 item 5: a spec without networks gives the v1.12 body byte for byte.

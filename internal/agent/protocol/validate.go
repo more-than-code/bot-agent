@@ -410,6 +410,7 @@ func checkTaskResult(raw []byte) error {
 		State     string          `json:"state"`
 		ErrorCode *string         `json:"error_code"`
 		Payload   json.RawMessage `json:"payload"`
+		Late      bool            `json:"late"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()

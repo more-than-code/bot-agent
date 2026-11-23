@@ -88,7 +88,7 @@ func noteOverlap(sys runner.Sys) {
 		return
 	}
 	pol := policy.Load(policy.Files{
-		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID,
+		Policy: sys.Policy, Passwd: sys.Passwd, Group: sys.Group, UID: sys.UID, SkipEnvFiles: true,
 	})
 	a, b, ok := policy.OverlappingProjects(pol.Projects)
 	if !ok {

@@ -137,6 +137,10 @@ type Programs struct {
 	// and agent_upgrade = true. Older agents omit it; the server reads
 	// that as false.
 	AgentUpgrade bool `json:"agent_upgrade"`
+	// HostNetwork is the v1.21 item 2 flag: true only when the policy is
+	// valid and host_network_projects is non-empty. Sent only when true
+	// (v1.21 item 7), so an older API never sees it.
+	HostNetwork bool `json:"host_network,omitempty"`
 }
 
 // HostFileHello is one hello.programs.host_files item (agent-protocol
@@ -307,6 +311,16 @@ type TaskResult struct {
 	State     string         `json:"state"`
 	ErrorCode *string        `json:"error_code"`
 	Payload   map[string]any `json:"payload"`
+	// Late is agent-protocol v1.21 item 5: a stored result resent after a
+	// hello for a task started on an earlier connection. Omitted otherwise.
+	Late bool `json:"late,omitempty"`
+}
+
+// TaskResultAck is the v1.21 server frame that deletes a stored result.
+type TaskResultAck struct {
+	V      int    `json:"v"`
+	Type   string `json:"type"`
+	TaskID string `json:"task_id"`
 }
 
 // Task is a server-assigned phase-1 task. Spec stays raw so extra keys can

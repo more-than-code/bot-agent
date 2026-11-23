@@ -266,11 +266,12 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 			return a.deployResult(task, "unchanged", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 		}
 	}
-	if code, err = a.deployContainer(ctx, req, digest); err != nil {
+	var detail string
+	if code, detail, err = a.deployContainer(ctx, req, digest); err != nil {
 		return a.deployResultWhy(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), whyHelper, ex)
 	}
 	if code != "" {
-		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), codeWhy(code), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), refusalWhy(code, detail), ex)
 	}
 	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
@@ -348,11 +349,12 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 			return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, tail(), codeWhy(code), ex)
 		}
 	}
-	if code, err = a.deployContainer(ctx, req, digest); err != nil {
+	var detail string
+	if code, detail, err = a.deployContainer(ctx, req, digest); err != nil {
 		return a.deployResult(task, "failed", digest, nil, st, tail(), ex)
 	}
 	if code != "" {
-		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, tail()), codeWhy(code), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, tail()), refusalWhy(code, detail), ex)
 	}
 	jobDeadline := a.now().Add(time.Duration(req.Spec.TimeoutSec) * time.Second)
 	if deadline.Before(jobDeadline) {
@@ -720,7 +722,10 @@ func (a *agent) pullImage(ctx context.Context, req tasks.ImageReq, ref string) (
 	return resp.Digest, "", nil
 }
 
-func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest string) (string, error) {
+// deployContainer is container_deploy. detail is the v1.21 refusal
+// reason (env_conflict with its key, or host_env_file) as a fixed sentence,
+// "" when the refusal had none.
+func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest string) (code, detail string, err error) {
 	env := req.Env
 	if env == nil {
 		env = map[string]string{}
@@ -730,8 +735,25 @@ func (a *agent) deployContainer(ctx context.Context, req tasks.ImageReq, digest 
 		Env: env, Digest: digest, SpecHash: req.SpecHash,
 		Files: images.AsMount(req.Files), EnvHash: req.EnvHash,
 	})
+	if len(body) > programs.FrameLimit(images.VerbDeploy) {
+		zeroBytes(body)
+		return "", "", errHelper
+	}
+	raw, err := a.call(ctx, images.VerbDeploy, body)
+	zeroBytes(body)
+	if err != nil {
+		return "", "", err
+	}
+	if r := parseRefusal(raw); r.code != "" {
+		a.logHelper(images.VerbDeploy, r.code)
+		return r.code, detailWhy(r), nil
+	}
 	var id images.IDResponse
-	return a.callImage(ctx, images.VerbDeploy, body, &id)
+	if err := images.Decode(raw, &id); err != nil {
+		a.logHelper(images.VerbDeploy, "decode")
+		return "", "", err
+	}
+	return "", "", nil
 }
 
 func (a *agent) imageStatus(ctx context.Context, project, entry string) (images.StatusResult, string, error) {
@@ -842,30 +864,51 @@ func (a *agent) logHelper(verb, reason string) {
 }
 
 func imageRefusal(raw []byte) string {
+	return parseRefusal(raw).code
+}
+
+// imageRefusalBody is a helper refusal: a fixed code and, from v1.21
+// container_deploy, a detail and an env key name.
+type imageRefusalBody struct {
+	code, detail, key string
+}
+
+func parseRefusal(raw []byte) imageRefusalBody {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return ""
+		return imageRefusalBody{}
 	}
-	if rawError, ok := m["error"]; ok && len(m) == 1 {
-		var code string
-		if err := json.Unmarshal(rawError, &code); err != nil || code == "" {
-			return ""
+	if _, ok := m["error"]; ok && refusalKeysOnly(m) {
+		var body images.ErrorBody
+		if err := json.Unmarshal(raw, &body); err != nil || body.Error == "" {
+			return imageRefusalBody{}
 		}
-		return programs.FixedReason(code)
+		return imageRefusalBody{code: programs.FixedReason(body.Error), detail: body.Detail, key: body.Key}
 	}
 	rawOK, ok := m["ok"]
 	if !ok {
-		return ""
+		return imageRefusalBody{}
 	}
 	var passed bool
 	if err := json.Unmarshal(rawOK, &passed); err != nil || passed {
-		return ""
+		return imageRefusalBody{}
 	}
 	reason := ""
 	if rawReason, ok := m["reason"]; ok {
 		_ = json.Unmarshal(rawReason, &reason)
 	}
-	return programs.FixedReason(reason)
+	return imageRefusalBody{code: programs.FixedReason(reason)}
+}
+
+// refusalKeysOnly is an {"error"} object, optionally with the v1.21
+// detail and key. Any other key is not a refusal.
+func refusalKeysOnly(m map[string]json.RawMessage) bool {
+	for k := range m {
+		if k != "error" && k != "detail" && k != "key" {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *agent) listContainers(ctx context.Context) ([]images.ContainerInfo, bool, error) {
