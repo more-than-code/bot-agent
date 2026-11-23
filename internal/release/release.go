@@ -15,13 +15,20 @@ import (
 // some slack for a CRLF.
 const MaxSigFile = 128
 
-// PublicKey is the release key compiled into the helper.
-//
-// PLACEHOLDER: all zero bytes. Replace it with the base64-decoded public
-// key from `release-sign keygen` (Joe's offline key) before the first
-// signed release. A build with the placeholder refuses every bundle:
-// Verify rejects it before checking the signature.
-var PublicKey = ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+// PublicKey is the release key compiled into the helper: the public half of
+// Joe's offline release key (`release-sign keygen`, 2026-11-23), first used
+// for bot-agent v0.2.15. A build with the all-zero placeholder refuses every
+// bundle: Verify rejects it before checking the signature.
+var PublicKey = mustKey("Ee1UIjnw5zgPNw5ZtKNBTCdLvYM3ozEcSRcfWZaCHh8=")
+
+// mustKey decodes a base64 Ed25519 public key compiled into the binary.
+func mustKey(b64 string) ed25519.PublicKey {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		panic("release: bad compiled public key")
+	}
+	return ed25519.PublicKey(raw)
+}
 
 var (
 	ErrPlaceholder = errors.New("release key is the placeholder")

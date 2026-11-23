@@ -328,7 +328,7 @@ It writes `/etc/systemd/system/bot-agent-runner@.service.d/host-files.conf`, wit
 
 ### Host networking and host env files
 
-From agent-protocol v1.21 (made for Deploybot running its own server in containers on its host), root can let chosen projects run a container on the host's network, and give a catalog entry environment variables from a root-only file on the host, bound to the images that may receive them. All are off until you add the keys:
+From bot-agent 0.2.15 (agent-protocol v1.21, made for Deploybot running its own server in containers on its host), root can let chosen projects run a container on the host's network, and give a catalog entry environment variables from a root-only file on the host, bound to the images that may receive them. All are off until you add the keys:
 
 ```toml
 host_network_projects = ["deploybot"]
