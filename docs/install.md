@@ -347,6 +347,16 @@ host_env_images       = ["deploybot/api=ghcr.io/more-than-code/deploybot-server"
 - An older agent rejects these keys as `unknown_key`. Upgrade the server first, then the agent, then add the keys and restart the agent.
 - **Deploys finish on the host.** From the same version, an image deploy, its health wait and its automatic rollback (and a job run) keep running when the connection to the server drops. The result is kept in `/var/lib/bot-agent/results/` (`0700`, owned by `bot-agent`; at most 100 files and 7 days) and sent again after the agent reconnects, until the server confirms it. A stored result can hold the deploy's last log lines (already redacted), at rest for up to 7 days. If the agent itself stops in the middle, no result is kept; the server settles that deploy. The agent unit creates the directory.
 
+### Policy from the console
+
+From bot-agent 0.2.15 (agent-protocol v1.22), the root can let the org's owners and admins change three keys of this file from the host's Policy tab in the Deploybot console: `edge`, `images` and `projects`. It is off until root adds one line:
+
+```toml
+console_policy = true
+```
+
+Every other key stays the root's: the console cannot change `run_as`, `dirs`, `exec_allow`, `allow_shell`, shared networks, `host_files`, `agent_upgrade` or `console_policy` itself. An apply is checked by the helper against the file it was made from (an edit by hand in between refuses it), keeps `/etc/bot-agent/runner.toml.prev`, restarts bot-agent, and puts the previous file back when the agent does not reconnect within 90 seconds. While the line is on, the host's image patterns are shown to org owners and admins. `bot-agent policy check` ends with `console_policy=true` or `false`. An agent older than 0.2.15 rejects the key as `unknown_key`, which turns programs and images off, so upgrade first.
+
 ### Program secrets
 
 A program entry can use env sets and secret env, such as `GH_TOKEN`, from v0.2.8 of the agent. Before you give a program a secret, know these limits:
