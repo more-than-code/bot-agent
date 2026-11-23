@@ -74,6 +74,9 @@ func ValidateAgent(raw []byte) error {
 		if f.TaskID == "" || !rejectCode(f.ErrorCode) {
 			return fmt.Errorf("task_reject")
 		}
+		if f.Field != "" && (f.ErrorCode != "bad_spec" || !ValidRejectField(f.Field)) {
+			return fmt.Errorf("task_reject field")
+		}
 		return nil
 	case "task_result":
 		return checkTaskResult(raw)
@@ -391,6 +394,15 @@ func validImageEntry(s string) bool {
 		return false
 	}
 	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev") && !strings.HasSuffix(s, "-old")
+}
+
+// rejectFieldRe is the task_reject field shape (agent-protocol v1.23): up
+// to three dot-separated key names.
+var rejectFieldRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,2}$`)
+
+// ValidRejectField reports a task_reject field the agent may send.
+func ValidRejectField(s string) bool {
+	return len(s) <= 64 && rejectFieldRe.MatchString(s)
 }
 
 func rejectCode(c string) bool {

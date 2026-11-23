@@ -141,6 +141,17 @@ func TestValidateHelloAndReject(t *testing.T) {
 	if err := ValidateAgent([]byte(strings.Replace(rej, "wrong_host", "policy_denied", 1))); err != nil {
 		t.Fatal(err)
 	}
+	// v1.23: field only with bad_spec, and only a key-name shape.
+	withField := `{"v":1,"type":"task_reject","task_id":"t1","error_code":"bad_spec","field":"spec.secret_env"}`
+	if err := ValidateAgent([]byte(withField)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAgent([]byte(strings.Replace(withField, "bad_spec", "forbidden", 1))); err == nil {
+		t.Fatal("field with another code")
+	}
+	if err := ValidateAgent([]byte(strings.Replace(withField, "spec.secret_env", "spec.DB_URL", 1))); err == nil {
+		t.Fatal("field shape")
+	}
 	withPrograms := strings.Replace(hello, `"capabilities":["metrics","probe"]`, `"capabilities":["metrics","probe","programs"],"programs":{"enabled":true,"run_as":["joe"],"allow_shell":false,"policy_hash":"`+strings.Repeat("ab", 32)+`"}`, 1)
 	if err := ValidateAgent([]byte(withPrograms)); err != nil {
 		t.Fatal(err)

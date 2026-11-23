@@ -194,6 +194,10 @@ func TestFileTaskRefused(t *testing.T) {
 		if ok || rej.ErrorCode != "bad_spec" {
 			t.Fatalf("ok %v code %s", ok, rej.ErrorCode)
 		}
+		// agent-protocol v1.23: the reject names the files key.
+		if rej.Field != "files" && rej.Field != "spec.files" {
+			t.Fatalf("field %q", rej.Field)
+		}
 		if len(h.Calls()) != 0 {
 			t.Fatalf("helper called %v", h.Calls())
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/more-than-code/bot-agent/internal/agent/images"
@@ -80,7 +81,7 @@ func ImageKind(kind string) bool {
 // Closed keys are refused before the policy so a bad shape is bad_spec even
 // when images are off. Field rules run after the policy and the project check.
 func ParseImage(task protocol.Task, pol policy.Policy) (ImageReq, string) {
-	req, code := parseImage(task, pol)
+	req, code, _ := parseImage(task, pol)
 	if code != "" {
 		scrubImage(&req)
 		return ImageReq{}, code
@@ -88,9 +89,26 @@ func ParseImage(task protocol.Task, pol policy.Policy) (ImageReq, string) {
 	return req, ""
 }
 
-func parseImage(task protocol.Task, pol policy.Policy) (ImageReq, string) {
+// BadSpecField is the task_reject field (agent-protocol v1.23) of an image
+// task that ParseImage refuses with bad_spec: the task key that failed, or
+// "spec.<key>" for an ImageSpec rule, from a fixed set of key names. It
+// never holds a value or an env key name. "" when the task is not refused
+// with bad_spec or no single key is to blame (the spec is not JSON).
+func BadSpecField(task protocol.Task, pol policy.Policy) string {
+	if task.Service != nil {
+		return "service"
+	}
+	req, code, field := parseImage(task, pol)
+	scrubImage(&req)
+	if code != "bad_spec" || !protocol.ValidRejectField(field) {
+		return ""
+	}
+	return field
+}
+
+func parseImage(task protocol.Task, pol policy.Policy) (ImageReq, string, string) {
 	if len(task.Spec) == 0 || len(task.Spec) > protocol.MaxFrame {
-		return ImageReq{}, "bad_spec"
+		return ImageReq{}, "bad_spec", ""
 	}
 	switch task.Kind {
 	case "image_deploy":
@@ -122,27 +140,27 @@ type rollbackBody struct {
 	Digest *string `json:"digest"`
 }
 
-func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string) {
+func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string, string) {
 	var body deployBody
 	var digest *string
 	if rollback {
 		var rb rollbackBody
 		if err := decodeStrict(raw, &rb); err != nil {
-			return ImageReq{}, "bad_spec"
+			return ImageReq{}, "bad_spec", decodeField(err)
 		}
 		body = rb.deployBody
 		digest = rb.Digest
 		if digest == nil {
-			return ImageReq{}, "bad_spec"
+			return ImageReq{}, "bad_spec", "digest"
 		}
 	} else if err := decodeStrict(raw, &body); err != nil {
-		return ImageReq{}, "bad_spec"
+		return ImageReq{}, "bad_spec", decodeField(err)
 	}
-	if body.Project == nil || body.Entry == nil || body.Spec == nil || body.SpecHash == nil {
-		return ImageReq{}, "bad_spec"
+	if field := missingDeployKey(body); field != "" {
+		return ImageReq{}, "bad_spec", field
 	}
 	if code := policyAndProject(pol, *body.Project); code != "" {
-		return ImageReq{}, code
+		return ImageReq{}, code, ""
 	}
 	req := ImageReq{
 		Project: *body.Project, Entry: *body.Entry, Spec: body.Spec,
@@ -155,24 +173,39 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	if body.EnvHash != nil {
 		// Present means exactly 64 lowercase hex. "" is refused too.
 		if !images.ValidSpecHash(*body.EnvHash) {
-			return req, "bad_spec"
+			return req, "bad_spec", "env_hash"
 		}
 		req.EnvHash = *body.EnvHash
 	}
-	if code := deployFields(req); code != "" {
-		return req, code
+	if field := deployFields(req); field != "" {
+		return req, "bad_spec", field
 	}
 	if code := imagePattern(pol, req); code != "" {
-		return req, code
+		return req, code, ""
 	}
 	if code := sharedNetworks(pol, req); code != "" {
-		return req, code
+		return req, code, ""
 	}
 	// v1.21 item 3: network "host" only for a host_network_projects slug.
 	if req.Spec.HostNetwork() && !pol.HostNetworkAllowed(req.Project) {
-		return req, "policy_denied"
+		return req, "policy_denied", ""
 	}
-	return req, ""
+	return req, "", ""
+}
+
+// missingDeployKey is the first required deploy key that is absent or null.
+func missingDeployKey(body deployBody) string {
+	switch {
+	case body.Project == nil:
+		return "project"
+	case body.Entry == nil:
+		return "entry"
+	case body.Spec == nil:
+		return "spec"
+	case body.SpecHash == nil:
+		return "spec_hash"
+	}
+	return ""
 }
 
 // sharedNetworks is the v1.13 pre-check: every spec network is defined in
@@ -191,22 +224,25 @@ type entryBody struct {
 	Entry   *string `json:"entry"`
 }
 
-func parseEntry(raw []byte, pol policy.Policy) (ImageReq, string) {
+func parseEntry(raw []byte, pol policy.Policy) (ImageReq, string, string) {
 	var body entryBody
 	if err := decodeStrict(raw, &body); err != nil {
-		return ImageReq{}, "bad_spec"
+		return ImageReq{}, "bad_spec", decodeField(err)
 	}
-	if body.Project == nil || body.Entry == nil {
-		return ImageReq{}, "bad_spec"
+	if body.Project == nil {
+		return ImageReq{}, "bad_spec", "project"
+	}
+	if body.Entry == nil {
+		return ImageReq{}, "bad_spec", "entry"
 	}
 	if code := policyAndProject(pol, *body.Project); code != "" {
-		return ImageReq{}, code
+		return ImageReq{}, code, ""
 	}
 	req := ImageReq{Project: *body.Project, Entry: *body.Entry}
 	if !images.ValidEntry(req.Entry) {
-		return req, "bad_spec"
+		return req, "bad_spec", "entry"
 	}
-	return req, ""
+	return req, "", ""
 }
 
 type logsBody struct {
@@ -215,22 +251,30 @@ type logsBody struct {
 	Lines   *int    `json:"lines"`
 }
 
-func parseLogs(raw []byte, pol policy.Policy) (ImageReq, string) {
+func parseLogs(raw []byte, pol policy.Policy) (ImageReq, string, string) {
 	var body logsBody
 	if err := decodeStrict(raw, &body); err != nil {
-		return ImageReq{}, "bad_spec"
+		return ImageReq{}, "bad_spec", decodeField(err)
 	}
-	if body.Project == nil || body.Entry == nil || body.Lines == nil {
-		return ImageReq{}, "bad_spec"
+	switch {
+	case body.Project == nil:
+		return ImageReq{}, "bad_spec", "project"
+	case body.Entry == nil:
+		return ImageReq{}, "bad_spec", "entry"
+	case body.Lines == nil:
+		return ImageReq{}, "bad_spec", "lines"
 	}
 	if code := policyAndProject(pol, *body.Project); code != "" {
-		return ImageReq{}, code
+		return ImageReq{}, code, ""
 	}
 	req := ImageReq{Project: *body.Project, Entry: *body.Entry, Lines: *body.Lines}
-	if !images.ValidEntry(req.Entry) || req.Lines < 1 || req.Lines > 2000 {
-		return req, "bad_spec"
+	if !images.ValidEntry(req.Entry) {
+		return req, "bad_spec", "entry"
 	}
-	return req, ""
+	if req.Lines < 1 || req.Lines > 2000 {
+		return req, "bad_spec", "lines"
+	}
+	return req, "", ""
 }
 
 func policyAndProject(pol policy.Policy, project string) string {
@@ -252,31 +296,36 @@ func projectListed(projects []string, project string) bool {
 	return false
 }
 
+// deployFields runs the field rules of a deploy or rollback. It returns
+// the field that failed (BadSpecField), or "" when every rule passes.
 func deployFields(req ImageReq) string {
-	if !images.ValidEntry(req.Entry) || !images.ValidSpecHash(req.SpecHash) {
-		return "bad_spec"
+	if !images.ValidEntry(req.Entry) {
+		return "entry"
+	}
+	if !images.ValidSpecHash(req.SpecHash) {
+		return "spec_hash"
 	}
 	if req.Digest != "" && !images.ValidDigest(req.Digest) {
-		return "bad_spec"
+		return "digest"
 	}
 	if !authOK(req.Auth) {
-		return "bad_spec"
+		return "registry_auth"
 	}
 	if field := req.Spec.Validate(); field != "" {
-		return "bad_spec"
+		return "spec." + field
 	}
-	if field := images.ResolvedEnv(req.Env); field != "" {
-		return "bad_spec"
+	if images.ResolvedEnv(req.Env) != "" {
+		return "env"
 	}
 	if req.SecretKeys != nil {
 		for _, k := range req.SecretKeys {
 			if _, ok := req.Env[k]; !ok {
-				return "bad_spec"
+				return "secret_keys"
 			}
 		}
 	}
 	if images.CheckResolved(req.Spec.Files, images.AsMount(req.Files)) != "" {
-		return "bad_spec"
+		return "files"
 	}
 	return ""
 }
@@ -310,6 +359,54 @@ func imagePattern(pol policy.Policy, req ImageReq) string {
 		return "policy_denied"
 	}
 	return ""
+}
+
+// decodeField names the key of a strict-decode type error, from the image
+// body keys and, under spec, the ImageSpec keys. Anything else, including an
+// unknown key and a map key, gives "": only names this agent defines leave
+// the host.
+func decodeField(err error) string {
+	var te *json.UnmarshalTypeError
+	if !errors.As(err, &te) || te.Field == "" {
+		return ""
+	}
+	parts := strings.SplitN(te.Field, ".", 3)
+	if !bodyKeys[parts[0]] {
+		return ""
+	}
+	if parts[0] == "spec" && len(parts) > 1 && specKeys[parts[1]] {
+		return "spec." + parts[1]
+	}
+	return parts[0]
+}
+
+var (
+	bodyKeys = jsonKeys(rollbackBody{}, logsBody{})
+	specKeys = jsonKeys(images.ImageSpec{})
+)
+
+// jsonKeys is the set of json tag names of the structs' fields, embedded
+// structs included.
+func jsonKeys(values ...any) map[string]bool {
+	keys := map[string]bool{}
+	var walk func(t reflect.Type)
+	walk = func(t reflect.Type) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if f.Anonymous {
+				walk(f.Type)
+				continue
+			}
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name != "" && name != "-" {
+				keys[name] = true
+			}
+		}
+	}
+	for _, v := range values {
+		walk(reflect.TypeOf(v))
+	}
+	return keys
 }
 
 func decodeStrict(raw []byte, dest any) error {
