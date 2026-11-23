@@ -146,20 +146,25 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 	if rollback {
 		var rb rollbackBody
 		if err := decodeStrict(raw, &rb); err != nil {
+			scrubBody(&rb.deployBody)
 			return ImageReq{}, "bad_spec", decodeField(err)
 		}
 		body = rb.deployBody
 		digest = rb.Digest
 		if digest == nil {
+			scrubBody(&body)
 			return ImageReq{}, "bad_spec", "digest"
 		}
 	} else if err := decodeStrict(raw, &body); err != nil {
+		scrubBody(&body)
 		return ImageReq{}, "bad_spec", decodeField(err)
 	}
 	if field := missingDeployKey(body); field != "" {
+		scrubBody(&body)
 		return ImageReq{}, "bad_spec", field
 	}
 	if code := policyAndProject(pol, *body.Project); code != "" {
+		scrubBody(&body)
 		return ImageReq{}, code, ""
 	}
 	req := ImageReq{
@@ -191,6 +196,14 @@ func parseDeploy(raw []byte, pol policy.Policy, rollback bool) (ImageReq, string
 		return req, "policy_denied", ""
 	}
 	return req, "", ""
+}
+
+// scrubBody drops the secrets of a deploy body that never became an
+// ImageReq (ParseImage scrubs the ImageReq it returns).
+func scrubBody(body *deployBody) {
+	req := ImageReq{Env: body.Env, Auth: body.RegistryAuth, Files: body.Files}
+	scrubImage(&req)
+	body.Env, body.RegistryAuth, body.Files = nil, nil, nil
 }
 
 // missingDeployKey is the first required deploy key that is absent or null.
@@ -374,15 +387,28 @@ func decodeField(err error) string {
 	if !bodyKeys[parts[0]] {
 		return ""
 	}
-	if parts[0] == "spec" && len(parts) > 1 && specKeys[parts[1]] {
-		return "spec." + parts[1]
+	if parts[0] != "spec" || len(parts) < 2 || !specKeys[parts[1]] {
+		return parts[0]
 	}
-	return parts[0]
+	// A key of a nested spec object, named as Validate names it.
+	if len(parts) == 3 {
+		if keys := nestedKeys[parts[1]]; keys != nil {
+			if key, _, _ := strings.Cut(parts[2], "."); keys[key] {
+				return "spec." + parts[1] + "." + key
+			}
+		}
+	}
+	return "spec." + parts[1]
 }
 
 var (
-	bodyKeys = jsonKeys(rollbackBody{}, logsBody{})
-	specKeys = jsonKeys(images.ImageSpec{})
+	bodyKeys   = jsonKeys(rollbackBody{}, logsBody{})
+	specKeys   = jsonKeys(images.ImageSpec{})
+	nestedKeys = map[string]map[string]bool{
+		"healthcheck":   jsonKeys(images.Healthcheck{}),
+		"health_policy": jsonKeys(images.HealthPolicy{}),
+		"logging":       jsonKeys(images.Logging{}),
+	}
 )
 
 // jsonKeys is the set of json tag names of the structs' fields, embedded

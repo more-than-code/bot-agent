@@ -49,6 +49,8 @@ func TestBadSpecField(t *testing.T) {
 		// Unknown keys and map keys come from the task: they are not echoed.
 		{"unknown key", "image_deploy", nil, swap(`"force":false`, `"force":false,"sekret_name":1`), ""},
 		{"map key in type error", "image_deploy", nil, swap(`"env":{"NODE_ENV":"production","DB_URL"`, `"env":{"NODE_ENV":7,"DB_URL"`), "env"},
+		{"healthcheck type", "image_deploy", nil, swap(`"healthy_after_sec":5`, `"healthy_after_sec":5,"healthcheck":{"test":["x"],"interval_sec":10,"timeout_sec":"5","retries":3,"start_period_sec":0}`), "spec.healthcheck.timeout_sec"},
+		{"healthcheck range", "image_deploy", nil, swap(`"healthy_after_sec":5`, `"healthy_after_sec":5,"healthcheck":{"test":["x"],"interval_sec":10,"timeout_sec":61,"retries":3,"start_period_sec":0}`), "spec.healthcheck.timeout_sec"},
 		{"not json", "image_deploy", nil, []byte(`{`), ""},
 		{"accepted", "image_deploy", nil, []byte(good), ""},
 		{"policy denied", "image_deploy", nil, swap(`"project":"acme"`, `"project":"other"`), ""},
