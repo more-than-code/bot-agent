@@ -75,6 +75,12 @@ type Policy struct {
 	// HostFiles is the v1.18 list in file order. It is empty, not nil, on
 	// a valid policy without the keys and nil on an invalid one.
 	HostFiles []HostFile
+	// AgentUpgrade is the v1.20 agent_upgrade key. It is false on an
+	// invalid policy.
+	AgentUpgrade bool
+	// AgentUpgradeProxy is agent_upgrade_https_proxy (v1.20 item 1), the
+	// only proxy the upgrade download uses. Empty when unset or invalid.
+	AgentUpgradeProxy string
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -92,6 +98,13 @@ func (p Policy) ImagesEnabled() bool {
 // depend on enabled, images or projects; the edge has no project.
 func (p Policy) EdgeEnabled() bool {
 	return p.Valid && p.Edge
+}
+
+// AgentUpgradeEnabled is the hello programs.agent_upgrade flag and the
+// helper's agent_upgrade gate (agent-protocol v1.20): a valid policy with
+// agent_upgrade = true. It does not depend on enabled, images or projects.
+func (p Policy) AgentUpgradeEnabled() bool {
+	return p.Valid && p.AgentUpgrade
 }
 
 // OverlappingProjects reports the first pair, in list order, where one slug
@@ -240,6 +253,8 @@ func Load(f Files) Policy {
 	out.AllowPublicPorts = parsed.allowPublic
 	out.SharedNetworks = shared
 	out.Edge = parsed.edge
+	out.AgentUpgrade = parsed.agentUpgrade
+	out.AgentUpgradeProxy = parsed.upgradeProxy
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

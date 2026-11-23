@@ -54,7 +54,7 @@ func TestHelloHostFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `"host_files":[{"name":"dd-policy","path":"/etc/dd-worker/policy.toml","secret":false,"unit":"dd-worker.service","health":true},` +
-		`{"name":"dd-secrets","path":"/etc/dd-worker/secrets.env","secret":true,"unit":"dd-worker.service","health":false}]}`
+		`{"name":"dd-secrets","path":"/etc/dd-worker/secrets.env","secret":true,"unit":"dd-worker.service","health":false}],"agent_upgrade":false}`
 	if !strings.HasSuffix(string(b), want) || strings.Contains(string(b), "/usr/local/bin") {
 		t.Fatalf("%s", b)
 	}

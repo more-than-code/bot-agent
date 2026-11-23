@@ -13,3 +13,5 @@ host_files=3
 host_file dd-policy /etc/dd-worker/policy.toml 0644 dd-worker.service dd-worker secret=false health=true
 host_file dd-secrets /etc/dd-worker/secrets.env 0600 dd-worker.service dd-worker secret=true health=true
 host_file app /etc/app/app.conf 0640 app.service dd-worker secret=false health=false exec=unsafe
+agent_upgrade=false
+agent_upgrade_https_proxy=unset

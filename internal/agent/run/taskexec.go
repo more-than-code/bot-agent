@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -154,6 +155,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 	}
 	if task.Kind == hostfiles.Kind {
 		return protocol.TaskReject{}, a.runHostFile(ctx, task), true
+	}
+	if task.Kind == agentupgrade.Kind {
+		return protocol.TaskReject{}, a.runAgentUpgrade(ctx, task), true
 	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true

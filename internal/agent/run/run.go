@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/config"
 	"github.com/more-than-code/bot-agent/internal/agent/conn"
@@ -71,6 +72,10 @@ type Options struct {
 	SuperviseEvery time.Duration
 	// HostFilesEvery is the host_files_status period. Zero means 10 minutes.
 	HostFilesEvery time.Duration
+	// UpgradePollEvery and UpgradePollFor are the v1.20 result polling
+	// period and window. Zero means 10 s and 15 minutes.
+	UpgradePollEvery time.Duration
+	UpgradePollFor   time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -186,6 +191,12 @@ func Run(ctx context.Context, opt Options) error {
 		healthCh:  make(chan protocol.Sample, 128),
 		taskSlots: make(chan struct{}, maxRunningTasks),
 	}
+	a.life = ctx
+	// v1.20 item 2: the helper's last upgrade result, read once at start.
+	a.noteUpgradeResult(a.readUpgradeResult(ctx))
+	if pol.AgentUpgradeEnabled() {
+		a.startUpgradePoll()
+	}
 	a.noteUnlistedUnits(ctx)
 	if pol.ImagesEnabled() {
 		go a.supervise(ctx)
@@ -289,6 +300,21 @@ type agent struct {
 	// hostFilesWake is signalled after each host_file_apply so the session
 	// sends host_files_status (agent-protocol v1.18 item 5).
 	hostFilesWake wakeSignal
+	// life is Run's context; the v1.20 result poller outlives a session.
+	life context.Context
+	// lastUpgrade is the helper's last upgrade result (v1.20), under mu.
+	// upgradeSeq counts new results; upgradeSent is the last one the
+	// server got, in hello or the agent_upgrade_result frame.
+	lastUpgrade *agentupgrade.Result
+	upgradeSeq  uint64
+	upgradeSent uint64
+	upgradeWake wakeSignal
+	markerOnce  atomic.Bool
+	// polling, pollUntil and pollSawNew are the result poller's state,
+	// under mu.
+	polling    bool
+	pollUntil  time.Time
+	pollSawNew bool
 }
 
 type writer struct {

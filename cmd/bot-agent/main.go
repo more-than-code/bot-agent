@@ -121,6 +121,13 @@ func printPolicyCheck(w io.Writer, path string) error {
 		fmt.Fprintf(w, "host_file %s %s %s %s %s secret=%t health=%t%s\n",
 			f.Name, f.Path, hostfiles.FormatMode(f.Mode), f.Unit, f.RunAs.Name, f.Secret, len(f.Health) > 0, execNote)
 	}
+	// v1.20 item 1: the agent_upgrade key, after the host_file lines.
+	fmt.Fprintf(w, "agent_upgrade=%t\n", p.AgentUpgradeEnabled())
+	proxy := "unset"
+	if p.AgentUpgradeProxy != "" {
+		proxy = "set"
+	}
+	fmt.Fprintf(w, "agent_upgrade_https_proxy=%s\n", proxy)
 	return nil
 }
 

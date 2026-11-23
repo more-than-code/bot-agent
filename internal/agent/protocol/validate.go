@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
@@ -88,6 +89,15 @@ func ValidateAgent(raw []byte) error {
 			if x.SHA256 != "" && x.Size == nil {
 				return fmt.Errorf("host_files_status size")
 			}
+		}
+		return nil
+	case agentupgrade.Frame:
+		var f AgentUpgradeResult
+		if err := dec.Decode(&f); err != nil {
+			return err
+		}
+		if !f.Result.Valid() {
+			return fmt.Errorf("agent_upgrade_result")
 		}
 		return nil
 	case "auto_action":
@@ -180,6 +190,9 @@ func checkHello(f Hello) error {
 		if err := checkHostFiles(f.Programs.HostFiles); err != nil {
 			return err
 		}
+	}
+	if f.LastUpgrade != nil && !f.LastUpgrade.Valid() {
+		return fmt.Errorf("last_upgrade")
 	}
 	return checkDiscovered(f.Services)
 }

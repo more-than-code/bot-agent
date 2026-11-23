@@ -89,6 +89,9 @@ const (
 	ReasonImage         = "image_unavailable"
 	ReasonIO            = "io_error"
 	ReasonHelper        = "helper_unavailable"
+	// ReasonBusy is a mutation refused while an agent upgrade runs
+	// (agent-protocol v1.20 item 5).
+	ReasonBusy = "busy"
 )
 
 // Outcomes and states (item 4).
@@ -240,7 +243,7 @@ func decodeStrict(raw []byte, dest any) error {
 func FixedReason(code string) string {
 	switch code {
 	case ReasonDisabled, ReasonPortInUse, ReasonInvalidConfig, ReasonBadSpec,
-		ReasonConflict, ReasonDocker, ReasonImage, ReasonIO:
+		ReasonConflict, ReasonDocker, ReasonImage, ReasonIO, ReasonBusy:
 		return code
 	default:
 		return ReasonHelper

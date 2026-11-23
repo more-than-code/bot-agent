@@ -24,7 +24,7 @@ func hostFilesCheck(t *testing.T) string {
 }
 
 const hostFilesNone = "valid\nenabled=false\nprograms=false\nimages=false\nprojects=0\nmax_containers=20\n" +
-	"allow_public_ports=false\nimage_patterns=0\nprojects_overlap=false\nshared_networks=0\nedge=false\nhost_files=0\n"
+	"allow_public_ports=false\nimage_patterns=0\nprojects_overlap=false\nshared_networks=0\nedge=false\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\n"
 
 const hostFilesWant = "# Written by install.sh from host_files in /etc/bot-agent/runner.toml (agent-protocol v1.18).\n" +
 	"# Rerun install.sh upgrade --runner after changing host_files.\n" +

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
@@ -83,8 +84,15 @@ type Sys struct {
 // The result is one JSON object and never contains env values.
 func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	sys.logVerb = verb
+	// v1.20 item 5: no mutation while an upgrade runs.
+	if busy := busyForUpgrade(verb, sys); busy != nil {
+		return busy
+	}
 	if verb == hostfiles.VerbApply || verb == hostfiles.VerbStatus {
 		return handleHostFile(ctx, verb, in, sys)
+	}
+	if verb == agentupgrade.VerbStart || verb == agentupgrade.VerbResult {
+		return handleAgentUpgrade(ctx, verb, in, sys)
 	}
 	if edge.IsVerb(verb) {
 		return handleEdge(ctx, verb, in, sys)
