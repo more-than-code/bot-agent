@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
@@ -50,7 +51,8 @@ type UnitInfo struct {
 func FixedReason(reason string) string {
 	switch reason {
 	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
-		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker:
+		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker,
+		agentupgrade.ReasonBusy, agentupgrade.ReasonNotNewer:
 		return reason
 	default:
 		return ReasonPolicy
@@ -87,7 +89,8 @@ const VerbDockerCheck = "docker_check"
 func KnownVerb(verb string) bool {
 	switch verb {
 	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck,
-		hostfiles.VerbApply, hostfiles.VerbStatus:
+		hostfiles.VerbApply, hostfiles.VerbStatus,
+		agentupgrade.VerbStart, agentupgrade.VerbResult:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)

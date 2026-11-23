@@ -123,6 +123,8 @@ func (rg *rig) env() []string {
 		"BOT_AGENT_ENROLL_WAIT=0",
 		"BOT_AGENT_STUB_LOG="+rg.log,
 		"BOT_AGENT_STUB_DIR="+rg.stubs,
+		"BOT_AGENT_STUB_ROOT="+rg.root,
+		"BOT_AGENT_INSTALLER_HELLO_WAIT=0",
 		"PATH="+rg.stubs+string(os.PathListSeparator)+path,
 	)
 }
@@ -301,6 +303,25 @@ func writeStubs(t *testing.T, dir string) {
 	writeExe(t, filepath.Join(dir, "systemctl"), `#!/bin/sh
 set -eu
 printf '%s\n' "systemctl $*" >> "$BOT_AGENT_STUB_LOG"
+# A restarted agent whose hello the server acknowledges touches the
+# v1.20 marker. no-hello (every restart) and no-hello-once (the next one)
+# stand for an agent that never reconnects: the marker is removed. The
+# marker is dated 2099 so it is newer than the installer's reference even
+# on a filesystem with coarse timestamps.
+# The state directory is /var/lib/bot-agent, or the path in hello-dir.
+if [ "${1:-}" = "restart" ] && [ "${2:-}" = "bot-agent.service" ] && [ -n "${BOT_AGENT_STUB_ROOT:-}" ]; then
+  _sd=/var/lib/bot-agent
+  if [ -f "$BOT_AGENT_STUB_DIR/hello-dir" ]; then
+    _sd=$(cat "$BOT_AGENT_STUB_DIR/hello-dir")
+  fi
+  _mk="$BOT_AGENT_STUB_ROOT$_sd/last_hello"
+  if [ -f "$BOT_AGENT_STUB_DIR/no-hello-once" ] || [ -f "$BOT_AGENT_STUB_DIR/no-hello" ]; then
+    rm -f "$BOT_AGENT_STUB_DIR/no-hello-once" "$_mk"
+  else
+    mkdir -p "$BOT_AGENT_STUB_ROOT$_sd"
+    touch -m -t 209901010000 "$_mk"
+  fi
+fi
 for a in "$@"; do
   if [ "$a" = "--version" ]; then
     printf '%s\n' "systemd 252 (252.26-1~deb12u1)"

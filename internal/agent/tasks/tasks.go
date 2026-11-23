@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
@@ -78,6 +79,20 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 			return "bad_spec", ProbeSpec{}
 		}
 		if _, _, err := hostfiles.ParseApply(task.Spec); err != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.20 item 4: refused when this agent's hello had agent_upgrade
+	// false. The helper checks the policy and the version again.
+	if task.Kind == agentupgrade.Kind {
+		if !gate.Policy.AgentUpgradeEnabled() {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, ok := agentupgrade.ParseRequest(task.Spec); !ok {
 			return "bad_spec", ProbeSpec{}
 		}
 		return "", ProbeSpec{}

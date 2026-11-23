@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -22,11 +23,14 @@ type parsed struct {
 	sharedNets    []string
 	sharedMembers []string
 	edge          bool
+	agentUpgrade  bool
+	upgradeProxy  string
 	hostFiles     hostFileKeys
 }
 
 // parseTOML accepts the v1.3 keys, the v1.4 image keys, the v1.13 shared
-// network keys, the v1.15 edge key and the v1.18 host file keys. Unknown keys,
+// network keys, the v1.15 edge key, the v1.18 host file keys and the v1.20
+// agent_upgrade key. Unknown keys,
 // duplicates, and wrong types return a fixed reason. Values are not
 // included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
@@ -136,6 +140,18 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.edge = v
+		case "agent_upgrade":
+			v, ok := parseBool(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.agentUpgrade = v
+		case "agent_upgrade_https_proxy":
+			v, rest, ok := parseString(rest)
+			if !ok || strings.TrimSpace(rest) != "" || !ValidUpgradeProxy(v) {
+				return parsed{}, "parse"
+			}
+			out.upgradeProxy = v
 		default:
 			slot := out.hostFiles.field(key)
 			if slot == nil {
@@ -164,7 +180,8 @@ func knownKey(k string) bool {
 	switch k {
 	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
 		"images", "projects", "max_containers", "allow_public_ports",
-		"shared_networks", "shared_network_projects", "edge":
+		"shared_networks", "shared_network_projects", "edge", "agent_upgrade",
+		"agent_upgrade_https_proxy":
 		return true
 	default:
 		return isHostFileKey(k)
@@ -298,4 +315,33 @@ func (k *hostFileKeys) field(key string) *[]string {
 	default:
 		return nil
 	}
+}
+
+// MaxUpgradeProxy bounds agent_upgrade_https_proxy (agent-protocol v1.20
+// item 1).
+const MaxUpgradeProxy = 256
+
+// ValidUpgradeProxy accepts http(s)://host:port: a host, a numeric port
+// 1-65535, and no userinfo, path, query or fragment.
+func ValidUpgradeProxy(s string) bool {
+	if s == "" || len(s) > MaxUpgradeProxy {
+		return false
+	}
+	for _, c := range s {
+		if c <= ' ' || c == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	if u.User != nil || u.Opaque != "" || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	if u.Hostname() == "" || u.Port() == "" {
+		return false
+	}
+	port, err := strconv.Atoi(u.Port())
+	return err == nil && port >= 1 && port <= 65535 && strconv.Itoa(port) == u.Port()
 }

@@ -124,6 +124,21 @@ case "$SETTLE" in
   ''|*[!0-9]*) fail "BOT_AGENT_INSTALLER_SETTLE must be a non-negative integer" ;;
 esac
 
+# How long verify waits after a restart for the agent's hello marker
+# (agent-protocol v1.20 item 8). Outside test mode this stays 90s even if
+# the variable is set.
+HELLO_WAIT=90
+if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_INSTALLER_HELLO_WAIT:-}" ]; then
+  case "$BOT_AGENT_INSTALLER_HELLO_WAIT" in
+    *[!0-9]*) fail "BOT_AGENT_INSTALLER_HELLO_WAIT must be a non-negative integer" ;;
+  esac
+  HELLO_WAIT=$BOT_AGENT_INSTALLER_HELLO_WAIT
+fi
+# The agent touches last_hello in its state directory each time the server
+# acknowledges its hello: /var/lib/bot-agent unless BOT_AGENT_STATE_DIR in
+# /etc/bot-agent/env names another (hello_marker_path).
+HELLO_STATE_DEFAULT=/var/lib/bot-agent
+
 # How long enroll waits for the credential keys. Outside test mode this
 # stays 30s even if the variable is set.
 ENROLL_WAIT=30
@@ -1971,20 +1986,129 @@ require_running_version() {
   return 0
 }
 
+# hello_marker_path prints the host path of the agent's hello marker:
+# BOT_AGENT_STATE_DIR from the env file when it is set (the last one wins,
+# parsed by the same rules as env_credential_ready, never evaluated),
+# else /var/lib/bot-agent, plus /last_hello. A value that is not a plain
+# absolute path fails.
+hello_marker_path() {
+  _hm_dir=$HELLO_STATE_DEFAULT
+  if [ -f "$ENV_DEST" ] && [ ! -h "$ENV_DEST" ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      _trim=$_line
+      trim_spaces
+      _line=$_trim
+      case "$_line" in
+        ''|\#*) continue ;;
+        'export '*) _line=${_line#export } ;;
+      esac
+      case "$_line" in
+        *=*) ;;
+        *) continue ;;
+      esac
+      _trim=${_line%%=*}
+      trim_spaces
+      [ "$_trim" = "BOT_AGENT_STATE_DIR" ] || continue
+      _trim=${_line#*=}
+      trim_spaces
+      _val=$_trim
+      case "$_val" in
+        \"*\")
+          _q=$_val
+          if env_unquote; then
+            _val=$_uq
+          else
+            _val=bad
+          fi
+          ;;
+      esac
+      if [ -n "$_val" ]; then
+        _hm_dir=$_val
+      fi
+    done < "$ENV_DEST"
+    _line=
+    _trim=
+    _val=
+    _q=
+    _uq=
+  fi
+  case "$_hm_dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$_hm_dir" in
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+-]*|*/../*|*/..) return 1 ;;
+  esac
+  printf '%s\n' "$(hostpath "${_hm_dir%/}")/last_hello"
+}
+
+# wait_for_hello REF waits up to HELLO_WAIT seconds for the agent's hello
+# marker to be newer than REF, which was touched just before the restart.
+# A marker that is missing, a link, or not newer means the restarted agent
+# never got its hello acknowledged by the server.
+wait_for_hello() {
+  _wh_ref=$1
+  if ! _wh_mk=$(hello_marker_path); then
+    say "verify: BOT_AGENT_STATE_DIR in the env file is not a plain absolute path"
+    return 1
+  fi
+  _wh_waited=0
+  while :; do
+    if [ -f "$_wh_mk" ] && [ ! -h "$_wh_mk" ]; then
+      _wh_new=$(find "$_wh_mk" -prune -newer "$_wh_ref" -print 2>/dev/null) || _wh_new=
+      if [ -n "$_wh_new" ]; then
+        say "verify: hello acknowledged"
+        return 0
+      fi
+    fi
+    if [ "$_wh_waited" -ge "$HELLO_WAIT" ]; then
+      say "verify: no hello after restart"
+      return 1
+    fi
+    sleep 1 || return 1
+    _wh_waited=$((_wh_waited + 1))
+  done
+}
+
+# verify_active_version VERSION [rollback]
 # Restart and require NRestarts exactly 0 only when the host is enrolled.
+# After an upgrade the agent must also reconnect: its hello marker has to
+# be newer than the restart (agent-protocol v1.20 item 8), or verify fails
+# and the caller's rollback runs. A rollback's verify (second argument
+# "rollback") keeps the existing checks and does not wait for the marker:
+# an agent before 0.2.15 never writes it, and with the server down the
+# restored agent cannot say hello, yet the restored files are right.
 verify_active_version() {
   _expect=$1
+  _vmode=${2:-upgrade}
   if host_enrolled; then
     systemctl reset-failed bot-agent.service >/dev/null 2>&1 || true
+    _hello_ref=
+    if [ "$_vmode" != "rollback" ]; then
+      _hello_ref=$STATE/hello-ref
+      if ! touch "$_hello_ref"; then
+        say "verify: cannot write the hello reference"
+        return 1
+      fi
+    fi
     say "systemctl restart bot-agent.service"
     if ! systemctl restart bot-agent.service; then
+      [ -z "$_hello_ref" ] || rm -f "$_hello_ref"
       say "verify: restart failed"
       return 1
     fi
     if [ "$SETTLE" != "0" ]; then
       if ! sleep "$SETTLE"; then
+        [ -z "$_hello_ref" ] || rm -f "$_hello_ref"
         return 1
       fi
+    fi
+    if [ -n "$_hello_ref" ]; then
+      if ! wait_for_hello "$_hello_ref"; then
+        rm -f "$_hello_ref"
+        return 1
+      fi
+      rm -f "$_hello_ref"
     fi
     require_running_version "$_expect" || return 1
     return 0
@@ -2007,6 +2131,9 @@ say_restart_plan() {
   if host_enrolled; then
     say "dry-run: systemctl restart bot-agent.service"
     say "dry-run: sleep ${SETTLE} then check active and NRestarts"
+    if [ "${1:-upgrade}" != "rollback" ]; then
+      say "dry-run: wait up to ${HELLO_WAIT}s for the agent's last_hello to be newer than the restart"
+    fi
   else
     say "not enrolled: agent not restarted"
   fi
@@ -2233,7 +2360,7 @@ rollback_armed_now() {
   fi
   if [ "$_rb" = "0" ]; then
     _back=$(record_version "$RECORD") || _back=
-    verify_active_version "$_back" || _rb=$?
+    verify_active_version "$_back" rollback || _rb=$?
   fi
   if [ "$_rb" = "0" ]; then
     discard_prevs || _rb=$?
@@ -2257,7 +2384,7 @@ rollback_unverified() {
   finish_rollback_socket || fail "rollback failed"
   _back=$(record_version "$RECORD")
   _rc=0
-  verify_active_version "$_back" || _rc=$?
+  verify_active_version "$_back" rollback || _rc=$?
   if [ "$_rc" != "0" ]; then
     fail "rollback verify failed"
   fi
@@ -2363,7 +2490,7 @@ do_rollback() {
     prepare_dirs || fail "directories failed"
     say "dry-run: systemctl daemon-reload"
     finish_rollback_socket || fail "runner socket update failed"
-    say_restart_plan
+    say_restart_plan rollback
     say "summary: dry-run rollback ${_old}"
     exit 0
   fi
@@ -2381,7 +2508,7 @@ do_rollback() {
   systemctl daemon-reload || fail "daemon-reload failed"
   finish_rollback_socket || fail "runner socket update failed"
   _rc=0
-  verify_active_version "$_old" || _rc=$?
+  verify_active_version "$_old" rollback || _rc=$?
   if [ "$_rc" != "0" ]; then
     fail "rollback verify failed"
   fi

@@ -98,6 +98,7 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	}
 	programs, caps := a.helloPrograms()
 	a.sentDocker(programs != nil && programs.Docker)
+	lastUpgrade, upgradeSeq := a.upgradeSnapshot()
 	hello := protocol.Hello{
 		V: protocol.Version, Type: "hello",
 		HostID: a.cfg.HostID, CredentialID: a.cfg.CredentialID,
@@ -107,6 +108,7 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 		Programs:         programs,
 		Services:         services,
 		ServicesComplete: complete,
+		LastUpgrade:      lastUpgrade,
 	}
 	w := &writer{c: c, onSend: a.opt.OnSend}
 	if err := w.Send(ctx, hello); err != nil {
@@ -136,6 +138,10 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	if err != nil {
 		return errors.New("server_time")
 	}
+	// v1.20 item 8: the hello is acknowledged. The installer waits for
+	// this marker after a restart; hello carried last_upgrade.
+	a.writeHelloMarker()
+	a.markUpgradeSent(upgradeSeq)
 	a.offset = serverNow.Sub(a.opt.Now())
 	a.bo.Reset()
 	a.pingEvery = time.Duration(protocol.Heartbeat(okf.HeartbeatSec)) * time.Second
@@ -175,6 +181,10 @@ func (a *agent) steady(ctx context.Context, c *websocket.Conn) error {
 	}
 	// v1.18 item 5: host_files_status at hello.
 	if err := a.sendHostFiles(sess, w); err != nil {
+		return err
+	}
+	// v1.20 item 3: a result that arrived after hello was built.
+	if err := a.sendUpgradeResult(sess, w); err != nil {
 		return err
 	}
 	return a.loop(sess, w, events, errCh)
@@ -250,6 +260,11 @@ func (a *agent) loop(ctx context.Context, w *writer, events <-chan incoming, err
 				a.autoSent = map[string]bool{}
 			}
 			if err := a.sendAuto(ctx, w, a.autoSent); err != nil {
+				return err
+			}
+		case <-a.upgradeWake.wake():
+			stop()
+			if err := a.sendUpgradeResult(ctx, w); err != nil {
 				return err
 			}
 		case <-a.hostFilesWake.wake():

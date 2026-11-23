@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
@@ -132,6 +133,10 @@ type Programs struct {
 	// HostFiles is the v1.18 list from a valid policy, in file order, never
 	// null. No content and no command lines.
 	HostFiles []HostFileHello `json:"host_files"`
+	// AgentUpgrade is the v1.20 opt-in: true only when the policy is valid
+	// and agent_upgrade = true. Older agents omit it; the server reads
+	// that as false.
+	AgentUpgrade bool `json:"agent_upgrade"`
 }
 
 // HostFileHello is one hello.programs.host_files item (agent-protocol
@@ -252,6 +257,16 @@ type Hello struct {
 	// ServicesComplete is false when the first discovery did not finish.
 	// It is always sent. Older agents omit it, and the server reads that as true.
 	ServicesComplete bool `json:"services_complete"`
+	// LastUpgrade is the helper's last upgrade result (agent-protocol
+	// v1.20 item 2), or null. It is always sent.
+	LastUpgrade *agentupgrade.Result `json:"last_upgrade"`
+}
+
+// AgentUpgradeResult is the v1.20 agent_upgrade_result frame (item 3).
+type AgentUpgradeResult struct {
+	V      int                 `json:"v"`
+	Type   string              `json:"type"`
+	Result agentupgrade.Result `json:"result"`
 }
 
 // Services is the discovered set. It is sent when the set changes and at least every 300s while connected.

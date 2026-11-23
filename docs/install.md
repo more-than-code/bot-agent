@@ -462,3 +462,51 @@ sudo ./install.sh upgrade --runner
 From v0.2.8, programs run only for projects listed in `runner.toml`. On a host with the helper, where the policy has programs on but no `projects` line, `check`, the dry run and the upgrade exit 1 with `runner.toml allows programs but lists no projects; add projects = ["<slug>"] (from v0.2.8 programs run only for listed projects)` and change nothing. Add `projects = ["<slug>"]` with every project whose programs run on this host, as in [Review the host policy](#review-the-host-policy), run `check --runner` again, then upgrade.
 
 Leave `--runner` off when this host has no helper. The same version prints `summary: already at <version>` and changes nothing, unless you pass `--force`. If the upgrade fails after it has written the backup, it restores the `.prev` set. `rollback` restores that set later.
+
+From v0.2.15, on an enrolled host, the upgrade also waits up to 90 seconds after the restart for the agent to reconnect: the agent touches `last_hello` in its state directory (`/var/lib/bot-agent`, or `BOT_AGENT_STATE_DIR` from `/etc/bot-agent/env`) each time the server accepts its hello, and the installer prints `verify: hello acknowledged`. If the file is not newer than the restart, it prints `verify: no hello after restart`, and the upgrade restores the `.prev` set. Run an upgrade while the server is reachable. A rollback (the automatic one, or `install.sh rollback`) does not wait for the marker: it checks only that the restored agent is active with `NRestarts` 0 and the expected version, so it works with the server down and for agents older than 0.2.15. If that check fails, the installer ends with `rollback verify failed`.
+
+## Upgrades from Deploybot
+
+From bot-agent 0.2.15 (agent-protocol v1.20), the org's owners and admins can upgrade this host's agent from the console (or an AI agent through MCP, with their confirmation), without SSH. It is off until root turns it on, with one line in `/etc/bot-agent/runner.toml`:
+
+```toml
+agent_upgrade = true
+```
+
+Then check the file and restart the agent so its hello reports the change:
+
+```bash
+sudo bot-agent policy check /etc/bot-agent/runner.toml   # prints agent_upgrade=true
+sudo systemctl restart bot-agent
+```
+
+The installer never writes this line. An agent older than 0.2.15 rejects it as `unknown_key`, which turns programs and images off, so install 0.2.15 or later first (the usual SSH upgrade above; it is the last one this host needs). A host without the helper (`--runner`) cannot be upgraded this way.
+
+**What happens.** Deploybot names only a version. The host checks only that it is newer than the installed one and that its release is signed; that it is the latest release is up to Deploybot. The helper checks this line again, then starts a transient root unit, `bot-agent-upgrade`, that:
+
+1. downloads `SHA256SUMS` and `SHA256SUMS.sig` from `https://github.com/more-than-code/bot-agent/releases/download/v<version>/` (the address is built into the helper; the server cannot change it) and checks the signature with the release key built into the helper; only then does it download `bot-agent-v<version>.tar.gz`;
+2. checks that `SHA256SUMS` lists `install.sh` and the four `units/*` files, that every file matches, that the bundle holds no other file, and that the bundled agent prints the requested version;
+3. unpacks into `/var/lib/bot-agent-runner/upgrade/<version>/` (root only) and runs that bundle's `install.sh upgrade` (with `--runner`), the same upgrade you would run by hand;
+4. writes the outcome to `/var/lib/bot-agent-runner/upgrade/result.json`, which the agent reports to the console.
+
+A bundle with a bad signature, a wrong, missing or extra file, or a wrong version is refused before anything outside `/var/lib/bot-agent-runner/upgrade/` is touched. An upgrade does not start while an image deploy, an edge apply or a host-file apply is running (`busy`), and only one runs at a time. While it runs, deploys, program and container actions, edge changes and host-file applies answer `busy`. After a failed or rolled-back upgrade, the same version can be started again after 10 minutes (`busy` until then). If the unit is stopped (for example at its 15-minute limit), `install.sh` gets SIGTERM and up to 120 seconds to put the previous files back; the outcome is then `failed`.
+
+**Rollback.** The host rolls back by itself, without the server: if the new agent is not active, restarts, reports another version or does not reconnect within 90 seconds, `install.sh` restores the previous files and restarts the old agent, checking that it is active with the old version (it does not wait for it to reconnect, so this works with the server down). The console then shows `rolled_back` with the reason (`not_reconnected` or `install_failed`). If the restored agent fails that check, the outcome is `failed` (`install_failed`) and the host needs a look over SSH. The upgrade unit's output is in `journalctl -u bot-agent-upgrade`. Break-glass over SSH is the same as always, with any release bundle, for example the one the upgrade staged (its directory is root only, so run it through `sudo sh`):
+
+```bash
+sudo sh /var/lib/bot-agent-runner/upgrade/<version>/bot-agent-v<version>/install.sh rollback
+```
+
+To turn the feature off, remove the line (or set it to `false`) and `sudo systemctl restart bot-agent`. Deploybot can then never start an upgrade on this host.
+
+**Network.** The host needs outbound HTTPS to `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` on port 443; at most 5 redirects, 64 MiB and 120 seconds per file. Behind a proxy, add it to `runner.toml` (only `http://` or `https://`, a host and a port, no user name, password or path; anything else makes the whole file invalid):
+
+```toml
+agent_upgrade_https_proxy = "http://proxy.lan:3128"
+```
+
+`policy check` prints `agent_upgrade_https_proxy=set` (never the value). The upgrade uses only this setting; `HTTPS_PROXY` in `/etc/bot-agent/env` or the environment is ignored.
+
+**State directory.** If you moved the agent's state with `BOT_AGENT_STATE_DIR`, set it in `/etc/bot-agent/env`, not with a systemd `Environment=` line. The installer looks for the agent's `last_hello` where that file says; with the setting only in the unit, every upgrade rolls back.
+
+**New policy keys.** A release that needs a new `runner.toml` key says so in its release notes. An upgrade never edits `runner.toml`; add the key yourself after the upgrade.

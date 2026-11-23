@@ -621,3 +621,61 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - the health wait (v1.16): "the container kept restarting (N restarts[, last exit code C])", "the container exited with code C", "the container stopped", "the container is gone", "the Docker health check reported unhealthy", "the Docker health check was still starting when the wait ended", "health check GET :<port><path> answered <status>[ (expected <min>-<max>)]", "health check <proto> :<port>[<path>] timed out", "health check … : connection refused (nothing listens on that port)", "health check … failed", "the container did not stay running for <d>", "the container was not running", or "the container did not become healthy in time".
 3. For `rolled_back` and `rollback_failed` the reason is why the new container failed; the server adds what happened next. A job's non-zero exit stays in `exit_code` with no reason.
 4. **Servers:** an API before v1.47 ignores the key (the payload is read by field). API v1.47 stores it as the deploy's reason, after its own exact-value redaction, and falls back to a reason it works out from the outcome and status when the key is absent or not one line of at most 512 bytes. No other frame changes.
+
+## v1.20 agent upgrade from the server (renumbered from v1.19 on 2026-11-23 because of the clash above) (2026-11-23, approved spec `docs/spec-agent-self-upgrade.md` rev 1; additive, gated; not yet implemented)
+1. **`runner.toml` keys:**
+   - `agent_upgrade = true|false` (bool; missing = false).
+   - Optional `agent_upgrade_https_proxy = "http(s)://host:port"`: no userinfo or path, at most 256 bytes; anything else makes the policy invalid with `parse`. `policy check` prints `agent_upgrade_https_proxy=<set|unset>`.
+   - An older agent refuses it as `unknown_key`.
+   - `policy check` prints `agent_upgrade=<bool>` after the `host_file` lines.
+2. **Hello:**
+   - `programs.agent_upgrade` (bool). It is true only when the policy is valid and the key is true. It is absent where there is no `programs` block (no helper), which the API reads as false.
+   - Top-level **`last_upgrade`**: `{"version","outcome","reason","at"}` or `null`.
+     - `outcome` is one of `succeeded`, `rolled_back` or `failed`.
+     - `reason` is a token: `download_failed`, `signature_invalid`, `bundle_invalid`, `version_mismatch`, `install_failed`, `not_reconnected`, or empty.
+     - `at` is RFC 3339 UTC.
+     - It comes from the helper's result file, read at start.
+   - The API must know these fields before an agent sends them.
+3. **Frame `agent_upgrade_result`** (agent → API): `{"result":{same as last_upgrade}}`.
+   - It is sent whenever the helper's result differs from the last one this agent process sent or put in its hello.
+   - The result file is written after the installer finishes, so the new or restored agent usually starts before it exists.
+   - When the host is opted in, the agent polls the helper's `agent_upgrade_result` every 10 s, for up to 15 minutes: at start, and after it accepts an `agent_upgrade` task. It stops early once the upgrade unit is inactive and a new result has been sent.
+4. **Task kind `agent_upgrade`**, spec `{"version":"X.Y.Z"}`, timeout 120 s.
+   - The agent refuses it with `forbidden` when its hello had `agent_upgrade` false.
+   - It forwards the task to the helper verb `agent_upgrade`.
+   - **Success:** state `succeeded`, payload `{"state":"accepted"}`. The upgrade runs on after the task ends.
+   - **Failure:** state `failed` with `error_code` one of `policy_denied`, `busy`, `not_newer`, `bad_spec` or `helper_unavailable`.
+5. **Helper verb `agent_upgrade {"version"}`.**
+   - Checks, in order:
+     - it re-reads `runner.toml`; `agent_upgrade` must be true, else `policy_denied`;
+     - `version` matches `^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$` and is newer than the installed version (the installer record's `version` line), else `bad_spec` or `not_newer`;
+     - it takes the helper-wide lock without waiting, and no other helper lock may be held, else `busy`;
+     - no `bot-agent-upgrade.service` may be active, activating or deactivating, else `busy`;
+     - if the result file is under 10 minutes old, its outcome is not `succeeded` and its version equals the requested one, `busy` (a cool-down).
+   - It then starts `systemd-run --unit=bot-agent-upgrade --collect --property=RuntimeMaxSec=900 --property=TimeoutStopSec=150 --property=KillMode=mixed /usr/local/libexec/bot-agent-runner upgrade-run <version>` and answers `accepted`.
+   - While that unit is active, the mutating helper verbs (programs, images, edge, `host_file_apply`) answer `busy`.
+   - The host checks only "newer than installed, and signed". "Latest" is enforced by the server.
+   - Nothing from the request reaches the command except the checked version.
+6. **`bot-agent-runner upgrade-run <version>`** (root, transient unit, not the helper's sandbox):
+   1. **Download** from the fixed base `https://github.com/more-than-code/bot-agent/releases/download/v<version>/`: first `SHA256SUMS` and `SHA256SUMS.sig`, then only after step 2 passes `bot-agent-v<version>.tar.gz`.
+      - HTTPS only; redirects only to `github.com`, `objects.githubusercontent.com` or `release-assets.githubusercontent.com` on port 443 with no userinfo, at most 5.
+      - 64 MiB per file and 120 s per file.
+      - A proxy is used only from the root-owned `runner.toml` key `agent_upgrade_https_proxy` (item 1), never from the agent's env file.
+   2. **Verify** `SHA256SUMS.sig` (base64 Ed25519 over the exact `SHA256SUMS` bytes) with the public key compiled into the helper, else `signature_invalid`.
+      - A release built with the placeholder key refuses every bundle.
+   3. **Unpack** into `/var/lib/bot-agent-runner/upgrade/<version>/` (0700 root). Only regular files and directories are allowed, under one top directory `bot-agent-v<version>/`, with no `..`, absolute paths or links, and 256 MiB in total, including the decompressed stream. Otherwise `bundle_invalid`.
+      - The bundled `SHA256SUMS` must equal the signed one byte for byte.
+      - It must list `install.sh` and the four `units/*` files.
+      - Every listed file must match, and no unlisted file may be present.
+      - The bundled `bot-agent` for this architecture must print `<version>`, else `version_mismatch`.
+   4. **Install:** run the bundled `install.sh upgrade`, with `--runner` when the runner is installed, with `BOT_AGENT_INSTALL_BUNDLE` set to that directory.
+      - Exit 0 means `succeeded`.
+      - The installer's own restore means `rolled_back` with `not_reconnected` or `install_failed`.
+      - Anything else, including a stop by SIGTERM (passed on to the installer, which then gets 120 s to roll back), means `failed` with `install_failed`.
+   5. **Result:** write `/var/lib/bot-agent-runner/upgrade/result.json` (0600) with the outcome. Old staged versions are removed except the current one.
+7. **Helper verb `agent_upgrade_result {}`:** the result file's content, or `null`. Read only.
+8. **Installer (bundled `install.sh`):** `verify_active_version` additionally waits up to 90 s for `/var/lib/bot-agent/last_hello` to have an mtime after the restart.
+   - The agent writes that file on every acknowledged hello.
+   - A missing or old marker fails the verify, so the existing rollback runs. The rollback's verify keeps the existing checks (active, `NRestarts` 0, version) and does **not** wait for the marker: an agent older than 0.2.15 never writes it, and with the server down no agent can say hello. A rollback whose verify passes is `rolled_back`; a failed rollback verify is `failed` `install_failed`.
+   - `install.sh` documents the marker check. A plain SSH upgrade gets it as well.
+9. **Bootstrap:** this needs bot-agent 0.2.15 or later, installed once by the host owner, with `agent_upgrade = true` in `runner.toml`.
