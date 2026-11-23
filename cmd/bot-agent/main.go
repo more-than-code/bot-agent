@@ -145,6 +145,8 @@ func printPolicyCheck(w io.Writer, path string) error {
 	for _, f := range p.HostEnvFiles {
 		fmt.Fprintf(w, "host_env_file %s keys=%d sha256=%s image=%s\n", f.Label(), f.Keys, shortSum(f.SHA256), f.Image)
 	}
+	// v1.22 item 1: the console_policy key, last.
+	fmt.Fprintf(w, "console_policy=%t\n", p.ConsoleManaged())
 	return nil
 }
 

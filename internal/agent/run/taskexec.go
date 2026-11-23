@@ -11,6 +11,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/tasks"
@@ -186,6 +187,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 	}
 	if task.Kind == agentupgrade.Kind {
 		return protocol.TaskReject{}, a.runAgentUpgrade(ctx, task), true
+	}
+	if task.Kind == hostpolicy.Kind {
+		return protocol.TaskReject{}, a.runHostPolicy(ctx, task), true
 	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true

@@ -7,6 +7,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -90,7 +91,7 @@ func KnownVerb(verb string) bool {
 	switch verb {
 	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck,
 		hostfiles.VerbApply, hostfiles.VerbStatus,
-		agentupgrade.VerbStart, agentupgrade.VerbResult:
+		agentupgrade.VerbStart, agentupgrade.VerbResult, hostpolicy.Verb:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)

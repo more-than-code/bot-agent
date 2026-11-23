@@ -63,7 +63,8 @@ func TestPolicyCheckHostEnv(t *testing.T) {
 	want := "agent_upgrade_https_proxy=unset\n" +
 		"host_network_projects=deploybot,other\n" +
 		"host_env_file deploybot/api keys=2 sha256=" + apiSum[:12] + " image=ghcr.io/more-than-code/deploybot-server\n" +
-		"host_env_file deploybot/mcp keys=1 sha256=" + mcpSum[:12] + " image=ghcr.io/more-than-code/*\n"
+		"host_env_file deploybot/mcp keys=1 sha256=" + mcpSum[:12] + " image=ghcr.io/more-than-code/*\n" +
+		"console_policy=false\n"
 	if !strings.HasSuffix(out, want) {
 		t.Fatalf("got %q", out)
 	}

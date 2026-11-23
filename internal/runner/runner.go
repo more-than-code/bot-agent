@@ -17,6 +17,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -96,6 +97,9 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	}
 	if verb == agentupgrade.VerbStart || verb == agentupgrade.VerbResult {
 		return handleAgentUpgrade(ctx, verb, in, sys)
+	}
+	if verb == hostpolicy.Verb {
+		return handleHostPolicy(ctx, in, sys)
 	}
 	if edge.IsVerb(verb) {
 		return handleEdge(ctx, verb, in, sys)

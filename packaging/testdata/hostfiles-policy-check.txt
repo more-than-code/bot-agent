@@ -16,3 +16,4 @@ host_file app /etc/app/app.conf 0640 app.service dd-worker secret=false health=f
 agent_upgrade=false
 agent_upgrade_https_proxy=unset
 host_network_projects=none
+console_policy=false

@@ -141,6 +141,14 @@ type Programs struct {
 	// valid and host_network_projects is non-empty. Sent only when true
 	// (v1.21 item 7), so an older API never sees it.
 	HostNetwork bool `json:"host_network,omitempty"`
+	// ConsolePolicy is the v1.22 opt-in: true only when the policy is valid
+	// and console_policy = true. Sent only when true, so an older API never
+	// sees it.
+	ConsolePolicy bool `json:"console_policy,omitempty"`
+	// ImagePatterns is the policy's images list, sent only when
+	// ConsolePolicy is true: the host's root agreed to show it to org
+	// owners and admins. Otherwise image patterns are never sent.
+	ImagePatterns []string `json:"image_patterns,omitempty"`
 }
 
 // HostFileHello is one hello.programs.host_files item (agent-protocol

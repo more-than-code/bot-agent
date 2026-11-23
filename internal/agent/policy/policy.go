@@ -91,6 +91,10 @@ type Policy struct {
 	// ReasonEntry is "<project>/<entry>" when Reason is host_env_file and
 	// the line named a valid entry; empty otherwise. Never a path or value.
 	ReasonEntry string
+	// ConsolePolicy is the v1.22 console_policy key: the host's root lets
+	// org owners and admins change edge, images and projects from the
+	// console. It is false on an invalid policy.
+	ConsolePolicy bool
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -115,6 +119,13 @@ func (p Policy) EdgeEnabled() bool {
 // agent_upgrade = true. It does not depend on enabled, images or projects.
 func (p Policy) AgentUpgradeEnabled() bool {
 	return p.Valid && p.AgentUpgrade
+}
+
+// ConsoleManaged is the hello programs.console_policy flag and the
+// host_policy_apply gate (agent-protocol v1.22): a valid policy with
+// console_policy = true.
+func (p Policy) ConsoleManaged() bool {
+	return p.Valid && p.ConsolePolicy
 }
 
 // OverlappingProjects reports the first pair, in list order, where one slug
@@ -239,6 +250,31 @@ func Load(f Files) Policy {
 			return out
 		}
 	}
+	f.Passwd, f.Group = passwd, group
+	return fromBytes(out, data, f)
+}
+
+// FromBytes validates data with the same rules as Load, except the owner
+// and mode checks, which belong to the file. passwd and group empty mean
+// the host's. The helper uses it to check a rewritten policy before it is
+// written (agent-protocol v1.22).
+func FromBytes(data []byte, passwd, group string, exec ExecFS) Policy {
+	if passwd == "" {
+		passwd = DefaultPasswd
+	}
+	if group == "" {
+		group = DefaultGroup
+	}
+	out := Policy{Exists: true, Hash: hashBytes(data)}
+	if len(data) > MaxBytes {
+		out.Reason = "parse"
+		return out
+	}
+	// Host env files are checked by line only, as every helper verb does.
+	return fromBytes(out, data, Files{Passwd: passwd, Group: group, Exec: exec, SkipEnvFiles: true})
+}
+
+func fromBytes(out Policy, data []byte, f Files) Policy {
 	parsed, reason := parseTOML(data)
 	if reason != "" {
 		out.Reason = reason
@@ -258,7 +294,7 @@ func Load(f Files) Policy {
 		out.Reason = reason
 		return out
 	}
-	users := readAccounts(passwd, group)
+	users := readAccounts(f.Passwd, f.Group)
 	hostFiles, reason := validateHostFiles(parsed.hostFiles, users, f.Exec)
 	if reason != "" {
 		out.Reason = reason
@@ -289,6 +325,7 @@ func Load(f Files) Policy {
 	out.AgentUpgradeProxy = parsed.upgradeProxy
 	out.HostNetworkProjects = hostNet
 	out.HostEnvFiles = hostEnv
+	out.ConsolePolicy = parsed.consolePolicy
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]
