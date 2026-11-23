@@ -363,13 +363,13 @@ container_cgroupns = "host"
 
 ### Policy from the console
 
-From bot-agent 0.2.15 (agent-protocol v1.22), the root can let the org's owners and admins change three keys of this file from the host's Policy tab in the Deploybot console: `edge`, `images` and `projects`. It is off until root adds one line:
+From bot-agent 0.2.16 (agent-protocol v1.22), the root can let the org's owners and admins change three keys of this file from the host's Policy tab in the Deploybot console: `edge`, `images` and `projects`. It is off until root adds one line:
 
 ```toml
 console_policy = true
 ```
 
-Every other key stays the root's: the console cannot change `run_as`, `dirs`, `exec_allow`, `allow_shell`, shared networks, `host_files`, `agent_upgrade` or `console_policy` itself. An apply is checked by the helper against the file it was made from (an edit by hand in between refuses it), keeps `/etc/bot-agent/runner.toml.prev`, restarts bot-agent, and puts the previous file back when the agent does not reconnect within 90 seconds. While the line is on, the host's image patterns are shown to org owners and admins. `bot-agent policy check` ends with `console_policy=true` or `false`. An agent older than 0.2.15 rejects the key as `unknown_key`, which turns programs and images off, so upgrade first.
+Every other key stays the root's: the console cannot change `run_as`, `dirs`, `exec_allow`, `allow_shell`, shared networks, `host_files`, `agent_upgrade` or `console_policy` itself. An apply is checked by the helper against the file it was made from (an edit by hand in between refuses it), keeps `/etc/bot-agent/runner.toml.prev`, restarts bot-agent, and puts the previous file back when the agent does not reconnect within 90 seconds. While the line is on, the host's image patterns are shown to org owners and admins. `bot-agent policy check` ends with `console_policy=true` or `false`. An agent older than 0.2.16 rejects the key as `unknown_key`, which turns programs and images off, so upgrade first.
 
 ### Program secrets
 

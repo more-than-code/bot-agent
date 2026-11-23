@@ -37,7 +37,7 @@ max_programs = 20
 # Needs Docker, and 80 and 443 free and reachable from the internet.
 # edge = true
 
-# Console-managed policy (agent 0.2.15 and later; an older agent rejects this
+# Console-managed policy (agent 0.2.16 and later; an older agent rejects this
 # key and turns programs and images off, so upgrade the agent first). Lets the
 # host's org owners and admins change edge, images and projects from the
 # Deploybot console's host Policy tab. Every other key stays yours: the

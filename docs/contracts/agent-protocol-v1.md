@@ -718,7 +718,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - **Health in host mode:** `ports[].host` probes reach whatever listens on that loopback port; use a Docker healthcheck in the image (the Deploybot images have one) so another process on the port cannot mask a broken deploy.
    - **At rest:** stored results may hold up to the deploy's log tail (already redacted) for up to 7 days, 0600 under the agent's state directory.
 
-## v1.22 host policy from the console (2026-11-23, spec `docs/spec-console-host-policy.md` rev 2 §2.2 in bot-control-plane, as implemented; additive, gated by `runner.toml`; with api-v1 v1.51; implemented on bot-agent `dev` e2f7049, merged 20895c3; in bot-agent v0.2.15)
+## v1.22 host policy from the console (2026-11-23, spec `docs/spec-console-host-policy.md` rev 2 §2.2 in bot-control-plane, as implemented; additive, gated by `runner.toml`; with api-v1 v1.51; implemented on bot-agent `dev` e2f7049, merged 20895c3; in bot-agent v0.2.16)
 1. **`runner.toml` key `console_policy = true|false`** (missing = false). The host's root opts in once by hand; an older agent refuses the key as `unknown_key`. `bot-agent policy check` prints `console_policy=<bool>` as its last line.
    - Only three keys are console-editable: `edge`, `images` and `projects`. Never `enabled`, `run_as`, `dirs`, `exec_allow`, `allow_shell`, `max_programs`, `max_containers`, `allow_public_ports`, shared networks, `host_files`, `agent_upgrade`, its proxy, or `console_policy` itself.
 2. **Hello:** `programs.console_policy` (bool) and `programs.image_patterns` (the runner.toml `images`, sent only when `console_policy` is true; at most 64). The existing `programs.policy_hash`, `edge` and `projects` carry the rest. There is no result frame: the server reads the outcome from the next hello's `policy_hash`.
@@ -732,7 +732,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - stage the new file under `/var/lib/bot-agent-runner/policy/`, start the transient unit `bot-agent-policy` (`bot-agent-runner policy-run <base_hash> <new_hash>`) and answer `accepted` with `new_hash`. The helper's sandbox cannot write `/etc`; the unit does.
 5. **`bot-agent-runner policy-run`** (the transient unit, `RuntimeMaxSec` 300): wait 3 s so the agent can send the task result; check runner.toml still has `base_hash` and the staged file `new_hash`; keep `/etc/bot-agent/runner.toml.prev` (0600); write atomically; restart bot-agent and wait up to 90 s for `/var/lib/bot-agent/last_hello` newer than the restart. On failure it puts the previous file back and restarts again (`rolled_back`, `not_reconnected`). It writes `result.json` for the root and the journal.
 
-## v1.23 bad_spec names the field (2026-11-23, DD DEF-20261123-agent-bad-spec-refusals-don-t-name-the-f-yars; additive, no gate; with api-v1 v1.55; spec `docs/spec-refused-deploy.md` in bot-control-plane)
+## v1.23 bad_spec names the field (2026-11-23, DD DEF-20261123-agent-bad-spec-refusals-don-t-name-the-f-yars; additive, no gate; with api-v1 v1.55; spec `docs/spec-refused-deploy.md` in bot-control-plane; in bot-agent v0.2.16)
 
 1. **`task_reject` gains an optional `"field": string`**, sent only with `error_code` `bad_spec` on an image task (`image_*`). It is the key that failed, never a value:
    - a key of the task spec: `project`, `entry`, `spec`, `env`, `registry_auth`, `spec_hash`, `digest`, `files`, `secret_keys`, `env_hash`, `lines`; or `service` when the task frame's `service` is not null;
@@ -743,7 +743,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
 2. **No gate.** Every API reads `task_reject` by field and ignores an unknown key, so an older API keeps today's answer. API v1.55 and later show the field (api-v1 v1.55 item 1).
 3. A helper `bad_spec` (a `task_result`) is unchanged: v1.19 `reason` already explains it.
 
-## v1.24 containers on kernels without cgroup namespaces (2026-11-24, approved spec `docs/spec-agent-0216-cgroupns.md` rev 1 in the umbrella; additive, gated by `runner.toml`; no API change; for bot-agent v0.2.16)
+## v1.24 containers on kernels without cgroup namespaces (2026-11-24, approved spec `docs/spec-agent-0216-cgroupns.md` rev 1 in the umbrella; additive, gated by `runner.toml`; no API change; in bot-agent v0.2.16)
 
 1. **`runner.toml` key `container_cgroupns = "private"|"host"`** (missing = `private`). Only the host's root sets it; the v1.22 console rewrite never changes it. Any other value, or a duplicate key, is `parse`. An older agent refuses the key as `unknown_key`.
    - The helper sends `HostConfig.CgroupnsMode` from it for every container `container_deploy` creates (service and job, including an `image_rollback` that pulls) and for the edge container. `container_rollback` (the swap to the kept container) creates nothing. It was always `"private"` before; with the key absent nothing changes.
