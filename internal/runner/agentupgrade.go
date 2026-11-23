@@ -14,6 +14,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
@@ -68,7 +69,7 @@ func mutatingVerb(verb string) bool {
 	case "start", "stop", "restart",
 		images.VerbPull, images.VerbDeploy, images.VerbRollback, images.VerbRemove,
 		images.VerbStart, images.VerbStop, images.VerbRestart,
-		edge.VerbApply, edge.VerbStop, hostfiles.VerbApply:
+		edge.VerbApply, edge.VerbStop, hostfiles.VerbApply, hostpolicy.Verb:
 		return true
 	default:
 		return false

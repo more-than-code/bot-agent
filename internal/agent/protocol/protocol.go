@@ -137,6 +137,14 @@ type Programs struct {
 	// and agent_upgrade = true. Older agents omit it; the server reads
 	// that as false.
 	AgentUpgrade bool `json:"agent_upgrade"`
+	// ConsolePolicy is the v1.21 opt-in: true only when the policy is valid
+	// and console_policy = true. Older agents omit it; the server reads
+	// that as false.
+	ConsolePolicy bool `json:"console_policy"`
+	// ImagePatterns is the policy's images list, sent only when
+	// ConsolePolicy is true: the host's root agreed to show it to org
+	// owners and admins. Otherwise image patterns are never sent.
+	ImagePatterns []string `json:"image_patterns,omitempty"`
 }
 
 // HostFileHello is one hello.programs.host_files item (agent-protocol

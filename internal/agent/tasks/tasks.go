@@ -13,6 +13,7 @@ import (
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/probe"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -93,6 +94,20 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 			return "bad_spec", ProbeSpec{}
 		}
 		if _, ok := agentupgrade.ParseRequest(task.Spec); !ok {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.21 item 2: refused when this agent's hello had console_policy
+	// false. The helper checks the policy, the base hash and the result.
+	if task.Kind == hostpolicy.Kind {
+		if !gate.Policy.ConsoleManaged() {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, ok := hostpolicy.ParseRequest(task.Spec); !ok {
 			return "bad_spec", ProbeSpec{}
 		}
 		return "", ProbeSpec{}

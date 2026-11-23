@@ -25,12 +25,13 @@ type parsed struct {
 	edge          bool
 	agentUpgrade  bool
 	upgradeProxy  string
+	consolePolicy bool
 	hostFiles     hostFileKeys
 }
 
 // parseTOML accepts the v1.3 keys, the v1.4 image keys, the v1.13 shared
-// network keys, the v1.15 edge key, the v1.18 host file keys and the v1.20
-// agent_upgrade key. Unknown keys,
+// network keys, the v1.15 edge key, the v1.18 host file keys, the v1.20
+// agent_upgrade key and the v1.21 console_policy key. Unknown keys,
 // duplicates, and wrong types return a fixed reason. Values are not
 // included in the reason. Pattern and slug checks happen in Load.
 func parseTOML(data []byte) (parsed, string) {
@@ -146,6 +147,12 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.agentUpgrade = v
+		case "console_policy":
+			v, ok := parseBool(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.consolePolicy = v
 		case "agent_upgrade_https_proxy":
 			v, rest, ok := parseString(rest)
 			if !ok || strings.TrimSpace(rest) != "" || !ValidUpgradeProxy(v) {
@@ -181,7 +188,7 @@ func knownKey(k string) bool {
 	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
 		"images", "projects", "max_containers", "allow_public_ports",
 		"shared_networks", "shared_network_projects", "edge", "agent_upgrade",
-		"agent_upgrade_https_proxy":
+		"agent_upgrade_https_proxy", "console_policy":
 		return true
 	default:
 		return isHostFileKey(k)

@@ -15,3 +15,4 @@ host_file dd-secrets /etc/dd-worker/secrets.env 0600 dd-worker.service dd-worker
 host_file app /etc/app/app.conf 0640 app.service dd-worker secret=false health=false exec=unsafe
 agent_upgrade=false
 agent_upgrade_https_proxy=unset
+console_policy=false

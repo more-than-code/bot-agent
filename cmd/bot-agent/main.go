@@ -128,6 +128,8 @@ func printPolicyCheck(w io.Writer, path string) error {
 		proxy = "set"
 	}
 	fmt.Fprintf(w, "agent_upgrade_https_proxy=%s\n", proxy)
+	// v1.21 item 1: the console_policy key, last.
+	fmt.Fprintf(w, "console_policy=%t\n", p.ConsoleManaged())
 	return nil
 }
 
