@@ -183,10 +183,10 @@ func (a *agent) deployImage(ctx context.Context, task protocol.Task, req tasks.I
 	}
 	digest, code, err := a.pullImage(ctx, req, pullRef)
 	if err != nil {
-		return a.deployResult(task, "failed", "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResultWhy(task, "failed", "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), whyHelper, ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResultWhy(task, outcomeFor(code), "", nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), codeWhy(code), ex)
 	}
 	if task.Kind == "image_rollback" || req.Spec.Kind == "service" {
 		return a.deployService(ctx, task, req, wait, digest, ex, secrets)
@@ -208,7 +208,7 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 		return a.deployResult(task, "failed", "", nil, missingStatus(), tail(), ex), true
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), "", nil, missingStatus(), tail(), ex), true
+		return a.deployResultWhy(task, outcomeFor(code), "", nil, missingStatus(), tail(), codeWhy(code), ex), true
 	}
 	if resp.Prev == nil || resp.Prev.Digest == nil || *resp.Prev.Digest != req.Digest {
 		return protocol.TaskResult{}, false
@@ -224,7 +224,7 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex), true
 	}
 	if rcode != "" {
-		return a.deployResult(task, outcomeFor(rcode), digest, nil, missingStatus(), tail(), ex), true
+		return a.deployResultWhy(task, outcomeFor(rcode), digest, nil, missingStatus(), tail(), codeWhy(rcode), ex), true
 	}
 	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
@@ -232,12 +232,12 @@ func (a *agent) rollbackKept(ctx context.Context, task protocol.Task, req tasks.
 		if w.code != "" {
 			outcome = outcomeFor(w.code)
 		}
-		return a.deployResult(task, outcome, digest, nil, w.last, tail(), ex), true
+		return a.deployResultWhy(task, outcome, digest, nil, w.last, tail(), codeWhy(w.code), ex), true
 	}
 	if !w.healthy {
 		// The swapped container is the previous generation. There is no
 		// older one to return to.
-		return a.deployResult(task, "failed", digest, nil, w.last, tail(), ex), true
+		return a.deployResultWhy(task, "failed", digest, nil, w.last, tail(), w.why, ex), true
 	}
 	return a.deployResult(task, "succeeded", digest, nil, w.last, tail(), ex), true
 }
@@ -248,7 +248,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, missingStatus(), a.tailImage(ctx, req.Project, req.Entry, ex, secrets), codeWhy(code), ex)
 	}
 	st, hash, filesHash := resp.Status, resp.SpecHash, resp.FilesHash
 	same := !req.Force && st.State == "running" && st.Digest != nil && *st.Digest == digest && hash == req.SpecHash && filesHash == images.FilesHash(images.AsMount(req.Files))
@@ -267,10 +267,10 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		}
 	}
 	if code, err = a.deployContainer(ctx, req, digest); err != nil {
-		return a.deployResult(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResultWhy(task, "failed", digest, nil, st, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), whyHelper, ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), codeWhy(code), ex)
 	}
 	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
 	if w.err != nil || w.code != "" {
@@ -278,7 +278,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 		if w.code != "" {
 			outcome = outcomeFor(w.code)
 		}
-		return a.deployResult(task, outcome, digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
+		return a.deployResultWhy(task, outcome, digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), codeWhy(w.code), ex)
 	}
 	if w.healthy {
 		return a.deployResult(task, "succeeded", digest, nil, w.last, a.tailImage(ctx, req.Project, req.Entry, ex, secrets), ex)
@@ -291,7 +291,7 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	}
 	if onFail == images.DeployFailKeep {
 		// The new container stays running; -prev stays parked.
-		return a.failedAfterWait(ctx, task, req, digest, w.last, ex, secrets)
+		return a.failedAfterWait(ctx, task, req, digest, w.last, w.why, ex, secrets)
 	}
 	// st is the status from before container_deploy. Roll back only when
 	// that container was running. Rollback Starts whatever deploy parked,
@@ -300,28 +300,28 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	// image_rollback still rolls back. on_deploy_failure stop always stops.
 	if onFail == images.DeployFailStop || (task.Kind != "image_rollback" && st.State != "running") {
 		a.stopContainer(ctx, req.Project, req.Entry)
-		return a.failedAfterWait(ctx, task, req, digest, w.last, ex, secrets)
+		return a.failedAfterWait(ctx, task, req, digest, w.last, w.why, ex, secrets)
 	}
 	rcode, rerr := a.rollbackContainer(ctx, req.Project, req.Entry)
 	lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	last := w.last
 	if rerr != nil || rcode != "" {
-		return a.deployResult(task, "rollback_failed", digest, nil, last, lines, ex)
+		return a.deployResultWhy(task, "rollback_failed", digest, nil, last, lines, w.why, ex)
 	}
 	if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
 		last = again.Status
 	}
-	return a.deployResult(task, "rolled_back", digest, nil, last, lines, ex)
+	return a.deployResultWhy(task, "rolled_back", digest, nil, last, lines, w.why, ex)
 }
 
 // failedAfterWait reports outcome failed with the container's status now
 // and its last log lines. It does not roll back.
-func (a *agent) failedAfterWait(ctx context.Context, task protocol.Task, req tasks.ImageReq, digest string, last images.ImageStatus, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
+func (a *agent) failedAfterWait(ctx context.Context, task protocol.Task, req tasks.ImageReq, digest string, last images.ImageStatus, why string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
 	lines := a.tailImage(ctx, req.Project, req.Entry, ex, secrets)
 	if again, code, err := a.imageStatus(ctx, req.Project, req.Entry); err == nil && code == "" {
 		last = again.Status
 	}
-	return a.deployResult(task, "failed", digest, nil, last, lines, ex)
+	return a.deployResultWhy(task, "failed", digest, nil, last, lines, why, ex)
 }
 
 func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.ImageReq, deadline time.Time, digest string, ex redact.Exact, secrets logSecrets) protocol.TaskResult {
@@ -333,7 +333,7 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 		return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, missingStatus(), tail(), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, missingStatus(), tail(), codeWhy(code), ex)
 	}
 	st := resp.Status
 	// With shared networks the helper may refuse (v1.17 item 2) and must
@@ -345,14 +345,14 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 			return a.deployResult(task, "failed", digest, nil, st, tail(), ex)
 		}
 		if code != "" {
-			return a.deployResult(task, outcomeFor(code), digest, nil, st, tail(), ex)
+			return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, tail(), codeWhy(code), ex)
 		}
 	}
 	if code, err = a.deployContainer(ctx, req, digest); err != nil {
 		return a.deployResult(task, "failed", digest, nil, st, tail(), ex)
 	}
 	if code != "" {
-		return a.deployResult(task, outcomeFor(code), digest, nil, st, refusalLines(code, tail()), ex)
+		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, tail()), codeWhy(code), ex)
 	}
 	jobDeadline := a.now().Add(time.Duration(req.Spec.TimeoutSec) * time.Second)
 	if deadline.Before(jobDeadline) {
@@ -365,7 +365,7 @@ func (a *agent) deployJob(ctx context.Context, task protocol.Task, req tasks.Ima
 			return a.deployResult(task, "failed", digest, nil, missingStatus(), tail(), ex)
 		}
 		if code != "" {
-			return a.deployResult(task, outcomeFor(code), digest, nil, st, tail(), ex)
+			return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, tail(), codeWhy(code), ex)
 		}
 		if st.State == "exited" {
 			outcome := "failed"
@@ -395,6 +395,9 @@ type healthStop struct {
 	code    string
 	err     error
 	last    images.ImageStatus
+	// why says why the wait was not healthy (agent-protocol v1.19); "" when
+	// healthy or on err.
+	why string
 }
 
 func (a *agent) waitHealthy(ctx context.Context, deadline time.Time, req tasks.ImageReq, need time.Duration) healthStop {
@@ -425,9 +428,10 @@ func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.Im
 	}
 	checks := a.checksForEntry(req.Entry, hostPortsOf(req.Spec))
 	last := missingStatus()
+	why := whyNotHealthyInTime
 	for {
 		if a.expired(ctx, deadline) {
-			return healthStop{last: last}
+			return healthStop{last: last, why: why}
 		}
 		items, _, err := a.listContainers(ctx)
 		if err != nil {
@@ -437,7 +441,10 @@ func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.Im
 		if found {
 			last = statusFromList(it)
 			if healthOf(it) == "unhealthy" {
-				return healthStop{last: last}
+				return healthStop{last: last, why: whyDockerUnhealthy}
+			}
+			if healthOf(it) == "starting" {
+				why = whyDockerStarting
 			}
 		}
 		// v1.16: container_list has no restart count, so each poll also
@@ -452,12 +459,14 @@ func (a *agent) waitDocker(ctx context.Context, deadline time.Time, req tasks.Im
 			return healthStop{code: code, last: last}
 		}
 		if terminalState(resp.Status.State) || restartLoop(resp.Status) {
-			return healthStop{last: resp.Status}
+			return healthStop{last: resp.Status, why: stateWhy(resp.Status)}
 		}
 		if found && healthOf(it) == "healthy" {
-			if len(checks) == 0 || a.probesOK(ctx, checks) {
+			ok, probeWhy := a.probesOK(ctx, checks)
+			if ok {
 				return healthStop{healthy: true, last: last}
 			}
+			why = probeWhy
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
 			return a.waitFail(ctx, deadline, err, last)
@@ -539,7 +548,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 	last := missingStatus()
 	for {
 		if a.expired(ctx, deadline) {
-			return healthStop{last: last}
+			return healthStop{last: last, why: stableWhy(last, need)}
 		}
 		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
@@ -550,7 +559,7 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 		}
 		last = resp.Status
 		if terminalState(last.State) || restartLoop(last) {
-			return healthStop{last: last}
+			return healthStop{last: last, why: stateWhy(last)}
 		}
 		if last.State == "running" {
 			now := a.now()
@@ -572,9 +581,10 @@ func (a *agent) waitStable(ctx context.Context, deadline time.Time, project, ent
 
 func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, entry string, checks []protocol.HealthCheck) healthStop {
 	last := missingStatus()
+	why := whyNotHealthyInTime
 	for {
 		if a.expired(ctx, deadline) {
-			return healthStop{last: last}
+			return healthStop{last: last, why: why}
 		}
 		resp, code, err := a.imageStatus(ctx, project, entry)
 		if err != nil {
@@ -585,10 +595,16 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 		}
 		last = resp.Status
 		if terminalState(last.State) || restartLoop(last) {
-			return healthStop{last: last}
+			return healthStop{last: last, why: stateWhy(last)}
 		}
-		if last.State == "running" && a.probesOK(ctx, checks) {
-			return healthStop{healthy: true, last: last}
+		if last.State == "running" {
+			ok, probeWhy := a.probesOK(ctx, checks)
+			if ok {
+				return healthStop{healthy: true, last: last}
+			}
+			why = probeWhy
+		} else {
+			why = whyNotRunning
 		}
 		if err := a.sleep(ctx, imagePoll); err != nil {
 			return a.waitFail(ctx, deadline, err, last)
@@ -596,7 +612,9 @@ func (a *agent) waitProbes(ctx context.Context, deadline time.Time, project, ent
 	}
 }
 
-func (a *agent) probesOK(ctx context.Context, checks []protocol.HealthCheck) bool {
+// probesOK runs the checks in order. The first that fails ends the round
+// and names itself in why (agent-protocol v1.19).
+func (a *agent) probesOK(ctx context.Context, checks []protocol.HealthCheck) (bool, string) {
 	for _, c := range checks {
 		res := probe.Do(ctx, probe.Spec{
 			Protocol: c.Protocol, Port: c.Port, Path: c.Path,
@@ -604,10 +622,10 @@ func (a *agent) probesOK(ctx context.Context, checks []protocol.HealthCheck) boo
 			Timeout: 10 * time.Second,
 		})
 		if res.Result != "success" {
-			return false
+			return false, probeWhy(c, res)
 		}
 	}
-	return true
+	return true, ""
 }
 
 func (a *agent) checksForEntry(entry string, ports []int) []protocol.HealthCheck {
@@ -909,7 +927,7 @@ func (a *agent) expired(ctx context.Context, deadline time.Time) bool {
 // cancel and any other error stay on the stop so the caller does not.
 func (a *agent) waitFail(ctx context.Context, deadline time.Time, err error, last images.ImageStatus) healthStop {
 	if a.deadlineMiss(ctx, deadline) {
-		return healthStop{last: last}
+		return healthStop{last: last, why: whyNotHealthyInTime}
 	}
 	return healthStop{err: err, last: last}
 }
@@ -941,6 +959,12 @@ func outcomeFor(code string) string {
 }
 
 func (a *agent) deployResult(task protocol.Task, outcome, digest string, exit *int, st images.ImageStatus, lines []string, ex redact.Exact) protocol.TaskResult {
+	return a.deployResultWhy(task, outcome, digest, exit, st, lines, "", ex)
+}
+
+// deployResultWhy adds reason (agent-protocol v1.19) when why is set and
+// the outcome is not a success.
+func (a *agent) deployResultWhy(task protocol.Task, outcome, digest string, exit *int, st images.ImageStatus, lines []string, why string, ex redact.Exact) protocol.TaskResult {
 	var dig any
 	if digest != "" {
 		dig = digest
@@ -952,10 +976,14 @@ func (a *agent) deployResult(task protocol.Task, outcome, digest string, exit *i
 	if lines == nil {
 		lines = []string{}
 	}
-	payload := ex.Payload(map[string]any{
+	fields := map[string]any{
 		"outcome": outcome, "digest": dig, "exit_code": code,
 		"status": normalizeStatus(st), "lines": lines,
-	})
+	}
+	if why != "" && outcome != "succeeded" && outcome != "unchanged" {
+		fields["reason"] = why
+	}
+	payload := ex.Payload(fields)
 	return imageTaskResult(task, outcome, payload)
 }
 
