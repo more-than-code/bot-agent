@@ -600,7 +600,25 @@ func ValidateImageDeploy(raw []byte) error {
 		return err
 	}
 	need := []string{"outcome", "digest", "exit_code", "status", "lines"}
-	if len(m) != len(need) {
+	// v1.19: reason is optional, one line of at most 512 bytes, and only on
+	// an outcome other than succeeded or unchanged.
+	extra := 0
+	if raw, ok := m["reason"]; ok {
+		extra = 1
+		var why string
+		if err := json.Unmarshal(raw, &why); err != nil || why == "" || len(why) > 512 || !utf8.ValidString(why) {
+			return fmt.Errorf("reason")
+		}
+		for _, r := range why {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("reason")
+			}
+		}
+		if o := unquote(m["outcome"]); o == "succeeded" || o == "unchanged" {
+			return fmt.Errorf("reason on %s", o)
+		}
+	}
+	if len(m) != len(need)+extra {
 		return fmt.Errorf("deploy keys %d", len(m))
 	}
 	for _, k := range need {
