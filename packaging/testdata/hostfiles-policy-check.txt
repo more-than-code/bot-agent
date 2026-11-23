@@ -17,3 +17,4 @@ agent_upgrade=false
 agent_upgrade_https_proxy=unset
 host_network_projects=none
 console_policy=false
+container_cgroupns=private

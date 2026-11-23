@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/more-than-code/bot-agent/internal/agent/images"
+	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 )
 
@@ -18,7 +19,7 @@ func TestEnvHashWithNetworksCreate(t *testing.T) {
 	spec := literalSpec()
 	spec.Networks = []string{"dd"}
 	body, code := buildCreate("mohiguide", "web", digestA, hashC, envHashA, "0123456789abcdef", spec,
-		map[string]string{"A": "b"}, nil, []string{"ghcr.io/joe-and-his-friends/*"}, false, "")
+		map[string]string{"A": "b"}, nil, []string{"ghcr.io/joe-and-his-friends/*"}, false, "", policy.CgroupnsPrivate)
 	if code != "" {
 		t.Fatal(code)
 	}

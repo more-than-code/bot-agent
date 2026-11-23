@@ -100,7 +100,7 @@ type createBody struct {
 
 // hostEnvSum is the SHA-256 of the merged host env file (v1.21 item 4),
 // stored as LabelHostEnv; "" when the entry has none.
-func buildCreate(project, entry, digest, specHash, envHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool, hostEnvSum string) ([]byte, string) {
+func buildCreate(project, entry, digest, specHash, envHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool, hostEnvSum, cgroupns string) ([]byte, string) {
 	ref, err := images.Parse(spec.Image)
 	if err != nil {
 		return nil, programs.ReasonBadSpec
@@ -130,7 +130,7 @@ func buildCreate(project, entry, digest, specHash, envHash, host string, spec im
 		HostConfig: hostConfigBody{
 			RestartPolicy: restartBody{Name: restart},
 			NetworkMode:   net,
-			CgroupnsMode:  "private",
+			CgroupnsMode:  cgroupns,
 			PidsLimit:     1024,
 			LogConfig: logConfigBody{
 				Type: "json-file",

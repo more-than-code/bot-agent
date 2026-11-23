@@ -347,6 +347,20 @@ host_env_images       = ["deploybot/api=ghcr.io/more-than-code/deploybot-server"
 - An older agent rejects these keys as `unknown_key`. Upgrade the server first, then the agent, then add the keys and restart the agent.
 - **Deploys finish on the host.** From the same version, an image deploy, its health wait and its automatic rollback (and a job run) keep running when the connection to the server drops. The result is kept in `/var/lib/bot-agent/results/` (`0700`, owned by `bot-agent`; at most 100 files and 7 days) and sent again after the agent reconnects, until the server confirms it. A stored result can hold the deploy's last log lines (already redacted), at rest for up to 7 days. If the agent itself stops in the middle, no result is kept; the server settles that deploy. The agent unit creates the directory.
 
+### Hosts without cgroup namespaces (OpenVZ)
+
+From bot-agent 0.2.16 (agent-protocol v1.24). The helper starts every container in its own cgroup namespace. Some virtual machines, such as OpenVZ and some LXC hosts (`systemd-detect-virt` says `openvz` or `lxc`), run a kernel without cgroup namespaces. There, every deploy fails with "the container runtime on the host could not start the container", and the helper's log (`journalctl -u 'bot-agent-runner@*'`) shows `cgroup namespaces aren't enabled in the kernel`. On such a host, root can let containers use the host's cgroup namespace:
+
+```toml
+container_cgroupns = "host"
+```
+
+- The value is `"private"` (the default when the line is absent) or `"host"`. Any other value makes the policy invalid (`invalid: parse`).
+- **What it costs:** in `host` mode a container can read the host's cgroup hierarchy (resource usage of the host's other services). Use it only on a host that needs it, for images you trust. Memory, PIDs and log limits still apply.
+- `policy check` prints `container_cgroupns=private` or `host` as its last line.
+- The console can't change this key, even when `console_policy = true`.
+- An older agent rejects the key as `unknown_key`, which turns programs and images off. Upgrade the agent to 0.2.16 first, then add the key and restart the agent.
+
 ### Policy from the console
 
 From bot-agent 0.2.15 (agent-protocol v1.22), the root can let the org's owners and admins change three keys of this file from the host's Policy tab in the Deploybot console: `edge`, `images` and `projects`. It is off until root adds one line:

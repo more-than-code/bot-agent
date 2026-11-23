@@ -87,6 +87,8 @@ func engReason(err error) string {
 		return programs.ReasonImage
 	case errors.Is(err, errBadSpec):
 		return programs.ReasonBadSpec
+	case errors.Is(err, errStart):
+		return programs.ReasonStartFailed
 	default:
 		return programs.ReasonDocker
 	}
@@ -351,7 +353,7 @@ func doDeploy(ctx context.Context, in []byte, pol policy.Policy, sys Sys) []byte
 	}
 	defer unlock()
 	return withEntry(ctx, sys, req.Project, req.Entry, func(eng engine, host string) []byte {
-		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, env, req.Files, pol.Images, pol.AllowPublicPorts, hostEnvSum)
+		body, code := buildCreate(req.Project, req.Entry, req.Digest, req.SpecHash, req.EnvHash, host, req.Spec, env, req.Files, pol.Images, pol.AllowPublicPorts, hostEnvSum, pol.CgroupnsMode())
 		if code != "" {
 			return imgErr(sys, code)
 		}
@@ -495,7 +497,7 @@ func deployService(ctx context.Context, sys Sys, eng engine, req images.DeployRe
 	if code := ensureVols(ctx, eng, req.Project, host, req.Spec.Volumes); code != "" {
 		return imgErr(sys, code)
 	}
-	out, code := createStart(ctx, eng, req.Project, req.Entry, body)
+	out, code := createStart(ctx, sys, eng, req.Project, req.Entry, body)
 	if code != "" {
 		return imgErr(sys, code)
 	}
@@ -545,7 +547,7 @@ func deployJob(ctx context.Context, sys Sys, eng engine, req images.DeployReques
 	if code := ensureVols(ctx, eng, req.Project, host, req.Spec.Volumes); code != "" {
 		return imgErr(sys, code)
 	}
-	out, code := createStart(ctx, eng, req.Project, req.Entry, body)
+	out, code := createStart(ctx, sys, eng, req.Project, req.Entry, body)
 	if code != "" {
 		return imgErr(sys, code)
 	}
@@ -1303,7 +1305,7 @@ func scopeMatch(labels map[string]string, host, project string) bool {
 		labels[images.LabelProject] == project
 }
 
-func createStart(ctx context.Context, eng engine, project, entry string, body []byte) ([]byte, string) {
+func createStart(ctx context.Context, sys Sys, eng engine, project, entry string, body []byte) ([]byte, string) {
 	name, ok := images.ContainerName(project, entry)
 	if !ok {
 		return nil, programs.ReasonBadSpec
@@ -1313,6 +1315,13 @@ func createStart(ctx context.Context, eng engine, project, entry string, body []
 		return nil, engReason(err)
 	}
 	if err := eng.Start(ctx, id); err != nil {
+		// v1.24: do not leave the created, never-started container behind.
+		rctx, cancel := recoverCtx(ctx)
+		rerr := eng.Remove(rctx, id)
+		cancel()
+		if rerr != nil {
+			logf(sys, "bot-agent-runner: could not remove a container that failed to start")
+		}
 		return nil, engReason(err)
 	}
 	return images.Encode(images.IDResponse{ContainerID: id}), ""

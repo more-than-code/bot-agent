@@ -411,7 +411,7 @@ func TestRestoreRenameFailuresLogged(t *testing.T) {
 	e.fake.renameFailFrom = e.fake.renameN + 3
 	e.fake.mu.Unlock()
 	raw := e.call(images.VerbRollback, mustJSON(t, entryReq("web")))
-	if imgCode(t, raw) != programs.ReasonDocker {
+	if imgCode(t, raw) != programs.ReasonStartFailed {
 		t.Fatalf("%s", raw)
 	}
 	assertCleanLog(t, logs(), root,

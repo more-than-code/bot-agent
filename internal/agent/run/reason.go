@@ -40,6 +40,8 @@ func codeWhy(code string) string {
 		return "another container is in the way on the host"
 	case programs.ReasonDocker:
 		return "Docker is not reachable on the host"
+	case programs.ReasonStartFailed:
+		return "the container runtime on the host could not start the container (see the bot-agent-runner log on the host)"
 	case programs.ReasonNetworksDocker:
 		return "shared networks need Docker 25 or later on the host"
 	case programs.ReasonHelper:

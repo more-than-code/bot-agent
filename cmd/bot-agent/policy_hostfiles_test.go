@@ -48,7 +48,7 @@ func TestPolicyCheckHostFiles(t *testing.T) {
 		"host_files=2\n" +
 		"host_file dd-policy /etc/dd-worker/policy.toml 0644 dd-worker.service dd-worker secret=false health=true\n" +
 		"host_file dd-secrets /etc/dd-worker/secrets.env 0600 dd-worker.service dd-worker secret=true health=false\n" +
-		"agent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\n"
+		"agent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n"
 	if !strings.HasSuffix(out, want) {
 		t.Fatalf("got %q", out)
 	}
@@ -85,7 +85,7 @@ func TestPolicyCheckHostFilesGolden(t *testing.T) {
 
 func TestPolicyCheckHostFilesNone(t *testing.T) {
 	out, err := runPolicyCheck(t, writePolicy(t, "enabled = true\n"))
-	if err != nil || !strings.HasSuffix(out, "edge=false\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\n") {
+	if err != nil || !strings.HasSuffix(out, "edge=false\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
 		t.Fatalf("%v %q", err, out)
 	}
 }

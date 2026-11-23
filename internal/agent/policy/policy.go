@@ -95,6 +95,27 @@ type Policy struct {
 	// org owners and admins change edge, images and projects from the
 	// console. It is false on an invalid policy.
 	ConsolePolicy bool
+	// ContainerCgroupns is the v1.24 container_cgroupns key: the cgroup
+	// namespace mode the helper asks Docker for, CgroupnsPrivate (the
+	// default) or CgroupnsHost. Only the host's root sets it, for a kernel
+	// without cgroup namespaces (OpenVZ); host mode lets a container see
+	// the host's cgroup tree.
+	ContainerCgroupns string
+}
+
+// Container cgroup namespace modes (agent-protocol v1.24).
+const (
+	CgroupnsPrivate = "private"
+	CgroupnsHost    = "host"
+)
+
+// CgroupnsMode is the HostConfig.CgroupnsMode for a container this host
+// creates: CgroupnsHost only when the root set it, else CgroupnsPrivate.
+func (p Policy) CgroupnsMode() string {
+	if p.ContainerCgroupns == CgroupnsHost {
+		return CgroupnsHost
+	}
+	return CgroupnsPrivate
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -326,6 +347,7 @@ func fromBytes(out Policy, data []byte, f Files) Policy {
 	out.HostNetworkProjects = hostNet
 	out.HostEnvFiles = hostEnv
 	out.ConsolePolicy = parsed.consolePolicy
+	out.ContainerCgroupns = parsed.cgroupns
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

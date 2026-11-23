@@ -108,7 +108,7 @@ func doEdgeApply(ctx context.Context, in []byte, sys Sys) []byte {
 	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	cur, code := edgeSlot(rows, host)
 	if code != "" {
@@ -136,7 +136,7 @@ func doEdgeApply(ctx context.Context, in []byte, sys Sys) []byte {
 	if imageOK && running {
 		return reloadEdge(ctx, sys, st, req)
 	}
-	return startEdge(ctx, sys, eng, st, cur, imageOK, host, req)
+	return startEdge(ctx, sys, eng, st, cur, imageOK, host, pol.CgroupnsMode(), req)
 }
 
 // reloadEdge loads a new config into the running edge. config.json is
@@ -172,17 +172,18 @@ func reloadEdge(ctx context.Context, sys Sys, st *store, req edge.ApplyRequest) 
 // cannot be created, started, or will not run the new config, it is
 // removed, the previous config.json is put back and the previous container
 // is recreated from its own image (restorePrevious).
-func startEdge(ctx context.Context, sys Sys, eng engine, st *store, cur slot, imageOK bool, host string, req edge.ApplyRequest) []byte {
+// cgroupns is the host policy's CgroupnsMode (agent-protocol v1.24).
+func startEdge(ctx context.Context, sys Sys, eng engine, st *store, cur slot, imageOK bool, host, cgroupns string, req edge.ApplyRequest) []byte {
 	if !imageOK {
 		ref, err := images.Parse(edge.Image)
 		if err != nil {
 			return edgeErr(sys, edge.ReasonBadSpec, "")
 		}
 		if _, _, err := eng.Pull(ctx, ref, nil); err != nil {
-			return edgeErr(sys, engReason(err), "")
+			return edgeErr(sys, edgeEngReason(err), "")
 		}
 	}
-	body, err := edgeCreateBody(edge.Image, host, req.ConfigHash)
+	body, err := edgeCreateBody(edge.Image, host, req.ConfigHash, cgroupns)
 	if err != nil {
 		return edgeErr(sys, edge.ReasonDocker, "")
 	}
@@ -203,12 +204,12 @@ func startEdge(ctx context.Context, sys Sys, eng engine, st *store, cur slot, im
 	defer cancel()
 	if err := stopRemove(fctx, eng, cur); err != nil {
 		st.restoreEdgeConfig(hadPrev)
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	// A socket left by the stopped Caddy would answer nothing; the new one
 	// creates its own.
 	if err := st.unlinkSocket(edge.AdminSocket); err != nil {
-		restorePrevious(fctx, sys, eng, st, "", cur, hadPrev, host, prevHash)
+		restorePrevious(fctx, sys, eng, st, "", cur, hadPrev, host, cgroupns, prevHash)
 		return edgeErr(sys, storeCode(err), "")
 	}
 	id, err := eng.Create(fctx, edge.ContainerName, body)
@@ -216,12 +217,12 @@ func startEdge(ctx context.Context, sys Sys, eng engine, st *store, cur slot, im
 		err = eng.Start(fctx, id)
 	}
 	if err != nil {
-		restorePrevious(fctx, sys, eng, st, id, cur, hadPrev, host, prevHash)
-		return edgeErr(sys, engReason(err), "")
+		restorePrevious(fctx, sys, eng, st, id, cur, hadPrev, host, cgroupns, prevHash)
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	code, detail := waitEdge(fctx, sys, eng, st, id)
 	if code != "" {
-		restorePrevious(fctx, sys, eng, st, id, cur, hadPrev, host, prevHash)
+		restorePrevious(fctx, sys, eng, st, id, cur, hadPrev, host, cgroupns, prevHash)
 		return edgeErr(sys, code, detail)
 	}
 	_ = st.unlinkFile(edgePrevFile)
@@ -233,7 +234,7 @@ func startEdge(ctx context.Context, sys Sys, eng engine, st *store, cur slot, im
 // previous container is recreated from its own image with that config and
 // started again if it was running. Failures here are logged, not returned:
 // the caller already has the error to report.
-func restorePrevious(ctx context.Context, sys Sys, eng engine, st *store, id string, cur slot, hadPrev bool, host, prevHash string) {
+func restorePrevious(ctx context.Context, sys Sys, eng engine, st *store, id string, cur slot, hadPrev bool, host, cgroupns, prevHash string) {
 	if id != "" {
 		_ = eng.Stop(ctx, id)
 		if err := eng.Remove(ctx, id); err != nil {
@@ -244,7 +245,7 @@ func restorePrevious(ctx context.Context, sys Sys, eng engine, st *store, id str
 	if !cur.found || !hadPrev {
 		return
 	}
-	body, err := edgeCreateBody(cur.image, host, prevHash)
+	body, err := edgeCreateBody(cur.image, host, prevHash, cgroupns)
 	if err == nil {
 		_ = st.unlinkSocket(edge.AdminSocket)
 		var prevID string
@@ -266,7 +267,7 @@ func waitEdge(ctx context.Context, sys Sys, eng engine, st *store, id string) (s
 	for {
 		in, err := eng.Inspect(ctx, id)
 		if err != nil {
-			return engReason(err), ""
+			return edgeEngReason(err), ""
 		}
 		switch {
 		case in.State == "exited" || in.State == "dead" || in.State == "restarting" || in.RestartCount > 0:
@@ -342,7 +343,7 @@ func doEdgeStop(ctx context.Context, in []byte, sys Sys) []byte {
 	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	cur, code := edgeSlot(rows, host)
 	if code != "" {
@@ -354,7 +355,7 @@ func doEdgeStop(ctx context.Context, in []byte, sys Sys) []byte {
 	fctx, cancel := finishCtx(ctx)
 	defer cancel()
 	if err := stopRemove(fctx, eng, cur); err != nil {
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	return edgeOK(edge.StopResult{Outcome: edge.OutcomeStopped})
 }
@@ -370,7 +371,7 @@ func doEdgeStatus(ctx context.Context, in []byte, sys Sys) []byte {
 	eng := newEngine(dockerSock(sys), sys.Logf)
 	rows, err := eng.List(ctx)
 	if err != nil {
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	cur, code := edgeSlot(rows, host)
 	if code != "" {
@@ -395,7 +396,7 @@ func doEdgeStatus(ctx context.Context, in []byte, sys Sys) []byte {
 		return edgeOK(edge.StatusResult{State: edge.StateAbsent})
 	}
 	if err != nil {
-		return edgeErr(sys, engReason(err), "")
+		return edgeErr(sys, edgeEngReason(err), "")
 	}
 	res := edge.StatusResult{State: edge.StateStopped, Image: in2.Image, ConfigHash: hash}
 	if in2.State == "running" {
@@ -430,12 +431,12 @@ func ensureEdgeVolume(ctx context.Context, eng engine, host string) string {
 	info, err := eng.VolumeInspect(ctx, edge.VolumeName)
 	if errors.Is(err, errNotFound) {
 		if err := eng.EdgeVolumeCreate(ctx, edge.VolumeName, host); err != nil {
-			return engReason(err)
+			return edgeEngReason(err)
 		}
 		info, err = eng.VolumeInspect(ctx, edge.VolumeName)
 	}
 	if err != nil {
-		return engReason(err)
+		return edgeEngReason(err)
 	}
 	if info.Driver != "local" || len(info.Options) > 0 {
 		return edge.ReasonConflict
@@ -488,7 +489,8 @@ type edgeHostConfig struct {
 // image, host network, the data volume at /data and the config directory
 // at /run/edge (writable: Caddy creates its admin socket there). Caddy runs
 // with config.json; that file sets the admin endpoint to the socket.
-func edgeCreateBody(image, host, configHash string) ([]byte, error) {
+// cgroupns is "private" or "host" (Policy.CgroupnsMode, v1.24).
+func edgeCreateBody(image, host, configHash, cgroupns string) ([]byte, error) {
 	if _, err := images.Parse(image); err != nil {
 		return nil, err
 	}
@@ -505,7 +507,7 @@ func edgeCreateBody(image, host, configHash string) ([]byte, error) {
 				{Type: "volume", Source: edge.VolumeName, Target: edge.DataTarget},
 				{Type: "bind", Source: edge.Dir, Target: edge.MountTarget},
 			},
-			CgroupnsMode: "private",
+			CgroupnsMode: cgroupns,
 			PidsLimit:    1024,
 			LogConfig: logConfigBody{
 				Type:   "json-file",
@@ -702,4 +704,14 @@ func (s *store) restoreEdgeConfig(hadPrev bool) {
 		return
 	}
 	_ = s.unlinkFile(edge.ConfigFile)
+}
+
+// edgeEngReason is engReason for the edge verbs, which keep their own
+// codes: a start the runtime refuses stays docker_unavailable there
+// (agent-protocol v1.24 changes only catalog containers).
+func edgeEngReason(err error) string {
+	if errors.Is(err, errStart) {
+		return edge.ReasonDocker
+	}
+	return engReason(err)
 }

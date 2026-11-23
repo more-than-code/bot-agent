@@ -52,7 +52,7 @@ type UnitInfo struct {
 func FixedReason(reason string) string {
 	switch reason {
 	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
-		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker,
+		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker, ReasonStartFailed,
 		agentupgrade.ReasonBusy, agentupgrade.ReasonNotNewer:
 		return reason
 	default:

@@ -742,3 +742,15 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - The agent log line becomes `task_reject code=bad_spec field=<field>`.
 2. **No gate.** Every API reads `task_reject` by field and ignores an unknown key, so an older API keeps today's answer. API v1.55 and later show the field (api-v1 v1.55 item 1).
 3. A helper `bad_spec` (a `task_result`) is unchanged: v1.19 `reason` already explains it.
+
+## v1.24 containers on kernels without cgroup namespaces (2026-11-24, approved spec `docs/spec-agent-0216-cgroupns.md` rev 1 in the umbrella; additive, gated by `runner.toml`; no API change; for bot-agent v0.2.16)
+
+1. **`runner.toml` key `container_cgroupns = "private"|"host"`** (missing = `private`). Only the host's root sets it; the v1.22 console rewrite never changes it. Any other value, or a duplicate key, is `parse`. An older agent refuses the key as `unknown_key`.
+   - The helper sends `HostConfig.CgroupnsMode` from it for every container `container_deploy` creates (service and job, including an `image_rollback` that pulls) and for the edge container. `container_rollback` (the swap to the kept container) creates nothing. It was always `"private"` before; with the key absent nothing changes.
+   - `bot-agent policy check` prints `container_cgroupns=<value>` as its last line (after `console_policy=`).
+2. **A container start the runtime refuses has its own helper code `container_start_failed`.** It covers Docker answering `POST /containers/{id}/start` with 500: a runtime refusal (for example `cgroup namespaces aren't enabled in the kernel`) or any other daemon error during start. It applies to every catalog verb that starts a container: `container_deploy`, `container_start`, `container_restart` and `container_rollback`. It was `docker_unavailable` before; a failed ping, a transport error and other Engine answers stay `docker_unavailable`.
+   - On `container_deploy` the helper removes the container it just created (no force; it was never started), on its own short context so a cancelled caller still cleans up. It logs the runtime's message in the helper journal (`bot-agent-runner@*`), scrubbed as today. The message never leaves the host.
+   - The agent words it in the v1.19 deploy-result `reason`: "the container runtime on the host could not start the container (see the bot-agent-runner log on the host)". A rollback whose restart of the previous container is refused also reports `container_start_failed`.
+   - The edge verbs keep `docker_unavailable` for a start failure: they have their own codes.
+3. **No wire change:** there is no new frame or hello field. An API that does not know the code shows it as the agent sent it; API v1.47 and later store the reason text.
+

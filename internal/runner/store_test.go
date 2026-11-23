@@ -627,7 +627,7 @@ func TestRollbackStartFailureRestoresPair(t *testing.T) {
 	e.fake.startFail = true
 	before := len(e.fake.Calls())
 	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
-	assertRestored(t, e, raw, before, orig, false)
+	assertRestoredCode(t, e, raw, before, orig, false, programs.ReasonStartFailed)
 	assertSlotsRestored(t, root)
 }
 

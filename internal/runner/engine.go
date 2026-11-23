@@ -31,6 +31,10 @@ var (
 	errImage    = errors.New("image")
 	errNotFound = errors.New("missing")
 	errBadSpec  = errors.New("spec")
+	// errStart is a container start Docker answered with 500: the daemon
+	// is reachable but the runtime could not start the container
+	// (agent-protocol v1.24).
+	errStart = errors.New("start")
 	// errOverlap is a network create Docker refused because the requested
 	// subnet overlaps an existing pool (agent-protocol v1.13 item 4).
 	errOverlap = errors.New("overlap")
@@ -227,7 +231,21 @@ func (e *engineClient) Create(ctx context.Context, name string, body []byte) (st
 }
 
 func (e *engineClient) Start(ctx context.Context, id string) error {
-	return e.emptyAction(ctx, http.MethodPost, id, "/start", nil, http.StatusNoContent, http.StatusNotModified)
+	p, err := containerPath(id, "/start")
+	if err != nil {
+		return err
+	}
+	code, _, err := e.do(ctx, http.MethodPost, p, nil, nil, nil, maxEngineJSON)
+	switch {
+	case err != nil:
+		return errEngine
+	case code == http.StatusNoContent || code == http.StatusNotModified:
+		return nil
+	case code == http.StatusInternalServerError:
+		return errStart
+	default:
+		return errEngine
+	}
 }
 
 func (e *engineClient) Stop(ctx context.Context, id string) error {

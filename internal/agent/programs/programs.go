@@ -35,6 +35,12 @@ const (
 	// v1.17 item 2). It passes only between the helper and the agent; the
 	// task result is outcome failed with a line that says why.
 	ReasonNetworksDocker = "shared_networks_need_docker25"
+	// ReasonStartFailed is a container Docker created but could not start
+	// (the runtime refused it, for example a kernel without cgroup
+	// namespaces; agent-protocol v1.24). Docker itself answered, so it is
+	// not docker_unavailable. The task result is outcome failed with a line
+	// that says so; the runtime's own message stays in the helper's log.
+	ReasonStartFailed = "container_start_failed"
 
 	maxArgs    = 32
 	maxArgLen  = 4096

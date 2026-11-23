@@ -26,7 +26,9 @@ type parsed struct {
 	agentUpgrade  bool
 	upgradeProxy  string
 	consolePolicy bool
-	hostFiles     hostFileKeys
+	// cgroupns is the v1.24 container_cgroupns key; empty when absent.
+	cgroupns  string
+	hostFiles hostFileKeys
 	// hostNetwork and hostEnv are the v1.21 keys; nil when absent.
 	hostNetwork []string
 	hostEnv     []string
@@ -158,6 +160,12 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.consolePolicy = v
+		case "container_cgroupns":
+			v, rest, ok := parseString(rest)
+			if !ok || strings.TrimSpace(rest) != "" || (v != CgroupnsPrivate && v != CgroupnsHost) {
+				return parsed{}, "parse"
+			}
+			out.cgroupns = v
 		case "agent_upgrade_https_proxy":
 			v, rest, ok := parseString(rest)
 			if !ok || strings.TrimSpace(rest) != "" || !ValidUpgradeProxy(v) {
@@ -211,7 +219,8 @@ func knownKey(k string) bool {
 	case "enabled", "run_as", "dirs", "exec_allow", "allow_shell", "max_programs",
 		"images", "projects", "max_containers", "allow_public_ports",
 		"shared_networks", "shared_network_projects", "edge", "agent_upgrade",
-		"agent_upgrade_https_proxy", "host_network_projects", "host_env_files", "host_env_images", "console_policy":
+		"agent_upgrade_https_proxy", "host_network_projects", "host_env_files", "host_env_images", "console_policy",
+		"container_cgroupns":
 		return true
 	default:
 		return isHostFileKey(k)

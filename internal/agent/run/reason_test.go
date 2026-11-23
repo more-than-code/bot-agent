@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/more-than-code/bot-agent/internal/agent/images"
+	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 )
 
@@ -107,6 +108,10 @@ func TestStateWhy(t *testing.T) {
 	}
 	if codeWhy("weird") != "the host refused the deploy (weird)" || codeWhy("") != "" {
 		t.Fatal("codeWhy")
+	}
+	// v1.24: a start the runtime refused says so, not "Docker is not reachable".
+	if got := codeWhy(programs.ReasonStartFailed); got != "the container runtime on the host could not start the container (see the bot-agent-runner log on the host)" {
+		t.Fatalf("start failed: %q", got)
 	}
 }
 

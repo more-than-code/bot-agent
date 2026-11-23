@@ -115,7 +115,14 @@ func landNextRename(e *imgEnv, nth int, hit, wait chan struct{}) {
 // whether that start could succeed in the fake.
 func assertRestored(t *testing.T, e *imgEnv, raw []byte, before int, origID string, running bool) {
 	t.Helper()
-	if imgCode(t, raw) != programs.ReasonDocker || bytes.Contains(raw, []byte("container_id")) {
+	assertRestoredCode(t, e, raw, before, origID, running, programs.ReasonDocker)
+}
+
+// assertRestoredCode is assertRestored with the expected refusal code: a
+// start the runtime refuses is container_start_failed (agent-protocol v1.24).
+func assertRestoredCode(t *testing.T, e *imgEnv, raw []byte, before int, origID string, running bool, code string) {
+	t.Helper()
+	if imgCode(t, raw) != code || bytes.Contains(raw, []byte("container_id")) {
 		t.Fatalf("rollback %s", raw)
 	}
 	var origStarted bool
