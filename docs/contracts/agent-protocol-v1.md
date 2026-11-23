@@ -613,7 +613,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
 1. **`host_file_run_as`** (supersedes the `run_as` rule in v1.18 item 1). Before: "`run_as` uid and gid ≥ 1000". After: `host_file_run_as` names an existing account other than `bot-agent` and `nobody`, with uid ≥ 100 and a primary gid ≥ 100 that is not `root`/`0` or `nogroup` (gid 65534), and that shares neither uid nor primary gid with `bot-agent`. Any other account still makes the policy invalid with `parse`. Programs' `run_as` keeps uid and gid ≥ 1000.
 2. **Older agents:** an agent ≤ 0.2.13 refuses a system account here with `parse`, so a host owner upgrades before naming one. No wire change.
 
-## v1.19 deploy failure reason (2026-11-23, spec `docs/spec-deploy-reason.md` rev 1 in bot-control-plane; additive)
+## v1.19 deploy failure reason (2026-11-23, spec `docs/spec-deploy-reason.md` rev 1 in bot-control-plane; additive; with api-v1 v1.47; implemented on bot-agent `dev` 2c84a27, merged fe8c1ef)
 1. **`task_result.payload` of `image_deploy` and `image_rollback`** gains an optional `"reason": string`: one line (no control characters), 1–512 bytes, present only when `outcome` is neither `succeeded` nor `unchanged`. The other five keys are unchanged; `ValidateImageDeploy` accepts six keys only when the sixth is `reason`.
 2. **What it says.** The agent builds it from fixed words and its own observations only, never from helper, Docker, registry or container text, so it holds no env value and needs no redaction:
    - a helper refusal code: `image_unavailable` → "the image could not be pulled: the tag is missing or the registry refused the pull"; `policy_denied`, `bad_spec`, `conflict`, `docker_unavailable`, `shared_networks_need_docker25`, `helper_unavailable` get their own fixed sentence; any other code "the host refused the deploy (<code>)";
@@ -622,7 +622,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
 3. For `rolled_back` and `rollback_failed` the reason is why the new container failed; the server adds what happened next. A job's non-zero exit stays in `exit_code` with no reason.
 4. **Servers:** an API before v1.47 ignores the key (the payload is read by field). API v1.47 stores it as the deploy's reason, after its own exact-value redaction, and falls back to a reason it works out from the outcome and status when the key is absent or not one line of at most 512 bytes. No other frame changes.
 
-## v1.20 agent upgrade from the server (renumbered from v1.19 on 2026-11-23 because of the clash above; implemented on work-agent-selfupgrade, not yet merged) (2026-11-23, approved spec `docs/spec-agent-self-upgrade.md` rev 1; additive, gated; not yet implemented)
+## v1.20 agent upgrade from the server (renumbered from v1.19 on 2026-11-23 because of the clash above) (2026-11-23, approved spec `docs/spec-agent-self-upgrade.md` rev 1; additive, gated; with api-v1 v1.48; implemented on bot-agent `dev` 79194ce, merged 79d7612; in bot-agent v0.2.15)
 1. **`runner.toml` keys:**
    - `agent_upgrade = true|false` (bool; missing = false).
    - Optional `agent_upgrade_https_proxy = "http(s)://host:port"`: no userinfo or path, at most 256 bytes; anything else makes the policy invalid with `parse`. `policy check` prints `agent_upgrade_https_proxy=<set|unset>`.
@@ -680,7 +680,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - `install.sh` documents the marker check. A plain SSH upgrade gets it as well.
 9. **Bootstrap:** this needs bot-agent 0.2.15 or later, installed once by the host owner, with `agent_upgrade = true` in `runner.toml`.
 
-## v1.21 containers that deploy Deploybot (2026-11-23, approved spec `docs/spec-deploybot-on-containers.md` rev 1; additive, gated by `runner.toml`; implemented on work-agent-containers, not yet merged)
+## v1.21 containers that deploy Deploybot (2026-11-23, approved spec `docs/spec-deploybot-on-containers.md` rev 1; additive, gated by `runner.toml`; with api-v1 v1.50; implemented on bot-agent `dev` c22987e, merged 2513a9e; in bot-agent v0.2.15)
 1. **`runner.toml` keys** (an older agent refuses both as `unknown_key`):
    - `host_network_projects = ["<slug>", …]` (default empty). Each slug must also be in `projects`, else the policy is invalid with `parse`. At most 8.
    - `host_env_files = ["<project>/<entry>=<path>", …]` (default empty), at most 32. `<project>` is a slug in `projects`; `<entry>` is a catalog entry name (the catalog name rules). `<path>` is absolute, directly under a directory of `/etc/` (`/etc/<dir>/<name>.env`), with no `..`. The file must be a regular file (not a symlink), owned by root:root, mode 0600, nlink 1, at most 64 KiB, and made of `KEY=VALUE` lines (key `^[A-Za-z_][A-Za-z0-9_]{0,127}$`; blank lines and `#` comments allowed; no duplicate keys). Any failure makes the policy invalid with `host_env_file` and the entry name; the value is never printed.
@@ -718,3 +718,27 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - **Health in host mode:** `ports[].host` probes reach whatever listens on that loopback port; use a Docker healthcheck in the image (the Deploybot images have one) so another process on the port cannot mask a broken deploy.
    - **At rest:** stored results may hold up to the deploy's log tail (already redacted) for up to 7 days, 0600 under the agent's state directory.
 
+## v1.22 host policy from the console (2026-11-23, spec `docs/spec-console-host-policy.md` rev 2 §2.2 in bot-control-plane, as implemented; additive, gated by `runner.toml`; with api-v1 v1.51; implemented on bot-agent `dev` e2f7049, merged 20895c3; in bot-agent v0.2.15)
+1. **`runner.toml` key `console_policy = true|false`** (missing = false). The host's root opts in once by hand; an older agent refuses the key as `unknown_key`. `bot-agent policy check` prints `console_policy=<bool>` as its last line.
+   - Only three keys are console-editable: `edge`, `images` and `projects`. Never `enabled`, `run_as`, `dirs`, `exec_allow`, `allow_shell`, `max_programs`, `max_containers`, `allow_public_ports`, shared networks, `host_files`, `agent_upgrade`, its proxy, or `console_policy` itself.
+2. **Hello:** `programs.console_policy` (bool) and `programs.image_patterns` (the runner.toml `images`, sent only when `console_policy` is true; at most 64). The existing `programs.policy_hash`, `edge` and `projects` carry the rest. There is no result frame: the server reads the outcome from the next hello's `policy_hash`.
+3. **Task kind `host_policy_apply`**, spec `{"base_hash","edge","images","projects"}`, timeout 60 s. Strict: no other key, valid patterns and slugs, no repeats, at most 64 images and 32 projects, else `bad_spec`. Refused `forbidden` when the host is not opted in. It is forwarded to the helper verb of the same name; success is state `succeeded` with `{"state":"accepted","new_hash"}`.
+4. **Helper verb `host_policy_apply`** (root), in order:
+   - re-read runner.toml; `console_policy` must be true, else `policy_denied`;
+   - its SHA-256 must equal `base_hash`, else `conflict`;
+   - rewrite only the three keys, line by line, keeping comments and order (a missing key is appended); no change is `bad_spec`;
+   - load the result with the same policy loader: it must be valid and keep `console_policy = true`, else `bad_spec`;
+   - no other helper lock held, no agent upgrade running and the policy unit not active, else `busy`;
+   - stage the new file under `/var/lib/bot-agent-runner/policy/`, start the transient unit `bot-agent-policy` (`bot-agent-runner policy-run <base_hash> <new_hash>`) and answer `accepted` with `new_hash`. The helper's sandbox cannot write `/etc`; the unit does.
+5. **`bot-agent-runner policy-run`** (the transient unit, `RuntimeMaxSec` 300): wait 3 s so the agent can send the task result; check runner.toml still has `base_hash` and the staged file `new_hash`; keep `/etc/bot-agent/runner.toml.prev` (0600); write atomically; restart bot-agent and wait up to 90 s for `/var/lib/bot-agent/last_hello` newer than the restart. On failure it puts the previous file back and restarts again (`rolled_back`, `not_reconnected`). It writes `result.json` for the root and the journal.
+
+## v1.23 bad_spec names the field (2026-11-23, DD DEF-20261123-agent-bad-spec-refusals-don-t-name-the-f-yars; additive, no gate; with api-v1 v1.55; spec `docs/spec-refused-deploy.md` in bot-control-plane)
+
+1. **`task_reject` gains an optional `"field": string`**, sent only with `error_code` `bad_spec` on an image task (`image_*`). It is the key that failed, never a value:
+   - a key of the task spec: `project`, `entry`, `spec`, `env`, `registry_auth`, `spec_hash`, `digest`, `files`, `secret_keys`, `env_hash`, `lines`; or `service` when the task frame's `service` is not null;
+   - `spec.<key>` for an ImageSpec rule (v1.4 and later): the name `ImageSpec.Validate` returns, for example `spec.secret_env`, `spec.ports`, `spec.health_policy.on_unhealthy`. A healthcheck key is `spec.healthcheck.<key>` (`spec.healthcheck.timeout_sec` is not the spec's own `spec.timeout_sec`).
+   - A JSON type error names the same key as the rule would: `spec.healthcheck.timeout_sec`, not `spec.healthcheck`.
+   - Shape `^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,2}$`, at most 64 bytes. The agent builds it only from key names it defines. A JSON type error names its key only when that key is one of the above; an unknown key, an env key name, a map key or a body that is not JSON gives no `field`.
+   - The agent log line becomes `task_reject code=bad_spec field=<field>`.
+2. **No gate.** Every API reads `task_reject` by field and ignores an unknown key, so an older API keeps today's answer. API v1.55 and later show the field (api-v1 v1.55 item 1).
+3. A helper `bad_spec` (a `task_result`) is unchanged: v1.19 `reason` already explains it.

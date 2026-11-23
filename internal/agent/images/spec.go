@@ -177,6 +177,10 @@ func (s *ImageSpec) Validate() string {
 		return "memory_mb"
 	}
 	if field := checkHealthcheck(s); field != "" {
+		if field != "healthcheck" {
+			// A healthcheck key, kept apart from the spec's own timeout_sec.
+			return "healthcheck." + field
+		}
 		return field
 	}
 	if field := checkLogging(s); field != "" {

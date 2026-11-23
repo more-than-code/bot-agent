@@ -171,10 +171,20 @@ func (a *agent) runningCount() (int, map[string]bool) {
 func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskReject, protocol.TaskResult, bool) {
 	code, spec := a.classify(task)
 	if code != "" {
-		a.opt.Log.Printf("bot-agent: task_reject code=%s", quoteLog(code))
-		return protocol.TaskReject{
+		rej := protocol.TaskReject{
 			V: protocol.Version, Type: "task_reject", TaskID: task.TaskID, ErrorCode: code,
-		}, protocol.TaskResult{}, false
+		}
+		// agent-protocol v1.23: an image bad_spec names the key that
+		// failed, never its value. Every API ignores an unknown key.
+		if code == "bad_spec" && tasks.ImageKind(task.Kind) {
+			rej.Field = tasks.BadSpecField(task, a.policy)
+		}
+		if rej.Field != "" {
+			a.opt.Log.Printf("bot-agent: task_reject code=%s field=%s", quoteLog(code), quoteLog(rej.Field))
+		} else {
+			a.opt.Log.Printf("bot-agent: task_reject code=%s", quoteLog(code))
+		}
+		return rej, protocol.TaskResult{}, false
 	}
 	if tasks.ImageKind(task.Kind) {
 		return protocol.TaskReject{}, a.runImage(ctx, task), true
