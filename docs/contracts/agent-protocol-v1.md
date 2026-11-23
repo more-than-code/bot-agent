@@ -718,3 +718,16 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - **Health in host mode:** `ports[].host` probes reach whatever listens on that loopback port; use a Docker healthcheck in the image (the Deploybot images have one) so another process on the port cannot mask a broken deploy.
    - **At rest:** stored results may hold up to the deploy's log tail (already redacted) for up to 7 days, 0600 under the agent's state directory.
 
+
+## v1.23 bad_spec names the field (2026-11-23, DD DEF-20261123-agent-bad-spec-refusals-don-t-name-the-f-yars; additive, no gate; with api-v1 v1.55; spec `docs/spec-refused-deploy.md` in bot-control-plane)
+
+(v1.22, host policy from the console, is in bot-control-plane `docs/spec-console-host-policy.md` §2.2 and not in this copy yet.)
+
+1. **`task_reject` gains an optional `"field": string`**, sent only with `error_code` `bad_spec` on an image task (`image_*`). It is the key that failed, never a value:
+   - a key of the task spec: `project`, `entry`, `spec`, `env`, `registry_auth`, `spec_hash`, `digest`, `files`, `secret_keys`, `env_hash`, `lines`; or `service` when the task frame's `service` is not null;
+   - `spec.<key>` for an ImageSpec rule (v1.4 and later): the name `ImageSpec.Validate` returns, for example `spec.secret_env`, `spec.ports`, `spec.health_policy.on_unhealthy`. A healthcheck key is `spec.healthcheck.<key>` (`spec.healthcheck.timeout_sec` is not the spec's own `spec.timeout_sec`).
+   - A JSON type error names the same key as the rule would: `spec.healthcheck.timeout_sec`, not `spec.healthcheck`.
+   - Shape `^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,2}$`, at most 64 bytes. The agent builds it only from key names it defines. A JSON type error names its key only when that key is one of the above; an unknown key, an env key name, a map key or a body that is not JSON gives no `field`.
+   - The agent log line becomes `task_reject code=bad_spec field=<field>`.
+2. **No gate.** Every API reads `task_reject` by field and ignores an unknown key, so an older API keeps today's answer. API v1.55 and later show the field (api-v1 v1.55 item 1).
+3. A helper `bad_spec` (a `task_result`) is unchanged: v1.19 `reason` already explains it.

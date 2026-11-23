@@ -188,11 +188,16 @@ func TestFileTaskRefused(t *testing.T) {
 	// as every other bad image spec. runImage is not reached, so the helper
 	// is not called. A helper bad_spec still becomes outcome forbidden_spec.
 	proc := fileTask(t, false, []images.TaskFile{{Name: "a", Target: "/proc/x", Content: "x"}})
-	for _, spec := range [][]byte{proc, fileTaskMismatch(t)} {
+	want := []string{"spec.files", "files"}
+	for i, spec := range [][]byte{proc, fileTaskMismatch(t)} {
 		a, h, _, _ := imageRun(t)
 		rej, _, ok := a.execute(context.Background(), imageTask("image_deploy", spec, 120))
 		if ok || rej.ErrorCode != "bad_spec" {
 			t.Fatalf("ok %v code %s", ok, rej.ErrorCode)
+		}
+		// agent-protocol v1.23: the reject names the files key.
+		if rej.Field != want[i] {
+			t.Fatalf("field %q want %q", rej.Field, want[i])
 		}
 		if len(h.Calls()) != 0 {
 			t.Fatalf("helper called %v", h.Calls())

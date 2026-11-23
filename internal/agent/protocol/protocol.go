@@ -309,6 +309,10 @@ type TaskReject struct {
 	Type      string `json:"type"`
 	TaskID    string `json:"task_id"`
 	ErrorCode string `json:"error_code"`
+	// Field is the key that failed an image task's bad_spec check
+	// (agent-protocol v1.23): a key name such as "env" or
+	// "spec.secret_env", never a value. Omitted when there is none.
+	Field string `json:"field,omitempty"`
 }
 
 // TaskResult is resent until task_ack. ErrorCode is null on success.
