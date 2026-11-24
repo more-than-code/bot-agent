@@ -754,7 +754,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - The edge verbs keep `docker_unavailable` for a start failure: they have their own codes.
 3. **No wire change:** there is no new frame or hello field. An API that does not know the code shows it as the agent sent it; API v1.47 and later store the reason text.
 
-## v1.25 Docker disk usage (2026-11-24, approved spec `docs/spec-disk-usage-breakdown.md` rev 1 §10 in the umbrella; additive; with api-v1 v1.59; ships in bot-agent v0.2.17)
+## v1.25 Docker disk usage (2026-11-24, approved spec `docs/spec-disk-usage-breakdown.md` rev 1 §10 in the umbrella; additive; with api-v1 v1.59; in bot-agent v0.2.17)
 
 1. **Task kind `docker_usage`**, spec exactly `{}` (any other spec, or a non-null `service`, is `task_reject` `bad_spec`), `timeout_sec` 45 from the API (unset is 45 s, at most 60 s). Nothing is stored. An agent before 0.2.17 rejects the kind `forbidden`, as for any kind it does not know; the API checks the hello `agent_version` first.
    - Success: state `succeeded`, payload `{"outcome":"ok","summary":{…}}` (item 3).
