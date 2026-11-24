@@ -12,9 +12,5 @@
     "shims": [
       "claude-code"
     ]
-  },
-  "instructions": {
-    "variant": "full",
-    "version": "^0.1.0"
   }
 }
