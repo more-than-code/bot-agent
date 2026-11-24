@@ -146,6 +146,13 @@ type fakeDocker struct {
 	pingDelay     time.Duration
 	pullMsg       string
 	createFailMsg string
+	// dfBody is the GET /system/df answer (v1.25), dfCode its status when
+	// set, and dfDelay holds it until the client gives up. listBody, when
+	// set, replaces the GET /containers/json answer.
+	dfBody   []byte
+	dfCode   int
+	dfDelay  time.Duration
+	listBody []byte
 }
 
 func startFake(t *testing.T) (*fakeDocker, string) {
@@ -253,6 +260,8 @@ func (f *fakeDocker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.servePull(w, r)
 	case path == "/containers/json" && r.Method == http.MethodGet:
 		f.serveList(w)
+	case path == "/system/df" && r.Method == http.MethodGet:
+		f.serveDF(w, r)
 	case path == "/containers/create" && r.Method == http.MethodPost:
 		f.serveCreate(w, r, body)
 	case strings.HasPrefix(path, "/containers/"):
@@ -375,6 +384,10 @@ func (f *fakeDocker) serveList(w http.ResponseWriter) {
 	f.listN++
 	if f.listFailAfter > 0 && f.listN >= f.listFailAfter {
 		http.Error(w, "list failed", http.StatusInternalServerError)
+		return
+	}
+	if f.listBody != nil {
+		w.Write(f.listBody)
 		return
 	}
 	var items []map[string]any

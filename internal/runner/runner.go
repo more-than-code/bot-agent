@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
@@ -103,6 +104,9 @@ func Handle(ctx context.Context, verb string, in []byte, sys Sys) []byte {
 	}
 	if edge.IsVerb(verb) {
 		return handleEdge(ctx, verb, in, sys)
+	}
+	if verb == dockerusage.Verb {
+		return handleDockerDF(ctx, in, sys)
 	}
 	if images.IsVerb(verb) {
 		return handleImage(ctx, verb, in, sys)

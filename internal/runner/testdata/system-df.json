@@ -1,0 +1,479 @@
+{
+ "LayersSize": 3500,
+ "Images": [
+  {
+   "Id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+   "ParentId": "",
+   "RepoTags": [
+    "ghcr.io/o/app:1.2"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 500,
+   "SharedSize": 200,
+   "VirtualSize": 500,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 2
+  },
+  {
+   "Id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+   "ParentId": "",
+   "RepoTags": [
+    "ghcr.io/o/app:1.1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 500,
+   "SharedSize": -1,
+   "VirtualSize": 500,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+   "ParentId": "",
+   "RepoTags": null,
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 900,
+   "SharedSize": -1,
+   "VirtualSize": 900,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+   "ParentId": "",
+   "RepoTags": [
+    "<none>:<none>"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 900,
+   "SharedSize": -1,
+   "VirtualSize": 900,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+   "ParentId": "",
+   "RepoTags": [
+    "postgres:16"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": -1,
+   "SharedSize": -1,
+   "VirtualSize": -1,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": -1
+  },
+  {
+   "Id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "ParentId": "",
+   "RepoTags": [
+    "x/a:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 170,
+   "SharedSize": 100,
+   "VirtualSize": 170,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 1
+  },
+  {
+   "Id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "ParentId": "",
+   "RepoTags": [
+    "x/b:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 160,
+   "SharedSize": -1,
+   "VirtualSize": 160,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "ParentId": "",
+   "RepoTags": [
+    "x/c:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 150,
+   "SharedSize": -1,
+   "VirtualSize": 150,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+   "ParentId": "",
+   "RepoTags": [
+    "x/d:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 140,
+   "SharedSize": -1,
+   "VirtualSize": 140,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "ParentId": "",
+   "RepoTags": [
+    "x/e:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 130,
+   "SharedSize": -1,
+   "VirtualSize": 130,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "ParentId": "",
+   "RepoTags": [
+    "x/f:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 120,
+   "SharedSize": -1,
+   "VirtualSize": 120,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+   "ParentId": "",
+   "RepoTags": [
+    "x/g:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 110,
+   "SharedSize": -1,
+   "VirtualSize": 110,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  },
+  {
+   "Id": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+   "ParentId": "",
+   "RepoTags": [
+    "x/h:1"
+   ],
+   "RepoDigests": [
+    "ghcr.io/o/app@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+   ],
+   "Created": 1700000000,
+   "Size": 100,
+   "SharedSize": -1,
+   "VirtualSize": 100,
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Containers": 0
+  }
+ ],
+ "Containers": [
+  {
+   "Id": "1111111111111111111111111111111111111111111111111111111111111111",
+   "Names": [
+    "/deploybot-api"
+   ],
+   "Image": "ghcr.io/o/app:1.2",
+   "ImageID": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+   "Command": "sh -c 'PASSWORD=hunter2 run'",
+   "Created": 1700000000,
+   "State": "running",
+   "Status": "x",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Env": [
+    "TOKEN=SECRETENV"
+   ],
+   "Mounts": [
+    {
+     "Type": "bind",
+     "Source": "/srv/private",
+     "Destination": "/data"
+    }
+   ],
+   "HostConfig": {
+    "NetworkMode": "bridge"
+   },
+   "Ports": [],
+   "SizeRw": 1000,
+   "SizeRootFs": 1001
+  },
+  {
+   "Id": "2222222222222222222222222222222222222222222222222222222222222222",
+   "Names": [
+    "/old-job"
+   ],
+   "Image": "ghcr.io/o/app:1.2",
+   "ImageID": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+   "Command": "sh -c 'PASSWORD=hunter2 run'",
+   "Created": 1700000000,
+   "State": "exited",
+   "Status": "x",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Env": [
+    "TOKEN=SECRETENV"
+   ],
+   "Mounts": [
+    {
+     "Type": "bind",
+     "Source": "/srv/private",
+     "Destination": "/data"
+    }
+   ],
+   "HostConfig": {
+    "NetworkMode": "bridge"
+   },
+   "Ports": [],
+   "SizeRw": 5000,
+   "SizeRootFs": 5001
+  },
+  {
+   "Id": "3333333333333333333333333333333333333333333333333333333333333333",
+   "Names": [
+    "/fresh"
+   ],
+   "Image": "ghcr.io/o/app:1.2",
+   "ImageID": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+   "Command": "sh -c 'PASSWORD=hunter2 run'",
+   "Created": 1700000000,
+   "State": "created",
+   "Status": "x",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Env": [
+    "TOKEN=SECRETENV"
+   ],
+   "Mounts": [
+    {
+     "Type": "bind",
+     "Source": "/srv/private",
+     "Destination": "/data"
+    }
+   ],
+   "HostConfig": {
+    "NetworkMode": "bridge"
+   },
+   "Ports": [],
+   "SizeRw": -1,
+   "SizeRootFs": 0
+  },
+  {
+   "Id": "4444444444444444444444444444444444444444444444444444444444444444",
+   "Names": [
+    "/edge"
+   ],
+   "Image": "ghcr.io/o/app:1.2",
+   "ImageID": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+   "Command": "sh -c 'PASSWORD=hunter2 run'",
+   "Created": 1700000000,
+   "State": "running",
+   "Status": "x",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Env": [
+    "TOKEN=SECRETENV"
+   ],
+   "Mounts": [
+    {
+     "Type": "bind",
+     "Source": "/srv/private",
+     "Destination": "/data"
+    }
+   ],
+   "HostConfig": {
+    "NetworkMode": "bridge"
+   },
+   "Ports": []
+  }
+ ],
+ "Volumes": [
+  {
+   "Name": "pgdata",
+   "Driver": "local",
+   "Mountpoint": "/var/lib/docker/volumes/pgdata/_data",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Scope": "local",
+   "Options": {
+    "device": "/srv/private"
+   },
+   "UsageData": {
+    "Size": 2000000,
+    "RefCount": 1
+   }
+  },
+  {
+   "Name": "orphan",
+   "Driver": "local",
+   "Mountpoint": "/var/lib/docker/volumes/orphan/_data",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Scope": "local",
+   "Options": {
+    "device": "/srv/private"
+   },
+   "UsageData": {
+    "Size": 500,
+    "RefCount": 0
+   }
+  },
+  {
+   "Name": "unknownvol",
+   "Driver": "local",
+   "Mountpoint": "/var/lib/docker/volumes/unknownvol/_data",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Scope": "local",
+   "Options": {
+    "device": "/srv/private"
+   },
+   "UsageData": {
+    "Size": -1,
+    "RefCount": -1
+   }
+  },
+  {
+   "Name": "nullvol",
+   "Driver": "local",
+   "Mountpoint": "/var/lib/docker/volumes/nullvol/_data",
+   "Labels": {
+    "com.example.secret": "SECRETLABEL",
+    "dev.deploybot.project": "mohiguide"
+   },
+   "Scope": "local",
+   "Options": {
+    "device": "/srv/private"
+   },
+   "UsageData": null
+  }
+ ],
+ "BuildCache": [
+  {
+   "ID": "b1",
+   "Parent": "",
+   "Type": "regular",
+   "Description": "mount / from exec /bin/sh -c echo hunter2",
+   "InUse": true,
+   "Shared": false,
+   "Size": 100,
+   "CreatedAt": "2026-11-01T00:00:00Z",
+   "LastUsedAt": null,
+   "UsageCount": 1
+  },
+  {
+   "ID": "b2",
+   "Type": "regular",
+   "Description": "pulled",
+   "InUse": false,
+   "Shared": false,
+   "Size": 200,
+   "CreatedAt": "2026-11-01T00:00:00Z",
+   "UsageCount": 1
+  },
+  {
+   "ID": "b3",
+   "Type": "source.local",
+   "Description": "local source for context /srv/private",
+   "InUse": false,
+   "Shared": true,
+   "Size": 300,
+   "CreatedAt": "2026-11-01T00:00:00Z",
+   "UsageCount": 2
+  }
+ ]
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
@@ -108,6 +109,14 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 			return "bad_spec", ProbeSpec{}
 		}
 		if _, ok := hostpolicy.ParseRequest(task.Spec); !ok {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.25: spec exactly {}. The images-or-edge gate is answered as a
+	// task_result (docker_usage_disabled), not a reject.
+	if task.Kind == dockerusage.Kind {
+		if task.Service != nil || !dockerusage.ParseSpec(task.Spec) {
 			return "bad_spec", ProbeSpec{}
 		}
 		return "", ProbeSpec{}

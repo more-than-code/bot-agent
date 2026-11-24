@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
@@ -200,6 +201,9 @@ func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskR
 	}
 	if task.Kind == hostpolicy.Kind {
 		return protocol.TaskReject{}, a.runHostPolicy(ctx, task), true
+	}
+	if task.Kind == dockerusage.Kind {
+		return protocol.TaskReject{}, a.runDockerUsage(ctx, task), true
 	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true

@@ -24,10 +24,16 @@ const (
 	maxEngineJSON = 4 << 20
 	maxPullStream = 8 << 20
 	maxLogStream  = 1 << 20
+	// maxDFJSON is the GET /system/df limit (agent-protocol v1.25), for
+	// that call only.
+	maxDFJSON = 32 << 20
 )
 
 var (
-	errEngine   = errors.New("engine")
+	errEngine = errors.New("engine")
+	// errTimeout is an Engine call that ran past its own deadline
+	// (agent-protocol v1.25: GET /system/df).
+	errTimeout  = errors.New("timeout")
 	errImage    = errors.New("image")
 	errNotFound = errors.New("missing")
 	errBadSpec  = errors.New("spec")
@@ -64,6 +70,8 @@ type engine interface {
 	EdgeVolumeCreate(ctx context.Context, name, host string) error
 	// APIVersion is the negotiated Engine API version (agent-protocol v1.17).
 	APIVersion(ctx context.Context) (apiVersion, error)
+	// SystemDF is GET /system/df (agent-protocol v1.25).
+	SystemDF(ctx context.Context) ([]byte, error)
 }
 
 type listed struct {
@@ -186,6 +194,26 @@ func (e *engineClient) List(ctx context.Context) ([]listed, error) {
 		return nil, errEngine
 	}
 	return parseList(body)
+}
+
+// SystemDF returns the raw GET /system/df answer. It alone may read up to
+// maxDFJSON, and it has its own dfTimeout deadline: the daemon walks every
+// volume to size it. A deadline overrun is errTimeout, anything else that
+// is not a 200 errEngine.
+func (e *engineClient) SystemDF(ctx context.Context) ([]byte, error) {
+	dctx, cancel := context.WithTimeout(ctx, dfTimeout)
+	defer cancel()
+	code, body, err := e.do(dctx, http.MethodGet, "/system/df", nil, nil, nil, maxDFJSON)
+	if err != nil {
+		if errors.Is(dctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, errTimeout
+		}
+		return nil, errEngine
+	}
+	if code != http.StatusOK {
+		return nil, errEngine
+	}
+	return body, nil
 }
 
 func (e *engineClient) Inspect(ctx context.Context, id string) (inspected, error) {

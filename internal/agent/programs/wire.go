@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
 	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
@@ -53,7 +54,9 @@ func FixedReason(reason string) string {
 	switch reason {
 	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
 		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker, ReasonStartFailed,
-		agentupgrade.ReasonBusy, agentupgrade.ReasonNotNewer:
+		agentupgrade.ReasonBusy, agentupgrade.ReasonNotNewer,
+		// Only docker_df (agent-protocol v1.25) emits these two.
+		dockerusage.ReasonDisabled, dockerusage.ReasonTimeout:
 		return reason
 	default:
 		return ReasonPolicy
@@ -91,7 +94,7 @@ func KnownVerb(verb string) bool {
 	switch verb {
 	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck,
 		hostfiles.VerbApply, hostfiles.VerbStatus,
-		agentupgrade.VerbStart, agentupgrade.VerbResult, hostpolicy.Verb:
+		agentupgrade.VerbStart, agentupgrade.VerbResult, hostpolicy.Verb, dockerusage.Verb:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)

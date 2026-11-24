@@ -754,3 +754,28 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - The edge verbs keep `docker_unavailable` for a start failure: they have their own codes.
 3. **No wire change:** there is no new frame or hello field. An API that does not know the code shows it as the agent sent it; API v1.47 and later store the reason text.
 
+## v1.25 Docker disk usage (2026-11-24, approved spec `docs/spec-disk-usage-breakdown.md` rev 1 §10 in the umbrella; additive; with api-v1 v1.59; ships in bot-agent v0.2.17)
+
+1. **Task kind `docker_usage`**, spec exactly `{}` (any other spec, or a non-null `service`, is `task_reject` `bad_spec`), `timeout_sec` 45 from the API (unset is 45 s, at most 60 s). Nothing is stored. An agent before 0.2.17 rejects the kind `forbidden`, as for any kind it does not know; the API checks the hello `agent_version` first.
+   - Success: state `succeeded`, payload `{"outcome":"ok","summary":{…}}` (item 3).
+   - Failure: state `failed`, `error_code` and payload `{"outcome":"failed","reason":code}` with the same code: `docker_usage_disabled` (neither `images` nor `edge` is on; the agent checks its own policy first, so a host without the helper gets it too), `docker_unavailable` (Docker did not answer or answered badly; also any other helper refusal, a transport error or a reply that fails the agent's strict check), `timeout` (the helper's Engine deadline, or this task's own deadline; a session that ends first is `docker_unavailable`).
+2. **Helper verb `docker_df`** (read-only, not mutating, so it runs during an agent upgrade). Request exactly `{}` (else `bad_spec`). The gate is `container_list`'s: `images` enabled OR `edge` enabled in `runner.toml`, re-read per call; otherwise `{"error":"docker_usage_disabled"}` before any Engine call.
+   - The Engine call is `GET /system/df` at the negotiated version, with its own 30 s deadline and a 32 MiB body limit for this call only (every other call keeps 4 MiB). A deadline overrun is `{"error":"timeout"}`; unreachable, a non-200 answer, a body over the limit or one that does not parse is `{"error":"docker_unavailable"}`. The Engine's message goes only to the helper journal, scrubbed as today (v1.17 item 4).
+   - Success is `{"summary":{…}}`. The agent decodes it strictly (no other key, lists ≤ 10, strings ≤ 200 characters, no negative number).
+3. **Summary** (bytes as integers):
+   ```json
+   {"totals":{"images":{"count":N,"active":N,"size":B,"reclaimable":B},
+              "containers":{…},"volumes":{…},"build_cache":{…}},
+    "images":[{"ref":"ghcr.io/o/app:1.2","id":"0123456789ab","size":B,"containers":N}],
+    "volumes":[{"name":"pgdata","size":B,"in_use":true}],
+    "containers":[{"name":"deploybot-api","state":"running","size":B}]}
+   ```
+   - A size Docker reports as -1 counts as 0 in the totals and is `null` in a list; it sorts below every known size.
+   - **images:** `ref` is the first RepoTag, or `<none>` when there is none or it is `<none>:<none>`; `id` the first 12 hex digits after `sha256:` (`""` if the id has another shape); `containers` is Docker's `Containers` with -1 as 0. `active` counts images with `containers` > 0. The totals follow `docker system df`, checked against Docker 29.9's raw answer on a dev host (2026-11-24): `size` is Docker's `LayersSize` (a shared layer counted once; the sum of the sizes when the daemon sends none), and `reclaimable` is the sum of `Size` - `SharedSize` over the images with `containers` 0 (the whole `Size` when `SharedSize` is -1 or larger than `Size`; an image whose `Size` is -1 adds nothing), at most `size`.
+   - **containers:** `size` is `SizeRw` (missing is 0); `name` the first name without its leading `/`; `active` counts `running`; `reclaimable` sums the rest.
+   - **volumes:** `size` is `UsageData.Size`; `in_use` is `UsageData.RefCount` > 0; `active` counts those in use; `reclaimable` sums the rest. A volume whose `UsageData` is null or missing has an unknown size (null in the list, 0 in the totals) and is not in use.
+   - **build_cache:** `count` counts every record and `active` those `InUse`. As in `docker system df`, a record with `Shared` true (its data is also held by another record) is left out of `size` and `reclaimable`: `size` sums `Size` of the others, `reclaimable` those of them not in use. There is no build-cache list.
+   - Each list holds the 10 largest, by size descending, then `name` or `ref` ascending (images then by `id`). Totals cover everything. Empty lists are `[]`.
+   - Every string is capped at 200 characters (invalid UTF-8 replaced). Nothing else is read from the Engine answer: no labels, env, mounts, host paths, commands, or digests other than the short image id.
+4. **No new `runner.toml` key and no hello field.**
+
