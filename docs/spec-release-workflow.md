@@ -1,6 +1,6 @@
 # Spec: Releases from a GitHub workflow (tag, build, sign, publish)
 
-**Status:** revision 1, **waiting for Joe's approval**. No workflow or code is written until then.
+**Status:** revision 1, **waiting for Joe's approval**. No workflow or code is written until then. D1 decided by Joe 2026-11-25: "New dedicated CI key" (decision card).
 **Tier:** 3 (how hosts trust agent upgrades: the release key the root helper checks; the release flow of both repos). Claims **agent-protocol v1.27** (v1.26 is the newest implemented; no open or merged PR in either repo claims v1.27 on 2026-11-25; renumber on the code branch if another PR merges it first).
 **Repos:** bot-agent (this spec, the signing key change, the agent workflow) and bot-control-plane (the server workflow; picks up its parked PR #4). The code lands as one PR per repo after approval; each names the other.
 **Asked by:** Joe, 2026-11-25: "Can we make this sign workflow on GitHub, like storing my private key in GitHub? Then the GitHub workflow can use the key to sign the image."
