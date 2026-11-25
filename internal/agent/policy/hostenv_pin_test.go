@@ -87,3 +87,56 @@ func TestHostEnvPinKeysAreKnown(t *testing.T) {
 		}
 	}
 }
+
+// The limits are inclusive: a program and 16 arguments, 256-byte
+// arguments. An empty array is no pin.
+func TestHostEnvPinsBoundaries(t *testing.T) {
+	f := newHostEnvFixture(t)
+	seventeen := "a" + strings.Repeat(" x", 16)
+	p := f.load(pinFiles+`host_env_command = ["deploybot/api=`+seventeen+`", "deploybot/migrate=`+strings.Repeat("b", 256)+`"]`+"\n", rootOwner, false)
+	api, _ := p.HostEnv("deploybot", "api")
+	mig, _ := p.HostEnv("deploybot", "migrate")
+	if !p.Valid || len(api.Command) != 17 || len(mig.Command[0]) != 256 {
+		t.Fatalf("%+v", p)
+	}
+	p = f.load(pinFiles+"host_env_command = []\nhost_env_healthcheck = []\n", rootOwner, false)
+	api, _ = p.HostEnv("deploybot", "api")
+	if !p.Valid || api.Command != nil || api.Healthcheck != nil {
+		t.Fatalf("empty arrays: %+v", p)
+	}
+	p = f.load("host_env_command = []\n", rootOwner, false)
+	if !p.Valid || len(p.HostEnvFiles) != 0 {
+		t.Fatalf("empty array alone: %+v", p)
+	}
+	for name, argv := range map[string]string{"DEL": "a\x7fb", "non-ASCII": "café"} {
+		p = f.load(pinFiles+`host_env_command = ["deploybot/api=`+argv+`"]`+"\n", rootOwner, false)
+		if p.Valid || p.Reason != ReasonHostEnvFile || p.ReasonEntry != "deploybot/api" {
+			t.Fatalf("%s: %+v", name, p)
+		}
+	}
+	items := make([]string, 33)
+	for i := range items {
+		items[i] = `"deploybot/api=api"`
+	}
+	p = f.load(pinFiles+"host_env_command = ["+strings.Join(items, ", ")+"]\n", rootOwner, false)
+	if p.Valid || p.Reason != "parse" {
+		t.Fatalf("33 items: %+v", p)
+	}
+}
+
+// The v1.22 console rewrite changes edge, images and projects only: the
+// pins survive byte for byte and still load.
+func TestRewriteKeepsHostEnvPins(t *testing.T) {
+	pins := `host_env_command = ["deploybot/api=api"]` + "\n" +
+		`host_env_healthcheck = ["deploybot/api=/usr/local/bin/deploybot-server health http://127.0.0.1:8190/health"]` + "\n"
+	in := hostEnvBase + "console_policy = true\n" + pinFiles + pins
+	out := string(Rewrite([]byte(in), Managed{Edge: true, Images: []string{"ghcr.io/acme/*"}, Projects: []string{"deploybot", "other"}}))
+	if !strings.Contains(out, pinFiles+pins) {
+		t.Fatalf("pins changed:\n%s", out)
+	}
+	p := FromBytes([]byte(out), "", "", nil)
+	api, _ := p.HostEnv("deploybot", "api")
+	if !p.Valid || !reflect.DeepEqual(api.Command, []string{"api"}) || len(api.Healthcheck) != 3 {
+		t.Fatalf("reason %s %+v", p.Reason, api)
+	}
+}

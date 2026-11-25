@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"slices"
+
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -142,7 +144,7 @@ func hostEnvImageOK(line policy.HostEnvFile, image, digest string) bool {
 func hostEnvRunField(line policy.HostEnvFile, req images.DeployRequest) string {
 	spec := req.Spec
 	switch {
-	case !argvEqual(spec.Command, line.Command):
+	case !slices.Equal(spec.Command, line.Command):
 		return "command"
 	case len(spec.Entrypoint) > 0:
 		return "entrypoint"
@@ -167,19 +169,7 @@ func healthcheckPinned(hc *images.Healthcheck, pin []string) bool {
 	if len(pin) == 0 {
 		return hc == nil
 	}
-	return hc != nil && argvEqual(hc.Test, pin)
-}
-
-func argvEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return hc != nil && slices.Equal(hc.Test, pin)
 }
 
 // hostNetDenied is the v1.21 item 7 re-check for a manual rollback, start

@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -190,12 +192,8 @@ func validateHostEnvFiles(items, imageItems, cmdItems, healthItems, projects, pa
 		out = append(out, f)
 	}
 	// An image or pin line without a file line is a typo, not a no-op.
-	for _, lines := range []map[string]string{imagesFor, keysOf(cmdFor), keysOf(healthFor)} {
-		for label := range lines {
-			if !seen[label] {
-				return nil, ReasonHostEnvFile, label
-			}
-		}
+	for _, label := range append(append(unseen(imagesFor, seen), unseen(cmdFor, seen)...), unseen(healthFor, seen)...) {
+		return nil, ReasonHostEnvFile, label
 	}
 	return out, "", ""
 }
@@ -203,7 +201,7 @@ func validateHostEnvFiles(items, imageItems, cmdItems, healthItems, projects, pa
 // Host env run pin limits (agent-protocol v1.26 item 1), the same argv
 // shape as the host_file commands.
 const (
-	MaxHostEnvArgs     = 17
+	MaxHostEnvArgs     = hostfiles.MaxArgs + 1
 	MaxHostEnvArgBytes = 256
 )
 
@@ -219,7 +217,7 @@ func hostEnvPins(items []string, abs bool) (map[string][]string, string, string)
 			return nil, "parse", ""
 		}
 		label := envLabel(project, entry)
-		if _, dup := out[label]; dup || label == "" {
+		if _, dup := out[label]; label == "" || dup {
 			return nil, ReasonHostEnvFile, label
 		}
 		args, ok := splitPinArgv(argv, abs)
@@ -256,11 +254,16 @@ func splitPinArgv(s string, abs bool) ([]string, bool) {
 	return args, true
 }
 
-func keysOf(m map[string][]string) map[string]string {
-	out := make(map[string]string, len(m))
-	for k := range m {
-		out[k] = ""
+// unseen is the labels of m without a host_env_files line, sorted so the
+// invalid reason names the same entry on every load.
+func unseen[V any](m map[string]V, seen map[string]bool) []string {
+	var out []string
+	for label := range m {
+		if !seen[label] {
+			out = append(out, label)
+		}
 	}
+	sort.Strings(out)
 	return out
 }
 

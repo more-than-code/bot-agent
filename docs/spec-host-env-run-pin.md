@@ -46,8 +46,8 @@ host_env_healthcheck = ["deploybot/api=/usr/local/bin/deploybot-server health ht
 ```
 
 - Item shape `"<project>/<entry>=<argv>"`. The `<project>/<entry>` must have a `host_env_files` line; one item per entry; at most 32 items per key.
-- `<argv>` is split on single spaces, the same as the `host_file_*` commands: 1 to 16 arguments, no empty argument, no shell and no quotes. Each argument 1–256 bytes of printable ASCII without space, `"`, `'` or `\`. The first argument of `host_env_healthcheck` is an absolute path (Docker `CMD` form runs it without a shell).
-- A malformed item, a duplicate, or a `<project>/<entry>` without a `host_env_files` line makes the policy invalid with `host_env_file` and that entry name (as v1.21 item 6). An older agent refuses both keys as `unknown_key`.
+- `<argv>` is split on single spaces, the same as the `host_file_*` commands: a program and at most 16 arguments (1 to 17 items), no empty argument, no shell and no quotes. Each argument 1–256 bytes of printable ASCII without space, `"`, `'` or `\`. The first argument of `host_env_healthcheck` is an absolute path (Docker `CMD` form runs it without a shell).
+- An item that does not split into `<project>/<entry>=<value>`, or more than 32 items, makes the policy invalid with `parse` (as v1.21 item 6). A bad argv, a duplicate, or a `<project>/<entry>` without a `host_env_files` line makes it invalid with `host_env_file` and that entry name. An older agent refuses both keys as `unknown_key`.
 - The v1.22 console rewrite never changes them (they are not `edge`, `images` or `projects`).
 - `policy check` adds two fields to the end of each `host_env_file` line: `command=<n args|image>` and `healthcheck=<n args|image>`. Still no value of the file.
 
@@ -73,13 +73,13 @@ Because the entry's own env is refused first, a key that both the entry and the 
 ### 3.3 Agent
 
 `internal/agent/run/reason.go` gains one fixed v1.19 reason for the new detail, with the field from a fixed list (never a value):
-`host_env_run <field>: this entry gets a host env file, so its <field> must match runner.toml (host_env_command, host_env_healthcheck) and it may not set entrypoint, user, volumes, files or its own env`.
+`host_env_run <field>: this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env`.
 A field outside the list gives the sentence without the field. No hello, frame or task change.
 
 ### 3.4 Unchanged
 
 - v1.21 image binding, file checks, env conflict rule, env hash, log redaction (still a second line of defence) and host-network rules.
-- Start, stop, restart, status, logs and both rollbacks of existing containers (H5).
+- Start, stop, restart, status, logs, the kept-container rollback and the automatic rollback inside a deploy (H5). A rollback that pulls is a `container_deploy` and is checked.
 - Entries without a `host_env_files` line: no change at all.
 
 ## 4. Contract diff
@@ -117,7 +117,7 @@ The server needs no new field: the refusal arrives as a v1.19 reason, which the 
 3. With `host_env_healthcheck`, the same for `healthcheck.test`; changed timings with the same `test` deploy.
 4. A job run and an `image_rollback` that pulls are checked the same way; start, restart, stop, logs and the kept-container rollback are not.
 5. An entry without a `host_env_files` line deploys exactly as before (existing tests unchanged).
-6. Policy load: a `host_env_command`/`host_env_healthcheck` item without a `host_env_files` line, a duplicate, an empty or 17-argument argv, a quote or backslash, or a relative healthcheck path makes the policy invalid with `host_env_file <project>/<entry>`.
+6. Policy load: a `host_env_command`/`host_env_healthcheck` item without a `host_env_files` line, a duplicate, an empty argv or one of more than 17 items, a quote or backslash, or a relative healthcheck path makes the policy invalid with `host_env_file <project>/<entry>`.
 7. `policy check` prints the two new fields; the console rewrite (v1.22) leaves both keys untouched.
 8. The deploy result reason is the §3.3 sentence, and no file value appears in any log, result or refusal.
 
