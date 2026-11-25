@@ -153,7 +153,7 @@ The separate reviewer thread's findings on PR #15 (review of ac91ad1), folded in
 
 ## 13. Amendment: the CI key lives in AWS KMS ("computerless", 2026-11-25)
 
-**Status: Joe's direction, waiting for his approval of this section.** 18:35Z he called it still open ("solutioning phase rather than decision"); 21:43Z he set the signing key as the first thing to set up ("let's set up for the signing key, encrypt key, and the SSH key first"), with AWS KMS as the choice from his planning. The code on this branch implements it; it merges only after Joe approves §13 and the public key is in `PublicKeys`.
+**Status: approved by Joe on 2026-11-25 ("Approved. Section 13.", 22:46Z),** after he created the `release` environment (required reviewer Joe, deployment branch `main` only, "Allow administrators to bypass" off, variables `AWS_REGION`, `AWS_KMS_KEY_ID`, `AWS_RELEASE_ROLE_ARN`). The KMS CI key's public key is in `PublicKeys`.
 
 Joe's standing requirement (2026-11-25, "computerless"): releases, signing and key storage must work from his phone, with no step on his own computer. He leans towards a stable managed service ("I think the key is have a managed service which is stable, like AWS") over a GitHub environment secret or his own VMs. If accepted, this replaces where the D1 key lives, not D1 itself, and it replaces the `BOT_AGENT_RELEASE_KEY` secret everywhere above.
 
