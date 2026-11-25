@@ -21,7 +21,8 @@ import (
 const (
 	hostEnvValue = "postgres://deploybot:verysecretpassword@127.0.0.1/deploybot"
 	hostEnvLine  = `host_env_files = ["mohiguide/web=/etc/deploybot/api.env", "mohiguide/job=/etc/deploybot/api.env"]` + "\n" +
-		`host_env_images = ["mohiguide/web=ghcr.io/joe-and-his-friends/mo-webadmin", "mohiguide/job=ghcr.io/joe-and-his-friends/mo-job"]` + "\n"
+		`host_env_images = ["mohiguide/web=ghcr.io/joe-and-his-friends/mo-webadmin", "mohiguide/job=ghcr.io/joe-and-his-friends/mo-job"]` + "\n" +
+		`host_env_command = ["mohiguide/web=serve", "mohiguide/job=run"]` + "\n"
 	hostNetLine = `host_network_projects = ["mohiguide"]` + "\n"
 )
 
@@ -48,6 +49,15 @@ func (e *imgEnv) writeHostEnv(body string, mode os.FileMode) {
 	if err := os.Chmod(path, mode); err != nil {
 		e.t.Fatal(err)
 	}
+}
+
+// hostEnvDeploy is serviceDeploy in the shape v1.26 allows for an entry
+// with a host env file: the pinned command, the image's entrypoint and
+// user, no mounts and no env of its own.
+func hostEnvDeploy(hash string) images.DeployRequest {
+	r := serviceDeploy(hash)
+	r.Spec.Entrypoint, r.Spec.User, r.Spec.Volumes, r.Spec.Env, r.Env = nil, "", nil, nil, nil
+	return r
 }
 
 func lastBody(f *fakeDocker, method, suffix string) []byte {
@@ -147,10 +157,9 @@ func TestHostEnvMerged(t *testing.T) {
 			var logs []string
 			e := newHostEnv(t, hostEnvLine)
 			e.sys.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
-			req := serviceDeploy(hashC)
+			req := hostEnvDeploy(hashC)
 			if kind == "job" {
 				req = jobDeploy()
-				req.Env = map[string]string{"A": "b"}
 			}
 			req.EnvHash = envHashA
 			if code := imgCode(t, e.call(images.VerbDeploy, mustJSON(t, req))); code != "" {
@@ -158,7 +167,7 @@ func TestHostEnvMerged(t *testing.T) {
 			}
 			body := e.fake.body(http.MethodPost, "/containers/create")
 			env := strings.Join(createEnv(t, body), "\n")
-			if !strings.Contains(env, "DATABASE_URL="+hostEnvValue) || !strings.Contains(env, "secrets_key=0123456789abcdef") || !strings.Contains(env, "A=b") {
+			if !strings.Contains(env, "DATABASE_URL="+hostEnvValue) || !strings.Contains(env, "secrets_key=0123456789abcdef") || len(createEnv(t, body)) != 2 {
 				t.Fatalf("env %q", env)
 			}
 			labels := createLabels(t, body)
@@ -181,20 +190,24 @@ func TestHostEnvMerged(t *testing.T) {
 	}
 }
 
+// v1.26: an entry with a host env file may not set env of its own, so a
+// key the entry also sets is refused as host_env_run env before the file
+// is read (it was env_conflict <KEY> in v1.21). env_conflict remains for
+// a file key on the denylist.
 func TestHostEnvConflict(t *testing.T) {
 	cases := map[string]func(*images.DeployRequest){
-		"in env":      func(r *images.DeployRequest) { r.Env["DATABASE_URL"] = "other-value-123" },
-		"in spec env": func(r *images.DeployRequest) { r.Spec.Env["DATABASE_URL"] = "x" },
+		"in env":      func(r *images.DeployRequest) { r.Env = map[string]string{"DATABASE_URL": "other-value-123"} },
+		"in spec env": func(r *images.DeployRequest) { r.Spec.Env = map[string]string{"DATABASE_URL": "x"} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			var logs []string
 			e := newHostEnv(t, hostEnvLine)
 			e.sys.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
-			req := serviceDeploy(hashC)
+			req := hostEnvDeploy(hashC)
 			mutate(&req)
 			raw := e.call(images.VerbDeploy, mustJSON(t, req))
-			jsonEqual(t, raw, `{"error":"bad_spec","detail":"env_conflict","key":"DATABASE_URL"}`)
+			jsonEqual(t, raw, `{"error":"policy_denied","detail":"host_env_run","key":"env"}`)
 			if len(e.fake.Calls()) != 0 {
 				t.Fatal("engine called")
 			}
@@ -202,7 +215,7 @@ func TestHostEnvConflict(t *testing.T) {
 			if strings.Contains(all, hostEnvValue) || strings.Contains(all, "other-value-123") {
 				t.Fatalf("value leaked: %s", all)
 			}
-			if !strings.Contains(strings.Join(logs, "\n"), "env_conflict DATABASE_URL") {
+			if !strings.Contains(strings.Join(logs, "\n"), "host_env_run env") {
 				t.Fatalf("logs %v", logs)
 			}
 		})
@@ -210,7 +223,7 @@ func TestHostEnvConflict(t *testing.T) {
 	t.Run("denylisted key", func(t *testing.T) {
 		e := newHostEnv(t, hostEnvLine)
 		e.writeHostEnv("NODE_OPTIONS=--require=/tmp/evil.js\n", 0o600)
-		raw := e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashC)))
+		raw := e.call(images.VerbDeploy, mustJSON(t, hostEnvDeploy(hashC)))
 		jsonEqual(t, raw, `{"error":"bad_spec","detail":"env_conflict","key":"NODE_OPTIONS"}`)
 		if strings.Contains(string(raw), "evil") {
 			t.Fatal("value leaked")
@@ -232,13 +245,13 @@ func TestHostEnvBadFileRefusesOnlyDeploys(t *testing.T) {
 			e := newHostEnv(t, hostEnvLine)
 			// A good deploy first, then a second one parks it on -prev.
 			for i := 0; i < 2; i++ {
-				if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashC)))) != "" {
+				if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, hostEnvDeploy(hashC)))) != "" {
 					t.Fatal("deploy")
 				}
 			}
 			spoil(e)
 			before := len(e.fake.Calls())
-			raw := e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashC)))
+			raw := e.call(images.VerbDeploy, mustJSON(t, hostEnvDeploy(hashC)))
 			jsonEqual(t, raw, `{"error":"policy_denied","detail":"host_env_file"}`)
 			if len(e.fake.Calls()) != before {
 				t.Fatal("engine called")
@@ -273,7 +286,7 @@ func TestHostEnvBadFileRefusesOnlyDeploys(t *testing.T) {
 // image, by tag and by the pinned digest.
 func TestHostEnvImageBinding(t *testing.T) {
 	e := newHostEnv(t, hostEnvLine)
-	req := serviceDeploy(hashC)
+	req := hostEnvDeploy(hashC)
 	req.Spec.Image = "ghcr.io/joe-and-his-friends/other:1"
 	raw := e.call(images.VerbDeploy, mustJSON(t, req))
 	jsonEqual(t, raw, `{"error":"policy_denied","detail":"host_env_image"}`)
@@ -286,7 +299,7 @@ func TestHostEnvImageBinding(t *testing.T) {
 	raw = e.call(images.VerbDeploy, mustJSON(t, job))
 	jsonEqual(t, raw, `{"error":"policy_denied","detail":"host_env_image"}`)
 	// The bound image deploys.
-	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashC)))) != "" {
+	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, hostEnvDeploy(hashC)))) != "" {
 		t.Fatal("bound image refused")
 	}
 }
@@ -295,7 +308,7 @@ func TestHostEnvImageBinding(t *testing.T) {
 // one the container was created with (v1.21 item 4).
 func TestHostEnvStatusEnvHash(t *testing.T) {
 	e := newHostEnv(t, hostEnvLine)
-	req := serviceDeploy(hashC)
+	req := hostEnvDeploy(hashC)
 	req.EnvHash = envHashA
 	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, req))) != "" {
 		t.Fatal("deploy")
@@ -341,7 +354,7 @@ func TestHostEnvStatusEnvHash(t *testing.T) {
 
 func TestHostEnvLogsRedacted(t *testing.T) {
 	e := newHostEnv(t, hostEnvLine)
-	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, serviceDeploy(hashC)))) != "" {
+	if imgCode(t, e.call(images.VerbDeploy, mustJSON(t, hostEnvDeploy(hashC)))) != "" {
 		t.Fatal("deploy")
 	}
 	e.fake.logBody = append(frame(1, "connecting to "+hostEnvValue+"\n"), frame(1, "ok\n")...)

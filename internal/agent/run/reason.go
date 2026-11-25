@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -115,7 +116,9 @@ func probeWhy(c protocol.HealthCheck, res probe.Result) string {
 const (
 	whyHostEnvFile  = "host_env_file: the host env file for this entry is missing or fails its checks (root:root, mode 0600, one link, at most 64 KiB, KEY=VALUE lines)"
 	whyHostEnvImage = "host_env_image: the host env file of this entry is bound to other images (host_env_images in runner.toml)"
-	envKeyMaxBytes  = 128
+	// whyHostEnvRun follows "host_env_run[ <field>]" (v1.26).
+	whyHostEnvRun  = ": this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env"
+	envKeyMaxBytes = 128
 )
 
 // detailWhy is the reason for a container_deploy refusal with a v1.21
@@ -126,11 +129,23 @@ func detailWhy(r imageRefusalBody) string {
 		return whyHostEnvFile
 	case r.detail == images.DetailHostEnvImage && r.code == programs.ReasonPolicy:
 		return whyHostEnvImage
+	case r.detail == images.DetailHostEnvRun && r.code == programs.ReasonPolicy:
+		return hostEnvRunWhy(r.key)
 	case r.detail == images.DetailEnvConflict && r.code == programs.ReasonBadSpec && validEnvKeyName(r.key):
 		return "env_conflict " + r.key + ": the host env file sets a key that the entry's env also sets or that no container env may set"
 	default:
 		return ""
 	}
+}
+
+// hostEnvRunWhy is the v1.26 host_env_run reason. field is named only when
+// it is one of images.HostEnvRunFields, so a helper cannot put other text
+// in the reason.
+func hostEnvRunWhy(field string) string {
+	if slices.Contains(images.HostEnvRunFields, field) {
+		return images.DetailHostEnvRun + " " + field + whyHostEnvRun
+	}
+	return images.DetailHostEnvRun + whyHostEnvRun
 }
 
 // refusalWhy prefers the v1.21 detail sentence over the code's sentence.

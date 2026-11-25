@@ -55,15 +55,17 @@ func TestPolicyCheckHostEnv(t *testing.T) {
 		"projects = [\"deploybot\", \"other\"]\n"+
 		"host_network_projects = [\"deploybot\", \"other\"]\n"+
 		"host_env_files = [\"deploybot/api=/etc/deploybot/api.env\", \"deploybot/mcp=/etc/deploybot/mcp.env\"]\n"+
-		"host_env_images = [\"deploybot/api=ghcr.io/more-than-code/deploybot-server\", \"deploybot/mcp=ghcr.io/more-than-code/*\"]\n")
+		"host_env_images = [\"deploybot/api=ghcr.io/more-than-code/deploybot-server\", \"deploybot/mcp=ghcr.io/more-than-code/*\"]\n"+
+		"host_env_command = [\"deploybot/api=api\"]\n"+
+		"host_env_healthcheck = [\"deploybot/api=/usr/local/bin/deploybot-server health http://127.0.0.1:8190/health\"]\n")
 	out, err := runPolicyCheck(t, path)
 	if err != nil {
 		t.Fatalf("%v %q", err, out)
 	}
 	want := "agent_upgrade_https_proxy=unset\n" +
 		"host_network_projects=deploybot,other\n" +
-		"host_env_file deploybot/api keys=2 sha256=" + apiSum[:12] + " image=ghcr.io/more-than-code/deploybot-server\n" +
-		"host_env_file deploybot/mcp keys=1 sha256=" + mcpSum[:12] + " image=ghcr.io/more-than-code/*\n" +
+		"host_env_file deploybot/api keys=2 sha256=" + apiSum[:12] + " image=ghcr.io/more-than-code/deploybot-server command=1 healthcheck=3\n" +
+		"host_env_file deploybot/mcp keys=1 sha256=" + mcpSum[:12] + " image=ghcr.io/more-than-code/* command=image healthcheck=image\n" +
 		"console_policy=false\n" +
 		"container_cgroupns=private\n"
 	if !strings.HasSuffix(out, want) {
