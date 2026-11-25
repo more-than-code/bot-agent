@@ -153,7 +153,7 @@ The separate reviewer thread's findings on PR #15 (review of ac91ad1), folded in
 
 ## 13. Amendment: the CI key lives in AWS KMS ("computerless", 2026-11-25)
 
-**Status: proposal, not approved.** Joe (2026-11-25 18:35Z): where the key lives is still being worked out ("solutioning phase rather than decision"). The workflow on this branch implements this proposal so it can be judged concretely; it is not merged until Joe decides.
+**Status: Joe's direction, waiting for his approval of this section.** 18:35Z he called it still open ("solutioning phase rather than decision"); 21:43Z he set the signing key as the first thing to set up ("let's set up for the signing key, encrypt key, and the SSH key first"), with AWS KMS as the choice from his planning. The code on this branch implements it; it merges only after Joe approves §13 and the public key is in `PublicKeys`.
 
 Joe's standing requirement (2026-11-25, "computerless"): releases, signing and key storage must work from his phone, with no step on his own computer. He leans towards a stable managed service ("I think the key is have a managed service which is stable, like AWS") over a GitHub environment secret or his own VMs. If accepted, this replaces where the D1 key lives, not D1 itself, and it replaces the `BOT_AGENT_RELEASE_KEY` secret everywhere above.
 
@@ -168,6 +168,39 @@ Joe's standing requirement (2026-11-25, "computerless"): releases, signing and k
 3. IAM → Roles → Create role "Web identity" for that provider, named `bot-agent-release-signer`. Trust policy condition: `token.actions.githubusercontent.com:aud` equals `sts.amazonaws.com` and `token.actions.githubusercontent.com:sub` equals `repo:more-than-code/bot-agent:environment:release` (exactly; no wildcard). Permissions: one inline policy allowing only `kms:Sign` on the key's ARN, with condition `kms:SigningAlgorithm` = `ED25519_SHA_512`. Maximum session 1 hour.
 4. GitHub, bot-agent → Settings → Environments → `release` → Environment variables: `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (the role's ARN), `AWS_KMS_KEY_ID` (the key's ARN). No secrets.
 5. KMS → the key → Public key tab → copy the PEM and paste it in the thread. It is public; the thread converts it to the 32-byte key for `PublicKeys`.
+
+**Copy-paste policies** (replace `ACCOUNT_ID`, `REGION` and `KEY_ID`):
+
+Trust policy of `bot-agent-release-signer`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"},
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {"StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+      "token.actions.githubusercontent.com:sub": "repo:more-than-code/bot-agent:environment:release"
+    }}
+  }]
+}
+```
+
+Its only permission policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "kms:Sign",
+    "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/KEY_ID",
+    "Condition": {"StringEquals": {"kms:SigningAlgorithm": "ED25519_SHA_512"}}
+  }]
+}
+```
 
 **What changes in the threat model.**
 - The private key can no longer leak from GitHub, a log or a runner; the worst a compromised run can do is ask KMS for signatures while its 15-minute credentials last, and every `Sign` call is in CloudTrail's event history with the run id as session name.
