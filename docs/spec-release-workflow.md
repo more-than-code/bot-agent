@@ -169,6 +169,8 @@ Joe's standing requirement (2026-11-25, "computerless"): releases, signing and k
 4. GitHub, bot-agent → Settings → Environments → `release` → Environment variables: `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (the role's ARN), `AWS_KMS_KEY_ID` (the key's ARN). No secrets.
 5. KMS → the key → Public key tab → copy the PEM and paste it in the thread. It is public; the thread converts it to the 32-byte key for `PublicKeys`.
 
+**Region:** Asia Pacific (Sydney), `ap-southeast-2` (Joe, 2026-11-25, close to his other VMs and vendors). Create the key there; `AWS_REGION` is `ap-southeast-2`.
+
 **Copy-paste policies** (replace `ACCOUNT_ID`, `REGION` and `KEY_ID`):
 
 Trust policy of `bot-agent-release-signer`:
