@@ -23,11 +23,15 @@ const MaxSigFile = 128
 //   - Joe's offline release key (`release-sign keygen`, 2026-11-23), first
 //     used for bot-agent v0.2.15. It stays off GitHub and is the recovery
 //     key: it signs the bridge release and any release that drops a key.
+//   - The CI release key: an AWS KMS Ed25519 key in ap-southeast-2
+//     (2026-11-25), used only by the release workflow's sign job on main
+//     after Joe approves the run (spec §13). It cannot be exported from KMS.
 //
 // A build whose list is empty or holds the all-zero placeholder refuses
 // every bundle: VerifyAny rejects it before checking the signature.
 var PublicKeys = []ed25519.PublicKey{
 	mustKey("Ee1UIjnw5zgPNw5ZtKNBTCdLvYM3ozEcSRcfWZaCHh8="),
+	mustKey("DCG1ElztSCaavg19pGaC2Hud1CoLZXvIDrlFr0RXBPA="),
 }
 
 // mustKey decodes a base64 Ed25519 public key compiled into the binary.
