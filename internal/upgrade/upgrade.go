@@ -40,8 +40,8 @@ type Env struct {
 	RunnerInstalled func() bool
 	// Fetch downloads the three release files.
 	Fetch Fetcher
-	// PublicKey is the release key. Nil is release.PublicKey.
-	PublicKey ed25519.PublicKey
+	// PublicKeys are the release keys. Nil is release.PublicKeys.
+	PublicKeys []ed25519.PublicKey
 	// Arch is the bundle architecture. Empty is runtime.GOARCH.
 	Arch string
 	// Version runs `<bin> version` and returns its trimmed stdout.
@@ -109,11 +109,11 @@ func attempt(ctx context.Context, version string, env Env) (string, string) {
 		var sig []byte
 		sig, err = env.Fetch.Fetch(ctx, version, sigName)
 		if err == nil {
-			pub := env.PublicKey
-			if pub == nil {
-				pub = release.PublicKey
+			pubs := env.PublicKeys
+			if pubs == nil {
+				pubs = release.PublicKeys
 			}
-			if verr := release.Verify(pub, sums, sig); verr != nil {
+			if verr := release.VerifyAny(pubs, sums, sig); verr != nil {
 				env.logf("bot-agent-runner: upgrade-run signature: %s", verr)
 				return agentupgrade.OutcomeFailed, agentupgrade.ReasonSignature
 			}

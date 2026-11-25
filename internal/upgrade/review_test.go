@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,7 +64,7 @@ func TestRunFetchOrder(t *testing.T) {
 		t.Fatalf("order %v", f.calls)
 	}
 	rg = newRunRig(t, r, testVersion)
-	rg.env.PublicKey = make([]byte, 32)
+	rg.env.PublicKeys = []ed25519.PublicKey{make([]byte, 32)}
 	want(t, rg.run(t), "failed", "signature_invalid")
 	f = rg.env.Fetch.(*mapFetcher)
 	if strings.Join(f.calls, ",") != "SHA256SUMS,SHA256SUMS.sig" {

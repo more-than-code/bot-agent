@@ -8,10 +8,20 @@ import "testing"
 // carry the real public key. Run it with `go test -tags release
 // ./internal/release`; without the tag it is not compiled.
 func TestReleaseKeyNotPlaceholder(t *testing.T) {
-	if IsPlaceholder(PublicKey) {
-		t.Fatal("internal/release PublicKey is the all-zero placeholder; set the release key before tagging")
+	if len(PublicKeys) == 0 {
+		t.Fatal("internal/release PublicKeys is empty")
 	}
-	if len(PublicKey) != 32 {
-		t.Fatalf("PublicKey is %d bytes", len(PublicKey))
+	seen := map[string]bool{}
+	for i, pub := range PublicKeys {
+		if len(pub) != 32 {
+			t.Fatalf("PublicKeys[%d] is %d bytes", i, len(pub))
+		}
+		if IsPlaceholder(pub) {
+			t.Fatalf("internal/release PublicKeys[%d] is the all-zero placeholder; set the release key before tagging", i)
+		}
+		if seen[string(pub)] {
+			t.Fatalf("PublicKeys[%d] is listed twice", i)
+		}
+		seen[string(pub)] = true
 	}
 }
