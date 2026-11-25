@@ -9,9 +9,9 @@
 #   build    scripts/release-bundle.sh twice, compared byte for byte; writes
 #            the summary shown on the approval page (spec §12 A2)
 #   sign     environment "release" (main only, Joe approves): rebuilds on its
-#            own runner, requires the same SHA256SUMS, signs it with the
-#            BOT_AGENT_RELEASE_KEY secret and checks the signature against
-#            the keys compiled into the helper (§12 A4, A8)
+#            own runner, requires the same SHA256SUMS, signs it with the CI
+#            key in AWS KMS (GitHub OIDC, no secret in GitHub) and checks the
+#            signature against the keys compiled into the helper (§12, §13)
 #   publish  creates tag vX.Y.Z on the commit and the release, then publishes
 #            it. A notes file starting with "signing: offline" skips sign and
 #            leaves a draft for Joe to sign locally (the bridge, §5).
@@ -203,6 +203,9 @@ jobs:
     if: github.ref == 'refs/heads/main' && needs.meta.outputs.release == 'true' && needs.meta.outputs.offline != 'true'
     runs-on: ubuntu-24.04
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -225,23 +228,42 @@ jobs:
           path: ${{ runner.temp }}/built
       - name: Same SHA256SUMS as the build job
         run: cmp "$RUNNER_TEMP/own/SHA256SUMS" "$RUNNER_TEMP/built/SHA256SUMS"
-      - name: Sign
+      - name: Sign with the KMS key
+        # The CI key is an AWS KMS Ed25519 key (ECC_NIST_EDWARDS25519); its
+        # private half never leaves KMS. This job gets short-lived AWS
+        # credentials through GitHub OIDC for a role whose trust policy
+        # accepts only this repository's release environment, allowed only
+        # kms:Sign with ED25519_SHA_512 on that key (spec §13). The three
+        # values are environment variables, not secrets.
         env:
-          BOT_AGENT_RELEASE_KEY: ${{ secrets.BOT_AGENT_RELEASE_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          KEY_ID: ${{ vars.AWS_KMS_KEY_ID }}
         run: |
           set -euo pipefail
-          set +x
-          [ -n "$BOT_AGENT_RELEASE_KEY" ] || { echo "::error::BOT_AGENT_RELEASE_KEY is not set in the release environment"; exit 1; }
-          umask 077
-          key="$RUNNER_TEMP/release-key"
-          printf '%s\n' "$BOT_AGENT_RELEASE_KEY" > "$key"
-          unset BOT_AGENT_RELEASE_KEY
+          for v in AWS_REGION ROLE_ARN KEY_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set in the release environment's variables"; exit 1; }
+          done
+          sums="$RUNNER_TEMP/own/SHA256SUMS"
+          [ "$(stat -c %s "$sums")" -le 4096 ] || { echo "::error::SHA256SUMS is over KMS's 4096-byte RAW limit"; exit 1; }
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$oidc"
+          creds=$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+            --role-session-name "release-$GITHUB_RUN_ID" --web-identity-token "$oidc" \
+            --duration-seconds 900 --query Credentials --output json)
+          unset oidc
+          AWS_ACCESS_KEY_ID=$(jq -r .AccessKeyId <<<"$creds")
+          AWS_SECRET_ACCESS_KEY=$(jq -r .SecretAccessKey <<<"$creds")
+          AWS_SESSION_TOKEN=$(jq -r .SessionToken <<<"$creds")
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          echo "::add-mask::$AWS_SESSION_TOKEN"
+          unset creds
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
           mkdir -p "$RUNNER_TEMP/sig"
-          "$RUNNER_TEMP/release-sign" sign -key "$key" "$RUNNER_TEMP/own/SHA256SUMS" > "$RUNNER_TEMP/sig/SHA256SUMS.sig"
-          rm -f "$key"
-      - name: Remove the key file
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release-key"
+          sig=$(aws kms sign --key-id "$KEY_ID" --message "fileb://$sums" --message-type RAW \
+            --signing-algorithm ED25519_SHA_512 --query Signature --output text)
+          printf '%s\n' "$sig" > "$RUNNER_TEMP/sig/SHA256SUMS.sig"
       - name: Check the signature with the compiled keys
         run: '"$RUNNER_TEMP/release-sign" verify-compiled "$RUNNER_TEMP/own/SHA256SUMS" "$RUNNER_TEMP/sig/SHA256SUMS.sig"'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

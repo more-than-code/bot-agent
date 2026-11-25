@@ -150,3 +150,31 @@ The separate reviewer thread's findings on PR #15 (review of ac91ad1), folded in
 - **A7 (L2) How "signed in CI" is detected.** The `signing: offline` line is refused when the newest published release's `SHA256SUMS.sig` verifies with a key in the list other than the offline key. The guard catches mistakes only: the line can only ever produce an unsigned draft.
 - **A8 (L3) Why the sign job rebuilds.** The two builds in **build** prove determinism; the sign job's rebuild on a separate runner is the independent check that what gets signed is what the commit builds. It must not be "simplified" into signing the build job's artifact.
 - **A9 (L4) What D3 means.** With D3 = no tap, a session that merges a release PR into `main` when Joe asked for a release also publishes the server release and (D4) pushes the images, with no further action by Joe. Deploying still needs Joe.
+
+## 13. Amendment: the CI key lives in AWS KMS ("computerless", 2026-11-25)
+
+Joe's standing requirement (2026-11-25, "computerless"): releases, signing and key storage must work from his phone, with no step on his own computer. He chose (decision card, then "I think the key is have a managed service which is stable, like AWS") to keep the CI key in AWS KMS instead of a GitHub environment secret. This replaces where the D1 key lives, not D1 itself, and it replaces the `BOT_AGENT_RELEASE_KEY` secret everywhere above.
+
+**Key type.** AWS KMS supports Ed25519: key spec `ECC_NIST_EDWARDS25519`, key usage `SIGN_VERIFY`. Signing with `ED25519_SHA_512` and `MessageType` `RAW` is plain Ed25519 (RFC 8032 PureEdDSA), so the 64-byte signature verifies with Go's `ed25519.Verify` and the helper code is unchanged. `RAW` messages are at most 4096 bytes; `SHA256SUMS` is about 1 KB, and the sign job refuses one over the limit. The private key cannot be exported from KMS.
+
+**Sign job.** It has `id-token: write` and no secret. After the rebuild and compare pass, its signing step requests a GitHub OIDC token for audience `sts.amazonaws.com`, exchanges it with `sts:AssumeRoleWithWebIdentity` for 15-minute credentials, and calls `kms:Sign`. The role ARN, key id and region are environment *variables* of `release` (not secret). Then it checks the signature against the compiled keys as before. No third-party action is added; the runner's own `aws` CLI is used.
+
+**Steps only Joe can do, all from a phone browser** (they replace §6 steps 2 and 7):
+
+1. AWS console → KMS → Create key: Asymmetric, Sign and verify, `ECC_NIST_EDWARDS25519`, single region. Alias `bot-agent-release`. Key administrators: yourself only. Key users: none yet (the role below gets its rights from its own policy).
+2. IAM → Identity providers → Add provider: OpenID Connect, URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` (skip if it exists).
+3. IAM → Roles → Create role "Web identity" for that provider, named `bot-agent-release-signer`. Trust policy condition: `token.actions.githubusercontent.com:aud` equals `sts.amazonaws.com` and `token.actions.githubusercontent.com:sub` equals `repo:more-than-code/bot-agent:environment:release` (exactly; no wildcard). Permissions: one inline policy allowing only `kms:Sign` on the key's ARN, with condition `kms:SigningAlgorithm` = `ED25519_SHA_512`. Maximum session 1 hour.
+4. GitHub, bot-agent → Settings → Environments → `release` → Environment variables: `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (the role's ARN), `AWS_KMS_KEY_ID` (the key's ARN). No secrets.
+5. KMS → the key → Public key tab → copy the PEM and paste it in the thread. It is public; the thread converts it to the 32-byte key for `PublicKeys`.
+
+**What changes in the threat model.**
+- The private key can no longer leak from GitHub, a log or a runner; the worst a compromised run can do is ask KMS for signatures while its 15-minute credentials last, and every `Sign` call is in CloudTrail's event history with the run id as session name.
+- Revocation is immediate: disable the KMS key (one tap) and nothing can be signed with it; then drop it from `PublicKeys` in a release signed by the offline key (§5, A6).
+- The `sub` condition ties signing to a job that ran in the `release` environment, which only `main` can reach and which waits for Joe's tap (D2). A workflow on another branch gets a different `sub` and is refused by AWS.
+- A1 still applies: also check that a cloud session cannot write IAM or KMS in that AWS account. Sessions never get AWS credentials for it.
+
+**Still needing a computer, and the phone-only way:**
+- *The bridge release (§5)*, signed with Joe's offline key, which today is a file on his Mac. Phone-only alternative, for Joe to choose when the bridge is cut: add the offline key's line as a temporary `release` environment secret, let a one-off sign step use it, then delete the secret. Or sign the bridge once on the Mac while he still has it. Until he chooses, the workflow keeps the `signing: offline` draft path.
+- *The offline recovery key itself*: move it into a password manager as a secure note and delete it from the Mac. Using it later (revoking the CI key) takes the same temporary-secret path.
+
+`release-notes/`, the summary page, publishing and the server workflow are unchanged.
