@@ -204,6 +204,8 @@ Its only permission policy:
 }
 ```
 
+**A1 for AWS (2026-11-25).** The AWS side (OIDC provider, role `bot-agent-release-signer`, inline policy `kms-sign-only`) was created by a Claude session through the AWS connector while Joe was signed in as the account root. At Joe's word ("you can help create a proper user … instead of the root user"), the connector then moved to the IAM user `claude-mcp`: `PowerUserAccess` and `IAMReadOnlyAccess`, plus the inline deny policy `protect-release-signing`, which denies `kms:*` on the release key, every non-read IAM action on the signer role and the OIDC provider, and `sts:AssumeRole*` on the signer role. So a session can neither sign, change the key or its policy, nor widen who may assume the role. Joe sets that user's console password himself and signs the connector in as it. Left to Joe: keep the root user for himself only, with MFA, and never sign the connector in as root again.
+
 **What changes in the threat model.**
 - The private key can no longer leak from GitHub, a log or a runner; the worst a compromised run can do is ask KMS for signatures while its 15-minute credentials last, and every `Sign` call is in CloudTrail's event history with the run id as session name.
 - Revocation is immediate: disable the KMS key (one tap) and nothing can be signed with it; then drop it from `PublicKeys` in a release signed by the offline key (§5, A6).
