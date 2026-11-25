@@ -167,7 +167,7 @@ func newRunRig(t *testing.T, r *fakeRelease, version string) *runRig {
 		Fetch: &mapFetcher{files: map[string][]byte{
 			"SHA256SUMS": r.sums, "SHA256SUMS.sig": r.sig, "bot-agent-v" + version + ".tar.gz": r.tarball,
 		}},
-		PublicKey:       r.pub,
+		PublicKeys:      []ed25519.PublicKey{r.pub},
 		Arch:            "arm64",
 		RunnerInstalled: func() bool { return true },
 		Version: func(_ context.Context, bin string) (string, error) {
@@ -268,10 +268,16 @@ func TestRunSignatureInvalid(t *testing.T) {
 		},
 		"wrong key": func(r *fakeRelease, rg *runRig) {
 			other, _, _ := ed25519.GenerateKey(rand.Reader)
-			rg.env.PublicKey = other
+			rg.env.PublicKeys = []ed25519.PublicKey{other}
 		},
 		"placeholder key": func(r *fakeRelease, rg *runRig) {
-			rg.env.PublicKey = ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+			rg.env.PublicKeys = []ed25519.PublicKey{ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))}
+		},
+		"placeholder next to the signing key": func(r *fakeRelease, rg *runRig) {
+			rg.env.PublicKeys = append(rg.env.PublicKeys, ed25519.PublicKey(make([]byte, ed25519.PublicKeySize)))
+		},
+		"empty key list": func(r *fakeRelease, rg *runRig) {
+			rg.env.PublicKeys = []ed25519.PublicKey{}
 		},
 		"changed SHA256SUMS": func(r *fakeRelease, rg *runRig) {
 			rg.env.Fetch.(*mapFetcher).files["SHA256SUMS"] = append([]byte(strings.Repeat("0", 64)+"  extra\n"), r.sums...)
@@ -291,6 +297,16 @@ func TestRunSignatureInvalid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// v1.27: a bundle signed by any compiled key is accepted, so a release
+// signed by the CI key installs on a helper that also lists the offline key.
+func TestRunSignedBySecondKey(t *testing.T) {
+	r := newRelease(t, testVersion)
+	rg := newRunRig(t, r, testVersion)
+	other, _, _ := ed25519.GenerateKey(rand.Reader)
+	rg.env.PublicKeys = []ed25519.PublicKey{other, r.pub}
+	want(t, rg.run(t), "succeeded", "")
 }
 
 // A hash mismatch is refused: the signed SHA256SUMS is right, the bundled

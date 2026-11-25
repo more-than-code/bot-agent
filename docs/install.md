@@ -57,9 +57,8 @@ Follow them in order. Stop where it says stop. Run each command on the host. The
    ```bash
    ssh <host> "set -e; mkdir -p ~/bot-agent-install && cd ~/bot-agent-install && \
      curl -fsSLO https://github.com/more-than-code/bot-agent/releases/download/v$V/bot-agent-v$V.tar.gz && \
-     curl -fsSLO https://github.com/more-than-code/bot-agent/releases/download/v$V/bot-agent-v$V.tar.gz.sha256 && \
-     sha256sum -c bot-agent-v$V.tar.gz.sha256 && tar -xzf bot-agent-v$V.tar.gz && \
-     cd bot-agent-v$V && sha256sum -c SHA256SUMS"
+     curl -fsSLO https://github.com/more-than-code/bot-agent/releases/download/v$V/SHA256SUMS && \
+     tar -xzf bot-agent-v$V.tar.gz && cd bot-agent-v$V && sha256sum -c SHA256SUMS && cmp SHA256SUMS ../SHA256SUMS"
    ```
    Every checked line must end in `OK`. Stop if any line does not.
 4. Choose the install command. The policy flags and the `next:` line need bundle v0.2.7 or later.
@@ -113,23 +112,25 @@ Open the latest release:
 
 Every release is listed at <https://github.com/more-than-code/bot-agent/releases>.
 
-Download both files for that version. Replace `X.Y.Z` below with the version in the release name.
+Download two files for that version. Replace `X.Y.Z` below with the version in the release name.
 
 - `bot-agent-vX.Y.Z.tar.gz`
-- `bot-agent-vX.Y.Z.tar.gz.sha256`
+- `SHA256SUMS` (a byte-identical copy of the one inside the tarball)
+
+The release also has `SHA256SUMS.sig`, the Ed25519 signature over `SHA256SUMS` that the helper checks before an upgrade from Deploybot. Releases are built, signed and published by the repository's release workflow (`docs/spec-release-workflow.md`).
 
 The tarball contains one directory, `bot-agent-vX.Y.Z/`. Inside it are `bot-agent-vX.Y.Z-linux-amd64`, `bot-agent-vX.Y.Z-linux-arm64`, `bot-agent-runner-vX.Y.Z-linux-amd64`, `bot-agent-runner-vX.Y.Z-linux-arm64`, `install.sh`, `units/`, and `SHA256SUMS`.
 
-Copy both files to the host if you downloaded them elsewhere. Check them on the host, in a plain path (letters, digits, `. _ / + -`). Check the tarball first, then the files inside it.
+Copy both files to the host if you downloaded them elsewhere. Check them on the host, in a plain path (letters, digits, `. _ / + -`): the files inside the tarball against its `SHA256SUMS`, then that file against the downloaded one.
 
 ```bash
-sha256sum -c bot-agent-vX.Y.Z.tar.gz.sha256
 tar -xzf bot-agent-vX.Y.Z.tar.gz
 cd bot-agent-vX.Y.Z
 sha256sum -c SHA256SUMS
+cmp SHA256SUMS ../SHA256SUMS
 ```
 
-Each checked line ends with `OK`. Run the rest of this guide from `bot-agent-vX.Y.Z/`.
+Each checked line ends with `OK`, and `cmp` prints nothing. Run the rest of this guide from `bot-agent-vX.Y.Z/`.
 
 ## Check (changes nothing)
 
@@ -533,7 +534,7 @@ The installer never writes this line. An agent older than 0.2.15 rejects it as `
 
 **What happens.** Deploybot names only a version. The host checks only that it is newer than the installed one and that its release is signed; that it is the latest release is up to Deploybot. The helper checks this line again, then starts a transient root unit, `bot-agent-upgrade`, that:
 
-1. downloads `SHA256SUMS` and `SHA256SUMS.sig` from `https://github.com/more-than-code/bot-agent/releases/download/v<version>/` (the address is built into the helper; the server cannot change it) and checks the signature with the release key built into the helper; only then does it download `bot-agent-v<version>.tar.gz`;
+1. downloads `SHA256SUMS` and `SHA256SUMS.sig` from `https://github.com/more-than-code/bot-agent/releases/download/v<version>/` (the address is built into the helper; the server cannot change it) and checks the signature with the release keys built into the helper (one signature by any of them is enough); only then does it download `bot-agent-v<version>.tar.gz`;
 2. checks that `SHA256SUMS` lists `install.sh` and the four `units/*` files, that every file matches, that the bundle holds no other file, and that the bundled agent prints the requested version;
 3. unpacks into `/var/lib/bot-agent-runner/upgrade/<version>/` (root only) and runs that bundle's `install.sh upgrade` (with `--runner`), the same upgrade you would run by hand;
 4. writes the outcome to `/var/lib/bot-agent-runner/upgrade/result.json`, which the agent reports to the console.

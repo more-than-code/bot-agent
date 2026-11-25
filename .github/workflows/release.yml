@@ -1,0 +1,333 @@
+# bot-agent release: tag, build, sign, publish (spec docs/spec-release-workflow.md).
+#
+# Runs on every push to main and on demand. It does something only when the
+# commit's version (internal/agent/protocol.AgentVersion) has no published
+# release yet:
+#   meta     reads the version, refuses a tag on another commit or a version
+#            not newer than the newest tag, and reads release-notes/vX.Y.Z.md
+#   check    the release gates (GitHub-hosted runners run as a non-root user)
+#   build    scripts/release-bundle.sh twice, compared byte for byte; writes
+#            the summary shown on the approval page (spec §12 A2)
+#   sign     environment "release" (main only, Joe approves): rebuilds on its
+#            own runner, requires the same SHA256SUMS, signs it with the CI
+#            key in AWS KMS (GitHub OIDC, no secret in GitHub) and checks the
+#            signature against the keys compiled into the helper (§12, §13)
+#   publish  creates tag vX.Y.Z on the commit and the release, then publishes
+#            it. A notes file starting with "signing: offline" skips sign and
+#            leaves a draft for Joe to sign locally (the bridge, §5).
+# A tag pushed with GITHUB_TOKEN starts no workflow, so tagging is the last
+# step of this run. Setup only Joe can do: spec §6.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  meta:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      release: ${{ steps.meta.outputs.release }}
+      offline: ${{ steps.meta.outputs.offline }}
+      prev_tag: ${{ steps.meta.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^[[:space:]]*AgentVersion[[:space:]]*=[[:space:]]*"\([0-9.]*\)"$/\1/p' internal/agent/protocol/protocol.go)
+          [[ "$v" =~ ^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]] || { echo "::error::cannot read AgentVersion"; exit 1; }
+          tag="v$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          git fetch --force --tags --quiet origin
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            at=$(git rev-parse "refs/tags/$tag^{commit}")
+            if [ "$at" != "$GITHUB_SHA" ]; then
+              if git merge-base --is-ancestor "$at" HEAD; then
+                # Released earlier; this push to main is not a new release.
+                echo "No new version on this commit ($tag is on $at); nothing to do." >> "$GITHUB_STEP_SUMMARY"
+                echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              echo "::error::$tag already exists on $at, which is not in this commit's history"; exit 1
+            fi
+            if [ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)" = "false" ]; then
+              echo "$tag is already released; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+              echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          # The newest other release tag; the version must be newer than it.
+          prev=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vxF "$tag" | sort -V | tail -n1 || true)
+          if [ -n "$prev" ] && [ "$(printf '%s\n%s\n' "$prev" "$tag" | sort -V | tail -n1)" != "$tag" ]; then
+            echo "::error::$tag is not newer than $prev"; exit 1
+          fi
+          echo "prev_tag=$prev" >> "$GITHUB_OUTPUT"
+          notes="release-notes/$tag.md"
+          [ -s "$notes" ] || { echo "::error::$notes is missing; the version commit must add it"; exit 1; }
+          offline=false
+          if [ "$(head -n1 "$notes")" = "signing: offline" ]; then
+            offline=true
+            # §12 A7: refuse the line once a release was signed by a key other
+            # than the offline one (the first in internal/release.PublicKeys).
+            newest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName' || true)
+            if [ -n "$newest" ]; then
+              d=$(mktemp -d)
+              gh release download "$newest" --repo "$GITHUB_REPOSITORY" --dir "$d" --pattern SHA256SUMS --pattern SHA256SUMS.sig
+              go build -o "$d/release-sign" ./cmd/release-sign
+              grep -o 'mustKey("[A-Za-z0-9+/=]*")' internal/release/release.go | sed 's/mustKey("\(.*\)")/\1/' | tail -n +2 > "$d/ci-keys"
+              while IFS= read -r k; do
+                printf '%s\n' "$k" > "$d/k.pub"
+                if "$d/release-sign" verify -pub "$d/k.pub" "$d/SHA256SUMS" "$d/SHA256SUMS.sig" >/dev/null 2>&1; then
+                  echo "::error::$newest was signed in CI; \"signing: offline\" is only for the bridge release"; exit 1
+                fi
+              done < "$d/ci-keys"
+            fi
+          fi
+          echo "offline=$offline" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: meta
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: build and vet
+        run: go build ./... && go vet ./...
+      - name: tests (with packaging and installer)
+        run: go test -count=1 ./...
+      - name: race (run)
+        run: go test -race -count=1 ./internal/agent/run/...
+      - name: release keys are real
+        run: go test -count=1 -tags release ./internal/release
+
+  build:
+    needs: meta
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build twice and compare
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release-bundle.sh "$VERSION" "$RUNNER_TEMP/a"
+          go clean -cache
+          scripts/release-bundle.sh "$VERSION" "$RUNNER_TEMP/b"
+          for f in "bot-agent-v$VERSION.tar.gz" SHA256SUMS; do
+            cmp "$RUNNER_TEMP/a/$f" "$RUNNER_TEMP/b/$f"
+          done
+          mkdir -p dist && cp "$RUNNER_TEMP/a/"* dist/
+      - name: Summary for the approval page
+        env:
+          PREV: ${{ needs.meta.outputs.prev_tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## bot-agent v$VERSION"
+            echo
+            echo "Release code changed since ${PREV:-the first commit} (workflow, bundle script, signer, key list):"
+            echo '```'
+            if [ -n "$PREV" ]; then
+              git diff --stat "$PREV" HEAD -- .github/workflows/ scripts/release-bundle.sh cmd/release-sign/ internal/release/ || true
+            else
+              echo "(no previous tag)"
+            fi
+            echo '```'
+            echo "Release keys compiled into the helper (public, first = offline recovery key):"
+            echo '```'
+            grep -o 'mustKey("[A-Za-z0-9+/=]*")' internal/release/release.go | sed 's/mustKey("\(.*\)")/\1/'
+            echo '```'
+            echo "SHA256SUMS to be signed:"
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  sign:
+    needs: [meta, check, build]
+    if: github.ref == 'refs/heads/main' && needs.meta.outputs.release == 'true' && needs.meta.outputs.offline != 'true'
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Rebuild on this runner
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          export GOTOOLCHAIN=local
+          scripts/release-bundle.sh "$VERSION" "$RUNNER_TEMP/own"
+          go build -o "$RUNNER_TEMP/release-sign" ./cmd/release-sign
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sums
+          path: ${{ runner.temp }}/built
+      - name: Same SHA256SUMS as the build job
+        run: cmp "$RUNNER_TEMP/own/SHA256SUMS" "$RUNNER_TEMP/built/SHA256SUMS"
+      - name: Sign with the KMS key
+        # The CI key is an AWS KMS Ed25519 key (ECC_NIST_EDWARDS25519); its
+        # private half never leaves KMS. This job gets short-lived AWS
+        # credentials through GitHub OIDC for a role whose trust policy
+        # accepts only this repository's release environment, allowed only
+        # kms:Sign with ED25519_SHA_512 on that key (spec §13). The three
+        # values are environment variables, not secrets.
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          KEY_ID: ${{ vars.AWS_KMS_KEY_ID }}
+        run: |
+          set -euo pipefail
+          for v in AWS_REGION ROLE_ARN KEY_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set in the release environment's variables"; exit 1; }
+          done
+          sums="$RUNNER_TEMP/own/SHA256SUMS"
+          [ "$(stat -c %s "$sums")" -le 4096 ] || { echo "::error::SHA256SUMS is over KMS's 4096-byte RAW limit"; exit 1; }
+          oidc=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$oidc"
+          creds=$(aws sts assume-role-with-web-identity --role-arn "$ROLE_ARN" \
+            --role-session-name "release-$GITHUB_RUN_ID" --web-identity-token "$oidc" \
+            --duration-seconds 900 --query Credentials --output json)
+          unset oidc
+          AWS_ACCESS_KEY_ID=$(jq -r .AccessKeyId <<<"$creds")
+          AWS_SECRET_ACCESS_KEY=$(jq -r .SecretAccessKey <<<"$creds")
+          AWS_SESSION_TOKEN=$(jq -r .SessionToken <<<"$creds")
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          echo "::add-mask::$AWS_SESSION_TOKEN"
+          unset creds
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          mkdir -p "$RUNNER_TEMP/sig"
+          sig=$(aws kms sign --key-id "$KEY_ID" --message "fileb://$sums" --message-type RAW \
+            --signing-algorithm ED25519_SHA_512 --query Signature --output text)
+          printf '%s\n' "$sig" > "$RUNNER_TEMP/sig/SHA256SUMS.sig"
+      - name: Check the signature with the compiled keys
+        run: '"$RUNNER_TEMP/release-sign" verify-compiled "$RUNNER_TEMP/own/SHA256SUMS" "$RUNNER_TEMP/sig/SHA256SUMS.sig"'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sig
+          path: ${{ runner.temp }}/sig/SHA256SUMS.sig
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, check, build, sign]
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      needs.meta.outputs.release == 'true' &&
+      needs.check.result == 'success' && needs.build.result == 'success' &&
+      (needs.sign.result == 'success' || (needs.meta.outputs.offline == 'true' && needs.sign.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Only this workflow on main may publish
+        env:
+          WANT: ${{ github.repository }}/.github/workflows/release.yml@refs/heads/main
+          GOT: ${{ github.workflow_ref }}
+        run: test "$GOT" = "$WANT" || { echo "::error::refusing to publish from $GOT"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundle
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.meta.outputs.offline != 'true'
+        with:
+          name: sig
+          path: dist
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          OFFLINE: ${{ needs.meta.outputs.offline }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          notes="$RUNNER_TEMP/notes.md"
+          if [ "$OFFLINE" = "true" ]; then tail -n +2 "release-notes/$tag.md" > "$notes"; else cp "release-notes/$tag.md" "$notes"; fi
+          assets=("dist/bot-agent-$tag.tar.gz" dist/SHA256SUMS)
+          if [ "$OFFLINE" != "true" ]; then assets+=(dist/SHA256SUMS.sig); fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "bot-agent $tag" --notes-file "$notes" "${assets[@]}"
+          fi
+          if [ "$OFFLINE" = "true" ]; then
+            {
+              echo "Draft $tag is ready without a signature (signing: offline)."
+              echo "Sign its SHA256SUMS locally with the offline key, upload SHA256SUMS.sig to the draft, then publish it."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+            echo "Published $tag." >> "$GITHUB_STEP_SUMMARY"
+          fi

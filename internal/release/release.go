@@ -15,11 +15,24 @@ import (
 // some slack for a CRLF.
 const MaxSigFile = 128
 
-// PublicKey is the release key compiled into the helper: the public half of
-// Joe's offline release key (`release-sign keygen`, 2026-11-23), first used
-// for bot-agent v0.2.15. A build with the all-zero placeholder refuses every
-// bundle: Verify rejects it before checking the signature.
-var PublicKey = mustKey("Ee1UIjnw5zgPNw5ZtKNBTCdLvYM3ozEcSRcfWZaCHh8=")
+// PublicKeys are the release keys compiled into the helper; a bundle is
+// accepted when its signature verifies under any of them (agent-protocol
+// v1.27, spec docs/spec-release-workflow.md §5). Keys are added or removed
+// only by a release signed with a key hosts already trust.
+//
+//   - Joe's offline release key (`release-sign keygen`, 2026-11-23), first
+//     used for bot-agent v0.2.15. It stays off GitHub and is the recovery
+//     key: it signs the bridge release and any release that drops a key.
+//   - The CI release key: an AWS KMS Ed25519 key in ap-southeast-2
+//     (2026-11-25), used only by the release workflow's sign job on main
+//     after Joe approves the run (spec §13). It cannot be exported from KMS.
+//
+// A build whose list is empty or holds the all-zero placeholder refuses
+// every bundle: VerifyAny rejects it before checking the signature.
+var PublicKeys = []ed25519.PublicKey{
+	mustKey("Ee1UIjnw5zgPNw5ZtKNBTCdLvYM3ozEcSRcfWZaCHh8="),
+	mustKey("DCG1ElztSCaavg19pGaC2Hud1CoLZXvIDrlFr0RXBPA="),
+}
 
 // mustKey decodes a base64 Ed25519 public key compiled into the binary.
 func mustKey(b64 string) ed25519.PublicKey {
@@ -82,6 +95,30 @@ func Verify(pub ed25519.PublicKey, sums, sigFile []byte) error {
 		return ErrMismatch
 	}
 	return nil
+}
+
+// VerifyAny checks sigFile over sums with each of pubs and succeeds when one
+// verifies. An empty list, or a list with a bad or placeholder key, is
+// refused whatever the signature.
+func VerifyAny(pubs []ed25519.PublicKey, sums, sigFile []byte) error {
+	if len(pubs) == 0 {
+		return ErrBadKey
+	}
+	for _, pub := range pubs {
+		if len(pub) != ed25519.PublicKeySize {
+			return ErrBadKey
+		}
+		if IsPlaceholder(pub) {
+			return ErrPlaceholder
+		}
+	}
+	err := ErrMismatch
+	for _, pub := range pubs {
+		if err = Verify(pub, sums, sigFile); err == nil || !errors.Is(err, ErrMismatch) {
+			return err
+		}
+	}
+	return err
 }
 
 // DecodeKey reads a base64 key file (one line) of the given size.
