@@ -7,3 +7,7 @@ __pycache__/
 *.exe
 *.test
 *.out
+
+# Skill Forge registry skills: the Project environment installs them in threads; `skf sync` writes them locally
+/.agents/skills/
+/.claude/skills
