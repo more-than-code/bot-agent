@@ -18,7 +18,11 @@ Change gates, for each pull request in bot-agent; paste each command and its res
 - `go test -race` on the changed packages, and always on `./internal/agent/run/...`.
 - A change to `packaging/` or the helper: also `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/...` and the same with `GOARCH=arm64`. Hosts run both.
 
-Release gates, run by Main Dev on `git archive` of the version commit: `go test -count=1 ./...` (with the packaging and installer suite), `go test -race ./internal/agent/run/...`, and the four linux binaries (`bot-agent` and `bot-agent-runner`, amd64 and arm64) built twice with `CGO_ENABLED=0 -trimpath -ldflags "-s -w"` and `cmp`-equal. A change gate failure blocks the commit; a release gate failure blocks the tag. A bot-agent release is signed with Joe's release key, which no session reads.
+Release gates, run by Main Dev on `git archive` of the version commit: `go test -count=1 ./...` (with the packaging and installer suite), `go test -race ./internal/agent/run/...`, and the four linux binaries (`bot-agent` and `bot-agent-runner`, amd64 and arm64) built twice with `CGO_ENABLED=0 -trimpath -ldflags "-s -w"` and `cmp`-equal. A change gate failure blocks the commit; a release gate failure blocks the tag.
+
+Releases (`docs/spec-release-workflow.md`): a release thread's version commit sets `internal/agent/protocol.AgentVersion` and adds `release-notes/vX.Y.Z.md` (the release text). When it merges into `main`, `.github/workflows/release.yml` runs the release gates, builds the bundle twice with `scripts/release-bundle.sh`, waits for Joe's approval in the `release` environment, signs `SHA256SUMS` with the CI release key, tags the commit and publishes the release. The keys hosts trust are `internal/release.PublicKeys` (Joe's offline recovery key and the CI key); changing that list is Tier 3.
+
+- Sessions never read the signing keys, never approve a pending deployment, and never change environments, environment secrets, rulesets or repository settings. A change to `.github/workflows/`, `scripts/release-bundle.sh`, `cmd/release-sign` or `internal/release` is Tier 3 and goes through a reviewed PR.
 
 A change to `runner.toml` is Tier 3, like the agent protocol, the installer and the root helper.
 
