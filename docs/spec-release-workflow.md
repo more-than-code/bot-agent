@@ -153,7 +153,9 @@ The separate reviewer thread's findings on PR #15 (review of ac91ad1), folded in
 
 ## 13. Amendment: the CI key lives in AWS KMS ("computerless", 2026-11-25)
 
-Joe's standing requirement (2026-11-25, "computerless"): releases, signing and key storage must work from his phone, with no step on his own computer. He chose (decision card, then "I think the key is have a managed service which is stable, like AWS") to keep the CI key in AWS KMS instead of a GitHub environment secret. This replaces where the D1 key lives, not D1 itself, and it replaces the `BOT_AGENT_RELEASE_KEY` secret everywhere above.
+**Status: proposal, not approved.** Joe (2026-11-25 18:35Z): where the key lives is still being worked out ("solutioning phase rather than decision"). The workflow on this branch implements this proposal so it can be judged concretely; it is not merged until Joe decides.
+
+Joe's standing requirement (2026-11-25, "computerless"): releases, signing and key storage must work from his phone, with no step on his own computer. He leans towards a stable managed service ("I think the key is have a managed service which is stable, like AWS") over a GitHub environment secret or his own VMs. If accepted, this replaces where the D1 key lives, not D1 itself, and it replaces the `BOT_AGENT_RELEASE_KEY` secret everywhere above.
 
 **Key type.** AWS KMS supports Ed25519: key spec `ECC_NIST_EDWARDS25519`, key usage `SIGN_VERIFY`. Signing with `ED25519_SHA_512` and `MessageType` `RAW` is plain Ed25519 (RFC 8032 PureEdDSA), so the 64-byte signature verifies with Go's `ed25519.Verify` and the helper code is unchanged. `RAW` messages are at most 4096 bytes; `SHA256SUMS` is about 1 KB, and the sign job refuses one over the limit. The private key cannot be exported from KMS.
 
