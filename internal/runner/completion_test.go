@@ -92,7 +92,7 @@ func TestRollbackPrevStartFailureRestartsOriginal(t *testing.T) {
 	e.fake.mu.Unlock()
 	before := len(e.fake.Calls())
 	raw := e.call(images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}))
-	assertRestored(t, e, raw, before, orig, true)
+	assertRestoredCode(t, e, raw, before, orig, true, programs.ReasonStartFailed)
 	assertSlotsRestored(t, root)
 	if _, st := state(e, "mohiguide-web-prev"); st == "running" {
 		t.Fatal("-prev running")
@@ -110,7 +110,7 @@ func TestRollbackPrevStartFailureAfterCallerTimeout(t *testing.T) {
 	before := len(e.fake.Calls())
 	ctx := shortCaller(t, 50*time.Millisecond)
 	raw := Handle(ctx, images.VerbRollback, mustJSON(t, images.EntryRequest{Project: "mohiguide", Entry: "web"}), e.sys)
-	assertRestored(t, e, raw, before, orig, true)
+	assertRestoredCode(t, e, raw, before, orig, true, programs.ReasonStartFailed)
 	assertSlotsRestored(t, root)
 }
 

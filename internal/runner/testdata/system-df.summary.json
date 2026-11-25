@@ -1,0 +1,26 @@
+{"totals":{
+  "images":{"count":13,"active":2,"size":3500,"reclaimable":3210},
+  "containers":{"count":4,"active":2,"size":6000,"reclaimable":5000},
+  "volumes":{"count":4,"active":1,"size":2000500,"reclaimable":500},
+  "build_cache":{"count":3,"active":1,"size":300,"reclaimable":200}},
+ "images":[
+  {"ref":"<none>","id":"333333333333","size":900,"containers":0},
+  {"ref":"<none>","id":"444444444444","size":900,"containers":0},
+  {"ref":"ghcr.io/o/app:1.1","id":"222222222222","size":500,"containers":0},
+  {"ref":"ghcr.io/o/app:1.2","id":"111111111111","size":500,"containers":2},
+  {"ref":"x/a:1","id":"aaaaaaaaaaaa","size":170,"containers":1},
+  {"ref":"x/b:1","id":"bbbbbbbbbbbb","size":160,"containers":0},
+  {"ref":"x/c:1","id":"cccccccccccc","size":150,"containers":0},
+  {"ref":"x/d:1","id":"dddddddddddd","size":140,"containers":0},
+  {"ref":"x/e:1","id":"eeeeeeeeeeee","size":130,"containers":0},
+  {"ref":"x/f:1","id":"ffffffffffff","size":120,"containers":0}],
+ "volumes":[
+  {"name":"pgdata","size":2000000,"in_use":true},
+  {"name":"orphan","size":500,"in_use":false},
+  {"name":"nullvol","size":null,"in_use":false},
+  {"name":"unknownvol","size":null,"in_use":false}],
+ "containers":[
+  {"name":"old-job","state":"exited","size":5000},
+  {"name":"deploybot-api","state":"running","size":1000},
+  {"name":"edge","state":"running","size":0},
+  {"name":"fresh","state":"created","size":null}]}

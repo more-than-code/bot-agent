@@ -220,16 +220,16 @@ func TestHealthcheckValidate(t *testing.T) {
 				h.Test[i] = "a"
 			}
 		}},
-		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 0 }},
-		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 4 }},
-		{"interval_sec", func(h *Healthcheck) { h.IntervalSec = 301 }},
-		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 0 }},
-		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 61 }},
-		{"timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 30 }},
-		{"retries", func(h *Healthcheck) { h.Retries = 0 }},
-		{"retries", func(h *Healthcheck) { h.Retries = 11 }},
-		{"start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = -1 }},
-		{"start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = 601 }},
+		{"healthcheck.interval_sec", func(h *Healthcheck) { h.IntervalSec = 0 }},
+		{"healthcheck.interval_sec", func(h *Healthcheck) { h.IntervalSec = 4 }},
+		{"healthcheck.interval_sec", func(h *Healthcheck) { h.IntervalSec = 301 }},
+		{"healthcheck.timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 0 }},
+		{"healthcheck.timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 61 }},
+		{"healthcheck.timeout_sec", func(h *Healthcheck) { h.TimeoutSec = 30 }},
+		{"healthcheck.retries", func(h *Healthcheck) { h.Retries = 0 }},
+		{"healthcheck.retries", func(h *Healthcheck) { h.Retries = 11 }},
+		{"healthcheck.start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = -1 }},
+		{"healthcheck.start_period_sec", func(h *Healthcheck) { h.StartPeriodSec = 601 }},
 	}
 	for _, tc := range bad {
 		s := good()

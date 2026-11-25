@@ -124,6 +124,21 @@ case "$SETTLE" in
   ''|*[!0-9]*) fail "BOT_AGENT_INSTALLER_SETTLE must be a non-negative integer" ;;
 esac
 
+# How long verify waits after a restart for the agent's hello marker
+# (agent-protocol v1.20 item 8). Outside test mode this stays 90s even if
+# the variable is set.
+HELLO_WAIT=90
+if [ "${BOT_AGENT_INSTALLER_TEST:-}" = "1" ] && [ -n "${BOT_AGENT_INSTALLER_HELLO_WAIT:-}" ]; then
+  case "$BOT_AGENT_INSTALLER_HELLO_WAIT" in
+    *[!0-9]*) fail "BOT_AGENT_INSTALLER_HELLO_WAIT must be a non-negative integer" ;;
+  esac
+  HELLO_WAIT=$BOT_AGENT_INSTALLER_HELLO_WAIT
+fi
+# The agent touches last_hello in its state directory each time the server
+# acknowledges its hello: /var/lib/bot-agent unless BOT_AGENT_STATE_DIR in
+# /etc/bot-agent/env names another (hello_marker_path).
+HELLO_STATE_DEFAULT=/var/lib/bot-agent
+
 # How long enroll waits for the credential keys. Outside test mode this
 # stays 30s even if the variable is set.
 ENROLL_WAIT=30
@@ -813,6 +828,170 @@ Environment=BOT_AGENT_INSECURE_DEV=1
 EOF
 }
 
+# Host config files (agent-protocol v1.18). The helper unit has
+# ProtectSystem=strict; this drop-in lets it write only the /etc/<dir>
+# directories that runner.toml's host_files name. It is written from the
+# policy on the host, never from the server, and removed when the policy
+# has no host files.
+HOSTFILES_DROPIN=/etc/systemd/system/bot-agent-runner@.service.d/host-files.conf
+HOSTFILES_DROPIN_DIR=/etc/systemd/system/bot-agent-runner@.service.d
+
+# hostfiles_dirs prints each distinct directory of the host_file lines of a
+# policy check output, in file order.
+hostfiles_dirs() {
+  printf '%s\n' "$1" | awk '
+    $1 == "host_file" && NF >= 3 {
+      p = $3
+      sub(/\/[^\/]*$/, "", p)
+      if (p ~ /^\/etc\/[A-Za-z0-9_][A-Za-z0-9._-]*$/ && !(p in seen)) {
+        seen[p] = 1
+        print p
+      }
+    }'
+}
+
+hostfiles_count() {
+  printf '%s\n' "$1" | awk -F= '$1=="host_files"{print $2; exit}'
+}
+
+# write_hostfiles_dropin FILE DIRS writes the drop-in for DIRS (one per line).
+write_hostfiles_dropin() {
+  {
+    printf '%s\n' "# Written by install.sh from host_files in /etc/bot-agent/runner.toml (agent-protocol v1.18)."
+    printf '%s\n' "# Rerun install.sh upgrade --runner after changing host_files."
+    printf '%s\n' "[Service]"
+    printf '%s\n' "$2" | while IFS= read -r _hd; do
+      [ -n "$_hd" ] || continue
+      printf 'ReadWritePaths=-%s\n' "$_hd"
+    done
+  } > "$1"
+}
+
+# hostfiles_dropin_state prints none, in_sync, missing, differs or stale
+# for a policy check output: what the drop-in on the host is compared with
+# the one that output asks for.
+hostfiles_dropin_state() {
+  _hs_dirs=$(hostfiles_dirs "$1")
+  _hs_dest=$(hostpath "$HOSTFILES_DROPIN")
+  if [ -z "$_hs_dirs" ]; then
+    if [ -e "$_hs_dest" ] || [ -h "$_hs_dest" ]; then
+      printf '%s\n' stale
+    else
+      printf '%s\n' none
+    fi
+    return 0
+  fi
+  if [ ! -f "$_hs_dest" ] || [ -h "$_hs_dest" ]; then
+    printf '%s\n' missing
+    return 0
+  fi
+  _hs_tmp=$(mktemp) || return 1
+  write_hostfiles_dropin "$_hs_tmp" "$_hs_dirs"
+  if cmp -s "$_hs_tmp" "$_hs_dest"; then
+    printf '%s\n' in_sync
+  else
+    printf '%s\n' differs
+  fi
+  rm -f "$_hs_tmp"
+}
+
+# report_hostfiles is the check line for the host files of the last
+# policy check. It does not fail the check.
+report_hostfiles() {
+  if [ "$WANT_RUNNER" != "1" ]; then
+    return 0
+  fi
+  _rh_n=$(hostfiles_count "$LAST_POLICY_CHECK")
+  [ -n "$_rh_n" ] || _rh_n=0
+  _rh_state=$(hostfiles_dropin_state "$LAST_POLICY_CHECK") || _rh_state=unknown
+  case "$_rh_state" in
+    none) say "host files: 0" ;;
+    in_sync) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: in sync" ;;
+    missing) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: missing (run install.sh upgrade --runner)" ;;
+    differs) say "host files: ${_rh_n}; drop-in ${HOSTFILES_DROPIN}: differs (run install.sh upgrade --runner)" ;;
+    stale) say "host files: 0; drop-in ${HOSTFILES_DROPIN}: present but not needed (run install.sh upgrade --runner)" ;;
+    *) say "host files: ${_rh_n}; drop-in: unknown" ;;
+  esac
+  printf '%s\n' "$(hostfiles_dirs "$LAST_POLICY_CHECK")" | while IFS= read -r _rh_d; do
+    [ -n "$_rh_d" ] || continue
+    say "host files: helper may write ${_rh_d}"
+  done
+}
+
+# sync_hostfiles_dropin writes, keeps or removes the drop-in to match the
+# installed policy (or the staged --runner-config before it is installed),
+# then daemon-reload when it changed. Only with the runner.
+sync_hostfiles_dropin() {
+  if [ "$WANT_RUNNER" != "1" ]; then
+    return 0
+  fi
+  _sh_pc=
+  if [ -f "$POLICY_DEST" ] && [ ! -h "$POLICY_DEST" ]; then
+    _sh_pc=$(policy_check "$POLICY_DEST") || fail "policy check failed for ${POLICY_HOST}"
+  elif [ -n "$RUNNER_CONFIG" ]; then
+    _sh_pc=$(policy_check "$RUNNER_CONFIG") || fail "policy check failed for ${RUNNER_CONFIG_LABEL}"
+  fi
+  _sh_dirs=$(hostfiles_dirs "$_sh_pc")
+  _sh_dest=$(hostpath "$HOSTFILES_DROPIN")
+  _sh_dd=$(hostpath "$HOSTFILES_DROPIN_DIR")
+  refuse_dir_symlink "$_sh_dd" "$HOSTFILES_DROPIN_DIR" || fail "refusing symlink ${HOSTFILES_DROPIN_DIR}"
+  if [ -h "$_sh_dest" ]; then
+    fail "refusing symlink ${HOSTFILES_DROPIN}"
+  fi
+  if [ -z "$_sh_dirs" ]; then
+    if [ ! -e "$_sh_dest" ]; then
+      return 0
+    fi
+    if [ "$DRY" = "1" ]; then
+      say "dry-run: delete ${HOSTFILES_DROPIN}"
+      say "dry-run: systemctl daemon-reload"
+      return 0
+    fi
+    rm -f "$_sh_dest" || fail "cannot delete ${HOSTFILES_DROPIN}"
+    rmdir "$_sh_dd" 2>/dev/null || true
+    say "deleted: ${HOSTFILES_DROPIN}"
+    systemctl daemon-reload || fail "daemon-reload failed"
+    say "daemon-reload"
+    return 0
+  fi
+  _sh_tmp=$(mktemp) || fail "mktemp failed"
+  write_hostfiles_dropin "$_sh_tmp" "$_sh_dirs"
+  if [ -f "$_sh_dest" ] && cmp -s "$_sh_tmp" "$_sh_dest"; then
+    rm -f "$_sh_tmp"
+    say "unchanged: ${HOSTFILES_DROPIN}"
+    return 0
+  fi
+  if [ "$DRY" = "1" ]; then
+    rm -f "$_sh_tmp"
+    say "dry-run: write ${HOSTFILES_DROPIN} mode 0644 owner root:root"
+    printf '%s\n' "$_sh_dirs" | while IFS= read -r _sh_d; do
+      say "dry-run: ReadWritePaths=-${_sh_d}"
+    done
+    say "dry-run: systemctl daemon-reload"
+    return 0
+  fi
+  if ! ensure_owned_dir "$_sh_dd" "$HOSTFILES_DROPIN_DIR" 0755 root:root; then
+    rm -f "$_sh_tmp"
+    fail "cannot create ${HOSTFILES_DROPIN_DIR}"
+  fi
+  if ! atomic_start "$_sh_dest" "$HOSTFILES_DROPIN"; then
+    rm -f "$_sh_tmp"
+    fail "cannot stage ${HOSTFILES_DROPIN}"
+  fi
+  if ! cp "$_sh_tmp" "$ATOMIC_TMP"; then
+    rm -f "$_sh_tmp" "$ATOMIC_TMP"
+    fail "copy failed ${HOSTFILES_DROPIN}"
+  fi
+  rm -f "$_sh_tmp"
+  atomic_finish 0644 root:root || fail "rename failed ${HOSTFILES_DROPIN}"
+  say "wrote: ${HOSTFILES_DROPIN}"
+  printf '%s\n' "$_sh_dirs" | while IFS= read -r _sh_d; do
+    say "host files: helper may write ${_sh_d}"
+  done
+  systemctl daemon-reload || fail "daemon-reload failed"
+  say "daemon-reload"
+}
+
 # policy_check prints the bot-agent policy check output.
 # Returns 0 when the first line is valid.
 policy_check() {
@@ -1086,6 +1265,7 @@ do_check() {
   else
     say "policy: not checked"
   fi
+  report_hostfiles
   if [ -f "$ENV_DEST" ]; then
     say "kept: ${ENV_HOST}"
   fi
@@ -1624,6 +1804,7 @@ EOF
     if [ "$GEN_POLICY" = "1" ]; then
       say "kept: ${POLICY_HOST}"
     fi
+    sync_hostfiles_dropin
     say "already installed, nothing changed"
     say_next_enroll
     say "summary: already installed ${VER}"
@@ -1637,6 +1818,7 @@ EOF
     if [ "$WANT_RUNNER" = "1" ]; then
       say "dry-run: systemd-tmpfiles --create /etc/tmpfiles.d/bot-agent-runner.conf"
     fi
+    sync_hostfiles_dropin
     say "summary: dry-run install ${VER}"
     exit 0
   fi
@@ -1651,6 +1833,7 @@ EOF
     systemd-tmpfiles --create "$(hostpath /etc/tmpfiles.d/bot-agent-runner.conf)" || fail "tmpfiles failed"
     say "tmpfiles: applied"
   fi
+  sync_hostfiles_dropin
   say "units: disabled"
   say_next_enroll
   say "summary: installed ${VER}"
@@ -1803,20 +1986,129 @@ require_running_version() {
   return 0
 }
 
+# hello_marker_path prints the host path of the agent's hello marker:
+# BOT_AGENT_STATE_DIR from the env file when it is set (the last one wins,
+# parsed by the same rules as env_credential_ready, never evaluated),
+# else /var/lib/bot-agent, plus /last_hello. A value that is not a plain
+# absolute path fails.
+hello_marker_path() {
+  _hm_dir=$HELLO_STATE_DEFAULT
+  if [ -f "$ENV_DEST" ] && [ ! -h "$ENV_DEST" ]; then
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      _trim=$_line
+      trim_spaces
+      _line=$_trim
+      case "$_line" in
+        ''|\#*) continue ;;
+        'export '*) _line=${_line#export } ;;
+      esac
+      case "$_line" in
+        *=*) ;;
+        *) continue ;;
+      esac
+      _trim=${_line%%=*}
+      trim_spaces
+      [ "$_trim" = "BOT_AGENT_STATE_DIR" ] || continue
+      _trim=${_line#*=}
+      trim_spaces
+      _val=$_trim
+      case "$_val" in
+        \"*\")
+          _q=$_val
+          if env_unquote; then
+            _val=$_uq
+          else
+            _val=bad
+          fi
+          ;;
+      esac
+      if [ -n "$_val" ]; then
+        _hm_dir=$_val
+      fi
+    done < "$ENV_DEST"
+    _line=
+    _trim=
+    _val=
+    _q=
+    _uq=
+  fi
+  case "$_hm_dir" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$_hm_dir" in
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+-]*|*/../*|*/..) return 1 ;;
+  esac
+  printf '%s\n' "$(hostpath "${_hm_dir%/}")/last_hello"
+}
+
+# wait_for_hello REF waits up to HELLO_WAIT seconds for the agent's hello
+# marker to be newer than REF, which was touched just before the restart.
+# A marker that is missing, a link, or not newer means the restarted agent
+# never got its hello acknowledged by the server.
+wait_for_hello() {
+  _wh_ref=$1
+  if ! _wh_mk=$(hello_marker_path); then
+    say "verify: BOT_AGENT_STATE_DIR in the env file is not a plain absolute path"
+    return 1
+  fi
+  _wh_waited=0
+  while :; do
+    if [ -f "$_wh_mk" ] && [ ! -h "$_wh_mk" ]; then
+      _wh_new=$(find "$_wh_mk" -prune -newer "$_wh_ref" -print 2>/dev/null) || _wh_new=
+      if [ -n "$_wh_new" ]; then
+        say "verify: hello acknowledged"
+        return 0
+      fi
+    fi
+    if [ "$_wh_waited" -ge "$HELLO_WAIT" ]; then
+      say "verify: no hello after restart"
+      return 1
+    fi
+    sleep 1 || return 1
+    _wh_waited=$((_wh_waited + 1))
+  done
+}
+
+# verify_active_version VERSION [rollback]
 # Restart and require NRestarts exactly 0 only when the host is enrolled.
+# After an upgrade the agent must also reconnect: its hello marker has to
+# be newer than the restart (agent-protocol v1.20 item 8), or verify fails
+# and the caller's rollback runs. A rollback's verify (second argument
+# "rollback") keeps the existing checks and does not wait for the marker:
+# an agent before 0.2.15 never writes it, and with the server down the
+# restored agent cannot say hello, yet the restored files are right.
 verify_active_version() {
   _expect=$1
+  _vmode=${2:-upgrade}
   if host_enrolled; then
     systemctl reset-failed bot-agent.service >/dev/null 2>&1 || true
+    _hello_ref=
+    if [ "$_vmode" != "rollback" ]; then
+      _hello_ref=$STATE/hello-ref
+      if ! touch "$_hello_ref"; then
+        say "verify: cannot write the hello reference"
+        return 1
+      fi
+    fi
     say "systemctl restart bot-agent.service"
     if ! systemctl restart bot-agent.service; then
+      [ -z "$_hello_ref" ] || rm -f "$_hello_ref"
       say "verify: restart failed"
       return 1
     fi
     if [ "$SETTLE" != "0" ]; then
       if ! sleep "$SETTLE"; then
+        [ -z "$_hello_ref" ] || rm -f "$_hello_ref"
         return 1
       fi
+    fi
+    if [ -n "$_hello_ref" ]; then
+      if ! wait_for_hello "$_hello_ref"; then
+        rm -f "$_hello_ref"
+        return 1
+      fi
+      rm -f "$_hello_ref"
     fi
     require_running_version "$_expect" || return 1
     return 0
@@ -1839,6 +2131,9 @@ say_restart_plan() {
   if host_enrolled; then
     say "dry-run: systemctl restart bot-agent.service"
     say "dry-run: sleep ${SETTLE} then check active and NRestarts"
+    if [ "${1:-upgrade}" != "rollback" ]; then
+      say "dry-run: wait up to ${HELLO_WAIT}s for the agent's last_hello to be newer than the restart"
+    fi
   else
     say "not enrolled: agent not restarted"
   fi
@@ -2065,7 +2360,7 @@ rollback_armed_now() {
   fi
   if [ "$_rb" = "0" ]; then
     _back=$(record_version "$RECORD") || _back=
-    verify_active_version "$_back" || _rb=$?
+    verify_active_version "$_back" rollback || _rb=$?
   fi
   if [ "$_rb" = "0" ]; then
     discard_prevs || _rb=$?
@@ -2089,7 +2384,7 @@ rollback_unverified() {
   finish_rollback_socket || fail "rollback failed"
   _back=$(record_version "$RECORD")
   _rc=0
-  verify_active_version "$_back" || _rc=$?
+  verify_active_version "$_back" rollback || _rc=$?
   if [ "$_rc" != "0" ]; then
     fail "rollback verify failed"
   fi
@@ -2103,6 +2398,7 @@ do_upgrade() {
   fi
   refuse_managed_symlinks
   if [ -n "$installed_ver" ] && [ "$installed_ver" = "$VER" ] && [ "$FORCE" != "1" ]; then
+    sync_hostfiles_dropin
     say "already at ${VER}, nothing changed"
     say "summary: already at ${VER}"
     exit 0
@@ -2130,6 +2426,7 @@ EOF
     say "dry-run: systemctl daemon-reload"
     sync_runner_socket upgrade
     say_restart_plan
+    sync_hostfiles_dropin
     say "summary: dry-run upgrade ${installed_ver} -> ${VER}"
     exit 0
   fi
@@ -2175,6 +2472,7 @@ EOF
     rollback_unverified "verify failed, rolling back"
   fi
   ROLLBACK_ARMED=0
+  sync_hostfiles_dropin
   say "summary: upgraded ${installed_ver} -> ${VER}"
 }
 
@@ -2192,7 +2490,7 @@ do_rollback() {
     prepare_dirs || fail "directories failed"
     say "dry-run: systemctl daemon-reload"
     finish_rollback_socket || fail "runner socket update failed"
-    say_restart_plan
+    say_restart_plan rollback
     say "summary: dry-run rollback ${_old}"
     exit 0
   fi
@@ -2210,7 +2508,7 @@ do_rollback() {
   systemctl daemon-reload || fail "daemon-reload failed"
   finish_rollback_socket || fail "runner socket update failed"
   _rc=0
-  verify_active_version "$_old" || _rc=$?
+  verify_active_version "$_old" rollback || _rc=$?
   if [ "$_rc" != "0" ]; then
     fail "rollback verify failed"
   fi
@@ -2417,7 +2715,8 @@ delete_managed_files() {
     /etc/systemd/system/bot-agent-runner.socket \
     /etc/systemd/system/bot-agent-runner@.service \
     /etc/tmpfiles.d/bot-agent-runner.conf \
-    /etc/systemd/system/bot-agent.service.d/insecure-dev.conf
+    /etc/systemd/system/bot-agent.service.d/insecure-dev.conf \
+    "$HOSTFILES_DROPIN"
   do
     _dest=$(hostpath "$_path")
     if [ -f "$_dest" ] || [ -f "$_dest.prev" ]; then
@@ -2435,14 +2734,16 @@ delete_managed_files() {
       fi
     fi
   done
-  _dd=$(hostpath /etc/systemd/system/bot-agent.service.d)
-  if [ -d "$_dd" ]; then
-    if [ "$DRY" = "1" ]; then
-      say "dry-run: rmdir /etc/systemd/system/bot-agent.service.d"
-    else
-      rmdir "$_dd" 2>/dev/null || true
+  for _dd_host in /etc/systemd/system/bot-agent.service.d "$HOSTFILES_DROPIN_DIR"; do
+    _dd=$(hostpath "$_dd_host")
+    if [ -d "$_dd" ] && [ ! -h "$_dd" ]; then
+      if [ "$DRY" = "1" ]; then
+        say "dry-run: rmdir ${_dd_host}"
+      else
+        rmdir "$_dd" 2>/dev/null || true
+      fi
     fi
-  fi
+  done
 }
 
 purge_one() {

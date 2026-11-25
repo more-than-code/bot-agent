@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
 var (
@@ -71,9 +74,35 @@ func ValidateAgent(raw []byte) error {
 		if f.TaskID == "" || !rejectCode(f.ErrorCode) {
 			return fmt.Errorf("task_reject")
 		}
+		if f.Field != "" && (f.ErrorCode != "bad_spec" || !ValidRejectField(f.Field)) {
+			return fmt.Errorf("task_reject field")
+		}
 		return nil
 	case "task_result":
 		return checkTaskResult(raw)
+	case hostfiles.FrameStatus:
+		var f HostFilesStatus
+		if err := dec.Decode(&f); err != nil {
+			return err
+		}
+		if !hostfiles.ValidStatus(hostfiles.StatusResult{Files: f.Files}) {
+			return fmt.Errorf("host_files_status")
+		}
+		for _, x := range f.Files {
+			if x.SHA256 != "" && x.Size == nil {
+				return fmt.Errorf("host_files_status size")
+			}
+		}
+		return nil
+	case agentupgrade.Frame:
+		var f AgentUpgradeResult
+		if err := dec.Decode(&f); err != nil {
+			return err
+		}
+		if !f.Result.Valid() {
+			return fmt.Errorf("agent_upgrade_result")
+		}
+		return nil
 	case "auto_action":
 		var f AutoAction
 		if err := dec.Decode(&f); err != nil {
@@ -161,8 +190,31 @@ func checkHello(f Hello) error {
 		if e := f.Programs.Edge; e != nil && !edgeImageRE.MatchString(e.Image) {
 			return fmt.Errorf("edge image")
 		}
+		if err := checkHostFiles(f.Programs.HostFiles); err != nil {
+			return err
+		}
+	}
+	if f.LastUpgrade != nil && !f.LastUpgrade.Valid() {
+		return fmt.Errorf("last_upgrade")
 	}
 	return checkDiscovered(f.Services)
+}
+
+// checkHostFiles bounds the v1.18 list. A nil list is allowed so an older
+// shape still validates; the daemon always sends [].
+func checkHostFiles(list []HostFileHello) error {
+	if len(list) > hostfiles.MaxFiles {
+		return fmt.Errorf("host_files")
+	}
+	for _, f := range list {
+		if !hostfiles.ValidName(f.Name) || !hostfiles.ValidUnit(f.Unit) {
+			return fmt.Errorf("host_files")
+		}
+		if _, _, ok := hostfiles.ValidPath(f.Path); !ok {
+			return fmt.Errorf("host_files path")
+		}
+	}
+	return nil
 }
 
 // checkSharedNetworks bounds the v1.13 list. A nil list is allowed so an
@@ -344,6 +396,15 @@ func validImageEntry(s string) bool {
 	return !strings.HasSuffix(s, "-") && !strings.HasSuffix(s, "-prev") && !strings.HasSuffix(s, "-old")
 }
 
+// rejectFieldRe is the task_reject field shape (agent-protocol v1.23): up
+// to three dot-separated key names.
+var rejectFieldRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,2}$`)
+
+// ValidRejectField reports a task_reject field the agent may send.
+func ValidRejectField(s string) bool {
+	return len(s) <= 64 && rejectFieldRe.MatchString(s)
+}
+
 func rejectCode(c string) bool {
 	switch c {
 	case "wrong_host", "expired", "forbidden", "bad_spec", "unknown_service", "busy", "policy_denied":
@@ -361,6 +422,7 @@ func checkTaskResult(raw []byte) error {
 		State     string          `json:"state"`
 		ErrorCode *string         `json:"error_code"`
 		Payload   json.RawMessage `json:"payload"`
+		Late      bool            `json:"late"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -564,7 +626,25 @@ func ValidateImageDeploy(raw []byte) error {
 		return err
 	}
 	need := []string{"outcome", "digest", "exit_code", "status", "lines"}
-	if len(m) != len(need) {
+	// v1.19: reason is optional, one line of at most 512 bytes, and only on
+	// an outcome other than succeeded or unchanged.
+	extra := 0
+	if raw, ok := m["reason"]; ok {
+		extra = 1
+		var why string
+		if err := json.Unmarshal(raw, &why); err != nil || why == "" || len(why) > 512 || !utf8.ValidString(why) {
+			return fmt.Errorf("reason")
+		}
+		for _, r := range why {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("reason")
+			}
+		}
+		if o := unquote(m["outcome"]); o == "succeeded" || o == "unchanged" {
+			return fmt.Errorf("reason on %s", o)
+		}
+	}
+	if len(m) != len(need)+extra {
 		return fmt.Errorf("deploy keys %d", len(m))
 	}
 	for _, k := range need {

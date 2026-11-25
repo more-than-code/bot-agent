@@ -23,6 +23,14 @@ const (
 	// LabelEnvHash is the task's opaque env_hash (agent-protocol v1.14).
 	// Set only when the task carried one.
 	LabelEnvHash = "dev.deploybot.env_hash"
+	// LabelHostEnv is the SHA-256 of the host env file merged at create
+	// (agent-protocol v1.21 item 4). The helper reads it back only to
+	// decide whether env_hash still holds; it is never projected.
+	LabelHostEnv = "dev.deploybot.host_env_sha256"
+	// LabelHostNetwork is "true" on a container created with network
+	// "host" (v1.21 item 7), so a manual start or rollback can re-check
+	// host_network_projects.
+	LabelHostNetwork = "dev.deploybot.host_network"
 	// Health policy labels (agent-protocol v1.9 item 3). Set only on a
 	// service whose on_unhealthy is not none. Values are decimal strings.
 	LabelOnUnhealthy       = "dev.deploybot.on_unhealthy"

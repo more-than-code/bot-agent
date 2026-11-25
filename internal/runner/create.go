@@ -56,6 +56,10 @@ type hostConfigBody struct {
 	Memory        int64                 `json:"Memory,omitempty"`
 	MemorySwap    int64                 `json:"MemorySwap,omitempty"`
 	LogConfig     logConfigBody         `json:"LogConfig"`
+	// CapDrop and SecurityOpt are set only in host network mode (v1.21
+	// item 7), so a bridge container's body is unchanged.
+	CapDrop     []string `json:"CapDrop,omitempty"`
+	SecurityOpt []string `json:"SecurityOpt,omitempty"`
 }
 
 // endpointBody is one EndpointsConfig value. The project endpoint always
@@ -94,7 +98,9 @@ type createBody struct {
 	NetworkingConfig networkConfigBody   `json:"NetworkingConfig"`
 }
 
-func buildCreate(project, entry, digest, specHash, envHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool) ([]byte, string) {
+// hostEnvSum is the SHA-256 of the merged host env file (v1.21 item 4),
+// stored as LabelHostEnv; "" when the entry has none.
+func buildCreate(project, entry, digest, specHash, envHash, host string, spec images.ImageSpec, env map[string]string, files []images.MountFile, patterns []string, allowPublic bool, hostEnvSum, cgroupns string) ([]byte, string) {
 	ref, err := images.Parse(spec.Image)
 	if err != nil {
 		return nil, programs.ReasonBadSpec
@@ -124,7 +130,7 @@ func buildCreate(project, entry, digest, specHash, envHash, host string, spec im
 		HostConfig: hostConfigBody{
 			RestartPolicy: restartBody{Name: restart},
 			NetworkMode:   net,
-			CgroupnsMode:  "private",
+			CgroupnsMode:  cgroupns,
 			PidsLimit:     1024,
 			LogConfig: logConfigBody{
 				Type: "json-file",
@@ -139,6 +145,23 @@ func buildCreate(project, entry, digest, specHash, envHash, host string, spec im
 				net: {Aliases: []string{entry}},
 			},
 		},
+	}
+	if hostEnvSum != "" {
+		body.Labels[images.LabelHostEnv] = hostEnvSum
+	}
+	// v1.21 item 3: host networking. Docker NetworkMode host, no endpoint
+	// and no published port; ports[].host is only the agent's loopback
+	// health-check port. Validate already refused shared networks.
+	hostNet := spec.HostNetwork()
+	if hostNet {
+		if len(spec.Networks) > 0 {
+			return nil, programs.ReasonBadSpec
+		}
+		body.HostConfig.NetworkMode = images.NetworkHost
+		body.HostConfig.CapDrop = []string{"NET_RAW"}
+		body.HostConfig.SecurityOpt = []string{"no-new-privileges"}
+		body.NetworkingConfig.EndpointsConfig = map[string]endpointBody{}
+		body.Labels[images.LabelHostNetwork] = "true"
 	}
 	// v1.13: one endpoint per shared network, no alias and no fixed address.
 	// NetworkMode stays the project network. A shared name equal to the
@@ -172,7 +195,7 @@ func buildCreate(project, entry, digest, specHash, envHash, host string, spec im
 	if spec.User != "" {
 		body.User = spec.User
 	}
-	if len(spec.Ports) > 0 {
+	if len(spec.Ports) > 0 && !hostNet {
 		body.ExposedPorts = map[string]emptyObj{}
 		body.HostConfig.PortBindings = map[string][]portBind{}
 		for _, p := range spec.Ports {

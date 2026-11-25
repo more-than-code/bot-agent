@@ -9,8 +9,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/probe"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
@@ -66,6 +70,56 @@ func Decide(task protocol.Task, hostID string, now time.Time, services []protoco
 			return "bad_spec", ProbeSpec{}
 		}
 		return parseEdge(task), ProbeSpec{}
+	}
+	// v1.18: an agent whose hello has no host_files refuses the kind, so
+	// the server gates on the hello. The name is checked by the helper.
+	if task.Kind == hostfiles.Kind {
+		if len(gate.Policy.HostFiles) == 0 {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, _, err := hostfiles.ParseApply(task.Spec); err != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.20 item 4: refused when this agent's hello had agent_upgrade
+	// false. The helper checks the policy and the version again.
+	if task.Kind == agentupgrade.Kind {
+		if !gate.Policy.AgentUpgradeEnabled() {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, ok := agentupgrade.ParseRequest(task.Spec); !ok {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.22 item 2: refused when this agent's hello had console_policy
+	// false. The helper checks the policy, the base hash and the result.
+	if task.Kind == hostpolicy.Kind {
+		if !gate.Policy.ConsoleManaged() {
+			return "forbidden", ProbeSpec{}
+		}
+		if task.Service != nil {
+			return "bad_spec", ProbeSpec{}
+		}
+		if _, ok := hostpolicy.ParseRequest(task.Spec); !ok {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
+	}
+	// v1.25: spec exactly {}. The images-or-edge gate is answered as a
+	// task_result (docker_usage_disabled), not a reject.
+	if task.Kind == dockerusage.Kind {
+		if task.Service != nil || !dockerusage.ParseSpec(task.Spec) {
+			return "bad_spec", ProbeSpec{}
+		}
+		return "", ProbeSpec{}
 	}
 	if task.Kind != "host_snapshot" && task.Kind != "probe_health" {
 		return "forbidden", ProbeSpec{}

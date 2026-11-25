@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"regexp"
 	"time"
+
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
 )
 
 const (
 	Version      = 1
-	AgentVersion = "0.2.12"
+	AgentVersion = "0.2.17"
 	MaxFrame     = 1 << 20
 	MaxSamples   = 5000
 	CmdlineMax   = 1024
@@ -127,6 +130,42 @@ type Programs struct {
 	// Edge is the v1.15 edge summary, sent whenever the programs object
 	// is sent. Older agents omit it; the server reads that as disabled.
 	Edge *EdgeHello `json:"edge"`
+	// HostFiles is the v1.18 list from a valid policy, in file order, never
+	// null. No content and no command lines.
+	HostFiles []HostFileHello `json:"host_files"`
+	// AgentUpgrade is the v1.20 opt-in: true only when the policy is valid
+	// and agent_upgrade = true. Older agents omit it; the server reads
+	// that as false.
+	AgentUpgrade bool `json:"agent_upgrade"`
+	// HostNetwork is the v1.21 item 2 flag: true only when the policy is
+	// valid and host_network_projects is non-empty. Sent only when true
+	// (v1.21 item 7), so an older API never sees it.
+	HostNetwork bool `json:"host_network,omitempty"`
+	// ConsolePolicy is the v1.22 opt-in: true only when the policy is valid
+	// and console_policy = true. Sent only when true, so an older API never
+	// sees it.
+	ConsolePolicy bool `json:"console_policy,omitempty"`
+	// ImagePatterns is the policy's images list, sent only when
+	// ConsolePolicy is true: the host's root agreed to show it to org
+	// owners and admins. Otherwise image patterns are never sent.
+	ImagePatterns []string `json:"image_patterns,omitempty"`
+}
+
+// HostFileHello is one hello.programs.host_files item (agent-protocol
+// v1.18 item 3).
+type HostFileHello struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Secret bool   `json:"secret"`
+	Unit   string `json:"unit"`
+	Health bool   `json:"health"`
+}
+
+// HostFilesStatus is the v1.18 host_files_status frame (item 5).
+type HostFilesStatus struct {
+	V     int                    `json:"v"`
+	Type  string                 `json:"type"`
+	Files []hostfiles.FileStatus `json:"files"`
 }
 
 // EdgeHello is hello.programs.edge (agent-protocol v1.15 item 2). Enabled
@@ -230,6 +269,16 @@ type Hello struct {
 	// ServicesComplete is false when the first discovery did not finish.
 	// It is always sent. Older agents omit it, and the server reads that as true.
 	ServicesComplete bool `json:"services_complete"`
+	// LastUpgrade is the helper's last upgrade result (agent-protocol
+	// v1.20 item 2), or null. It is always sent.
+	LastUpgrade *agentupgrade.Result `json:"last_upgrade"`
+}
+
+// AgentUpgradeResult is the v1.20 agent_upgrade_result frame (item 3).
+type AgentUpgradeResult struct {
+	V      int                 `json:"v"`
+	Type   string              `json:"type"`
+	Result agentupgrade.Result `json:"result"`
 }
 
 // Services is the discovered set. It is sent when the set changes and at least every 300s while connected.
@@ -260,6 +309,10 @@ type TaskReject struct {
 	Type      string `json:"type"`
 	TaskID    string `json:"task_id"`
 	ErrorCode string `json:"error_code"`
+	// Field is the key that failed an image task's bad_spec check
+	// (agent-protocol v1.23): a key name such as "env" or
+	// "spec.secret_env", never a value. Omitted when there is none.
+	Field string `json:"field,omitempty"`
 }
 
 // TaskResult is resent until task_ack. ErrorCode is null on success.
@@ -270,6 +323,16 @@ type TaskResult struct {
 	State     string         `json:"state"`
 	ErrorCode *string        `json:"error_code"`
 	Payload   map[string]any `json:"payload"`
+	// Late is agent-protocol v1.21 item 5: a stored result resent after a
+	// hello for a task started on an earlier connection. Omitted otherwise.
+	Late bool `json:"late,omitempty"`
+}
+
+// TaskResultAck is the v1.21 server frame that deletes a stored result.
+type TaskResultAck struct {
+	V      int    `json:"v"`
+	Type   string `json:"type"`
+	TaskID string `json:"task_id"`
 }
 
 // Task is a server-assigned phase-1 task. Spec stays raw so extra keys can

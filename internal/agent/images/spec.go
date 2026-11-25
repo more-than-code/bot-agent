@@ -51,6 +51,18 @@ type ImageSpec struct {
 	// Nil means absent or null, and the key is then not marshalled, so a
 	// spec without it is unchanged. An empty array is refused.
 	Networks []string `json:"networks,omitempty"`
+	// Network is agent-protocol v1.21 item 3. Nil means absent, and the key
+	// is then not marshalled, so a spec without it is unchanged. The only
+	// value is "host"; it needs an empty networks list.
+	Network *string `json:"network,omitempty"`
+}
+
+// NetworkHost is the one ImageSpec network value (agent-protocol v1.21).
+const NetworkHost = "host"
+
+// HostNetwork reports ImageSpec network "host".
+func (s ImageSpec) HostNetwork() bool {
+	return s.Network != nil && *s.Network == NetworkHost
 }
 
 // MaxNetworks bounds ImageSpec networks (agent-protocol v1.13 item 3).
@@ -165,6 +177,10 @@ func (s *ImageSpec) Validate() string {
 		return "memory_mb"
 	}
 	if field := checkHealthcheck(s); field != "" {
+		if field != "healthcheck" {
+			// A healthcheck key, kept apart from the spec's own timeout_sec.
+			return "healthcheck." + field
+		}
 		return field
 	}
 	if field := checkLogging(s); field != "" {
@@ -175,6 +191,15 @@ func (s *ImageSpec) Validate() string {
 	}
 	if !validNetworks(s.Networks) {
 		return "networks"
+	}
+	if s.Network != nil {
+		if *s.Network != NetworkHost {
+			return "network"
+		}
+		// v1.21: host networking has no shared networks.
+		if len(s.Networks) > 0 {
+			return "networks"
+		}
 	}
 	if s.Kind == "job" {
 		s.Restart = "no"

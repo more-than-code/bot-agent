@@ -168,7 +168,7 @@ func TestPolicyCheckProjectsOverlap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasSuffix(out, "image_patterns=0\n"+tc.want+"shared_networks=0\nedge=false\n") {
+		if !strings.HasSuffix(out, "image_patterns=0\n"+tc.want+"shared_networks=0\nedge=false\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
 			t.Fatalf("%s: %q", tc.projects, out)
 		}
 		if strings.Contains(out, "acme") {
@@ -192,12 +192,13 @@ func TestPolicyCheckSharedNetworks(t *testing.T) {
 		"shared_networks=2\n" +
 		"shared_network dd 10.200.10.0/24 daikou,defect-drainer\n" +
 		"shared_network spare 192.168.50.0/28 -\n" +
-		"edge=false\n"
+		"edge=false\n" +
+		"host_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n"
 	if !strings.HasSuffix(out, "image_patterns=0\n"+want) {
 		t.Fatalf("%q", out)
 	}
 	out, err = runPolicyCheck(t, writePolicy(t, "enabled = true\n"))
-	if err != nil || !strings.HasSuffix(out, "projects_overlap=false\nshared_networks=0\nedge=false\n") {
+	if err != nil || !strings.HasSuffix(out, "projects_overlap=false\nshared_networks=0\nedge=false\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
 		t.Fatalf("%q %v", out, err)
 	}
 	out, err = runPolicyCheck(t, writePolicy(t, "enabled = true\nshared_networks = [\"dd=8.8.8.0/24\"]\n"))
@@ -206,18 +207,47 @@ func TestPolicyCheckSharedNetworks(t *testing.T) {
 	}
 }
 
-// v1.15 item 1: edge=<true|false> is the last line, after the shared
-// networks. An edge key that is not a bool makes the file invalid.
+// v1.15 item 1: edge=<true|false> follows the shared networks; the
+// v1.18 host_files lines come after it. An edge key that is not a bool makes the file invalid.
 func TestPolicyCheckEdge(t *testing.T) {
 	out, err := runPolicyCheck(t, writePolicy(t, ""+
 		"projects = [\"daikou\"]\n"+
 		"shared_networks = [\"dd=10.200.10.0/24\"]\n"+
 		"shared_network_projects = [\"dd:daikou\"]\n"+
 		"edge = true\n"))
-	if err != nil || !strings.HasSuffix(out, "shared_network dd 10.200.10.0/24 daikou\nedge=true\n") {
+	if err != nil || !strings.HasSuffix(out, "shared_network dd 10.200.10.0/24 daikou\nedge=true\nhost_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
 		t.Fatalf("%q %v", out, err)
 	}
 	out, err = runPolicyCheck(t, writePolicy(t, "edge = yes\n"))
+	if err == nil || out != "invalid: parse\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// v1.20 item 1: agent_upgrade=<bool> follows the host_file lines. A key
+// that is not a bool makes the file invalid.
+func TestPolicyCheckAgentUpgrade(t *testing.T) {
+	out, err := runPolicyCheck(t, writePolicy(t, "agent_upgrade = true\n"))
+	if err != nil || !strings.HasSuffix(out, "edge=false\nhost_files=0\nagent_upgrade=true\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
+		t.Fatalf("%q %v", out, err)
+	}
+	out, err = runPolicyCheck(t, writePolicy(t, "enabled = true\nagent_upgrade = false\n"))
+	if err != nil || !strings.HasSuffix(out, "host_files=0\nagent_upgrade=false\nagent_upgrade_https_proxy=unset\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") {
+		t.Fatalf("%q %v", out, err)
+	}
+	out, err = runPolicyCheck(t, writePolicy(t, "agent_upgrade = 1\n"))
+	if err == nil || out != "invalid: parse\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// v1.20 item 1: the proxy is printed as set or unset, never its value.
+func TestPolicyCheckAgentUpgradeProxy(t *testing.T) {
+	out, err := runPolicyCheck(t, writePolicy(t, "agent_upgrade = true\nagent_upgrade_https_proxy = \"http://proxy.lan:3128\"\n"))
+	if err != nil || !strings.HasSuffix(out, "agent_upgrade=true\nagent_upgrade_https_proxy=set\nhost_network_projects=none\nconsole_policy=false\ncontainer_cgroupns=private\n") || strings.Contains(out, "proxy.lan") {
+		t.Fatalf("%q %v", out, err)
+	}
+	out, err = runPolicyCheck(t, writePolicy(t, "agent_upgrade_https_proxy = \"http://u:p@proxy:3128\"\n"))
 	if err == nil || out != "invalid: parse\n" {
 		t.Fatalf("%q %v", out, err)
 	}

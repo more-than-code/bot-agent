@@ -214,6 +214,42 @@ run_ok() {
   printf '%s\n' "$_out"
 }
 
+# v1.20: an enrolled upgrade waits for the restarted agent's hello marker.
+# start_hello_api runs the fake API (the fakeserver test binary) and points
+# /etc/bot-agent/env and /opt/enrolled.env at it with the fakeserver's
+# fixed host id and credential, so the agents in this test can say hello.
+hello_pid=
+start_hello_api() {
+  chmod 0755 /opt/fakeapi
+  rm -f /tmp/hello.url /tmp/hello.count /tmp/helloapi.log
+  BOT_AGENT_FAKE_URL_FILE=/tmp/hello.url BOT_AGENT_FAKE_COUNT_FILE=/tmp/hello.count \
+    /opt/fakeapi -test.run '^TestServe$' -test.timeout 0 >/tmp/helloapi.log 2>&1 &
+  hello_pid=$!
+  _i=0
+  while [ "$_i" -lt 20 ] && [ ! -s /tmp/hello.url ]; do
+    kill -0 "$hello_pid" 2>/dev/null || die "hello api exited"
+    _i=$((_i + 1))
+    sleep 1
+  done
+  [ -s /tmp/hello.url ] || die "hello api did not write a url"
+  _url=$(cat /tmp/hello.url)
+  case "$_url" in
+    ws://127.0.0.1:*/agent/v1/ws) ;;
+    *) die "hello api url is not loopback" ;;
+  esac
+  {
+    printf 'BOT_AGENT_SERVER_URL=%s\n' "$_url"
+    printf '%s\n' "BOT_AGENT_HOST_ID=11111111-1111-1111-1111-111111111111"
+    printf '%s\n' "BOT_AGENT_CREDENTIAL_ID=22222222-2222-2222-2222-222222222222"
+    printf '%s\n' "BOT_AGENT_CREDENTIAL=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    printf '%s\n' "BOT_AGENT_INSECURE_DEV=1"
+  } > /etc/bot-agent/env
+  chown bot-agent:bot-agent /etc/bot-agent/env
+  chmod 0600 /etc/bot-agent/env
+  cp /etc/bot-agent/env /opt/enrolled.env
+  chmod 0600 /opt/enrolled.env
+}
+
 chmod 0755 \
   /opt/bundles/b020/install.sh \
   /opt/bundles/b020/bot-agent-v0.2.0-linux-arm64 \
@@ -385,6 +421,10 @@ have "$out" "enroll failed: credential not persisted" "AC3 persist"
 st=$(systemctl is-active bot-agent.service 2>/dev/null || true)
 [ "$st" = "active" ] || die "agent is $st after enroll"
 
+# From here the enrolled agent talks to the in-container fake API.
+start_hello_api
+systemctl restart bot-agent.service || die "restart after hello api"
+
 # AC4 upgrade while the agent is running. The installer must rename the
 # binary (a write in place returns ETXTBSY). NRestarts must be exactly 0.
 id1=$(systemctl show -p InvocationID --value bot-agent.service || true)
@@ -404,6 +444,7 @@ if [ -z "$id2" ] || [ "$id1" = "$id2" ]; then
 fi
 grep -F 'systemctl restart bot-agent.service' /tmp/up.out >/dev/null || die "AC4 upgrade missing restart line"
 grep -F 'verify: active, NRestarts 0, version 0.2.1' /tmp/up.out >/dev/null || die "AC4 upgrade missing verify line"
+grep -F 'verify: hello acknowledged' /tmp/up.out >/dev/null || die "AC4 upgrade missing hello line"
 
 # Rollback dry-run while .prev exists lists restores and changes nothing.
 before=$(snap)
@@ -838,6 +879,7 @@ if grep -q "$other_token" /tmp/fakeapi.log; then
   die "second token in fake api log"
 fi
 kill "$fake_pid" >/dev/null 2>&1 || true
+kill "$hello_pid" >/dev/null 2>&1 || true
 printf '%s\n' "inner checks passed"
 EOF
 

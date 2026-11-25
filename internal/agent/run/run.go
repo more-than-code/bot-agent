@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
 	"github.com/more-than-code/bot-agent/internal/agent/collect"
 	"github.com/more-than-code/bot-agent/internal/agent/config"
 	"github.com/more-than-code/bot-agent/internal/agent/conn"
 	"github.com/more-than-code/bot-agent/internal/agent/discover"
 	"github.com/more-than-code/bot-agent/internal/agent/policy"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
+	"github.com/more-than-code/bot-agent/internal/agent/results"
 	"github.com/more-than-code/bot-agent/internal/agent/spool"
 )
 
@@ -60,12 +62,21 @@ type Options struct {
 	GroupPath  string
 	HelperPath string
 	PolicyUID  func(os.FileInfo) (uint32, bool)
+	// PolicyExec is the filesystem the v1.18 executable check reads. Nil
+	// is the host's; only tests set it.
+	PolicyExec policy.ExecFS
 	Helper     Helper
 	// MachineID is the file whose contents feed the container host label.
 	// Empty means /etc/machine-id. Tests set a fixture path.
 	MachineID string
 	// SuperviseEvery is the health supervisor poll. Zero means 15s.
 	SuperviseEvery time.Duration
+	// HostFilesEvery is the host_files_status period. Zero means 10 minutes.
+	HostFilesEvery time.Duration
+	// UpgradePollEvery and UpgradePollFor are the v1.20 result polling
+	// period and window. Zero means 10 s and 15 minutes.
+	UpgradePollEvery time.Duration
+	UpgradePollFor   time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -132,9 +143,16 @@ func Run(ctx context.Context, opt Options) error {
 	}
 	pol := policy.Load(policy.Files{
 		Policy: opt.PolicyPath, Passwd: opt.Passwd, Group: opt.GroupPath, UID: opt.PolicyUID,
+		Exec: opt.PolicyExec,
+		// v1.21: the host env files are root 0600; the helper reads them.
+		SkipEnvFiles: true,
 	})
 	if pol.Exists && !pol.Valid {
-		opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
+		if pol.ReasonEntry != "" {
+			opt.Log.Printf("bot-agent: runner policy invalid: %s %s", quoteLog(pol.Reason), quoteLog(pol.ReasonEntry))
+		} else {
+			opt.Log.Printf("bot-agent: runner policy invalid: %s", quoteLog(pol.Reason))
+		}
 	}
 	for _, d := range pol.Dropped {
 		opt.Log.Printf("bot-agent: runner policy dropped run_as %s", quoteLog(d.Name))
@@ -167,18 +185,32 @@ func Run(ctx context.Context, opt Options) error {
 	if err != nil {
 		return err
 	}
+	// v1.21 item 5: detached task results. Without the directory the
+	// agent still runs; those results are kept in memory as before.
+	rs, err := results.Open(cfg.StateDir, opt.Now)
+	if err != nil {
+		opt.Log.Printf("bot-agent: results directory unavailable; task results kept in memory")
+		rs = nil
+	}
 	a := &agent{
-		opt:    opt,
-		cfg:    cfg,
-		host:   host,
-		spool:  sp,
-		policy: pol,
+		opt:     opt,
+		cfg:     cfg,
+		host:    host,
+		spool:   sp,
+		results: rs,
+		policy:  pol,
 		col: collect.New(collect.Roots{
 			Proc: opt.ProcRoot, Sys: opt.SysRoot, Passwd: opt.Passwd,
 		}, opt.StatFS),
 		bo:        conn.NewBackoff(),
 		healthCh:  make(chan protocol.Sample, 128),
 		taskSlots: make(chan struct{}, maxRunningTasks),
+	}
+	a.life = ctx
+	// v1.20 item 2: the helper's last upgrade result, read once at start.
+	a.noteUpgradeResult(a.readUpgradeResult(ctx))
+	if pol.AgentUpgradeEnabled() {
+		a.startUpgradePoll()
 	}
 	a.noteUnlistedUnits(ctx)
 	if pol.ImagesEnabled() {
@@ -280,6 +312,32 @@ type agent struct {
 	// autoSent is the auto_action ids sent on the current connection.
 	// Only the session goroutine touches it.
 	autoSent map[string]bool
+	// hostFilesWake is signalled after each host_file_apply so the session
+	// sends host_files_status (agent-protocol v1.18 item 5).
+	hostFilesWake wakeSignal
+	// life is Run's context; the v1.20 result poller outlives a session.
+	life context.Context
+	// lastUpgrade is the helper's last upgrade result (v1.20), under mu.
+	// upgradeSeq counts new results; upgradeSent is the last one the
+	// server got, in hello or the agent_upgrade_result frame.
+	lastUpgrade *agentupgrade.Result
+	upgradeSeq  uint64
+	upgradeSent uint64
+	upgradeWake wakeSignal
+	markerOnce  atomic.Bool
+	// polling, pollUntil and pollSawNew are the result poller's state,
+	// under mu.
+	polling    bool
+	pollUntil  time.Time
+	pollSawNew bool
+	// results is the v1.21 store of detached task results; nil when the
+	// directory could not be opened. connSeq numbers acknowledged
+	// connections, curW is the current one's writer, and taskConn is the
+	// connection each detached task started on. All three under mu.
+	results  *results.Store
+	connSeq  uint64
+	curW     *writer
+	taskConn map[string]uint64
 }
 
 type writer struct {

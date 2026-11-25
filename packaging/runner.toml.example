@@ -36,3 +36,21 @@ max_programs = 20
 # binds ports 80 and 443 in the host network and serves the projects' routes.
 # Needs Docker, and 80 and 443 free and reachable from the internet.
 # edge = true
+
+# Console-managed policy (agent 0.2.16 and later; an older agent rejects this
+# key and turns programs and images off, so upgrade the agent first). Lets the
+# host's org owners and admins change edge, images and projects from the
+# Deploybot console's host Policy tab. Every other key stays yours: the
+# console cannot change run_as, dirs, exec_allow, allow_shell, shared
+# networks, host_files, agent_upgrade or this key. An apply keeps
+# runner.toml.prev, restarts bot-agent and puts the previous file back when
+# the agent does not reconnect within 90 seconds. Image patterns are shown to
+# org owners and admins while this is on.
+# console_policy = true
+
+# v1.24 (bot-agent 0.2.16): the cgroup namespace for containers. Leave it
+# out (private). Set "host" only on a host whose kernel has no cgroup
+# namespaces (OpenVZ, some LXC), where every container start fails
+# otherwise; a container can then read the host's cgroup tree. The console
+# cannot change it. Upgrade the agent before adding the key.
+# container_cgroupns = "host"

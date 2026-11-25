@@ -8,7 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/programs"
 	"github.com/more-than-code/bot-agent/internal/agent/protocol"
 	"github.com/more-than-code/bot-agent/internal/agent/tasks"
@@ -27,6 +31,10 @@ func (a *agent) handleTask(ctx context.Context, w *writer, raw []byte) {
 		return
 	}
 	if res, ok := a.pending.get(task.TaskID); ok {
+		_ = w.Send(ctx, res)
+		return
+	}
+	if res, ok := a.storedResult(task.TaskID); ok {
 		_ = w.Send(ctx, res)
 		return
 	}
@@ -54,9 +62,15 @@ func (a *agent) handleTask(ctx context.Context, w *writer, raw []byte) {
 	}
 	a.taskWaiting++
 	a.taskMu.Unlock()
-	go a.runAdmitted(ctx, w, task)
+	if detachedKind(task.Kind) {
+		a.noteStarted(task.TaskID, a.currentConn())
+	}
+	go a.runAdmitted(a.taskBase(ctx, task.Kind), w, task)
 }
 
+// runAdmitted runs one admitted task on ctx: the session's, or Run's for a
+// detached kind (v1.21 item 5), whose result is stored before it is sent on
+// whichever connection is current then.
 func (a *agent) runAdmitted(ctx context.Context, w *writer, task protocol.Task) {
 	defer a.inflight.done(task.TaskID)
 	select {
@@ -80,9 +94,27 @@ func (a *agent) runAdmitted(ctx context.Context, w *writer, task protocol.Task) 
 	if a.opt.OnTaskStart != nil {
 		a.opt.OnTaskStart()
 	}
-	if rej, res, ok := a.execute(ctx, task); !ok {
+	rej, res, ok := a.execute(ctx, task)
+	detached := detachedKind(task.Kind)
+	switch {
+	case detached && a.stopping():
+		// v1.21 item 7: the agent is stopping and the result says only
+		// that the work was cut off. Nothing is stored or sent; the API's
+		// sweep settles the task.
+		a.forgetStarted(task.TaskID)
+		a.opt.Log.Printf("bot-agent: agent stopping; no result for task id=%s", quoteLog(task.TaskID))
+	case !ok && detached:
+		// The reject goes to the connection that is current now.
+		a.forgetStarted(task.TaskID)
+		a.sendCurrent(rej)
+	case !ok:
 		_ = w.Send(ctx, rej)
-	} else {
+	case detached:
+		// late is worked out before keepDetached may drop the record.
+		out := a.withLate(res)
+		a.keepDetached(res)
+		a.sendCurrent(out)
+	default:
 		a.storeResult(res)
 		_ = w.Send(ctx, res)
 	}
@@ -140,16 +172,38 @@ func (a *agent) runningCount() (int, map[string]bool) {
 func (a *agent) execute(ctx context.Context, task protocol.Task) (protocol.TaskReject, protocol.TaskResult, bool) {
 	code, spec := a.classify(task)
 	if code != "" {
-		a.opt.Log.Printf("bot-agent: task_reject code=%s", quoteLog(code))
-		return protocol.TaskReject{
+		rej := protocol.TaskReject{
 			V: protocol.Version, Type: "task_reject", TaskID: task.TaskID, ErrorCode: code,
-		}, protocol.TaskResult{}, false
+		}
+		// agent-protocol v1.23: an image bad_spec names the key that
+		// failed, never its value. Every API ignores an unknown key.
+		if code == "bad_spec" && tasks.ImageKind(task.Kind) {
+			rej.Field = tasks.BadSpecField(task, a.policy)
+		}
+		if rej.Field != "" {
+			a.opt.Log.Printf("bot-agent: task_reject code=%s field=%s", quoteLog(code), quoteLog(rej.Field))
+		} else {
+			a.opt.Log.Printf("bot-agent: task_reject code=%s", quoteLog(code))
+		}
+		return rej, protocol.TaskResult{}, false
 	}
 	if tasks.ImageKind(task.Kind) {
 		return protocol.TaskReject{}, a.runImage(ctx, task), true
 	}
 	if edge.IsKind(task.Kind) {
 		return protocol.TaskReject{}, a.runEdge(ctx, task), true
+	}
+	if task.Kind == hostfiles.Kind {
+		return protocol.TaskReject{}, a.runHostFile(ctx, task), true
+	}
+	if task.Kind == agentupgrade.Kind {
+		return protocol.TaskReject{}, a.runAgentUpgrade(ctx, task), true
+	}
+	if task.Kind == hostpolicy.Kind {
+		return protocol.TaskReject{}, a.runHostPolicy(ctx, task), true
+	}
+	if task.Kind == dockerusage.Kind {
+		return protocol.TaskReject{}, a.runDockerUsage(ctx, task), true
 	}
 	if _, ok := programs.Verb(task.Kind); ok {
 		return protocol.TaskReject{}, a.runProgram(ctx, task), true

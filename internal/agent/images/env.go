@@ -56,6 +56,11 @@ func checkEnv(env map[string]string, refuseSecrets bool, limit int) string {
 	return ""
 }
 
+// ChangesRuntime reports the keys that change which code runs (LD_*,
+// NODE_OPTIONS and the rest). Host env files (agent-protocol v1.21) share
+// the list.
+func ChangesRuntime(k string) bool { return changesRuntime(k) }
+
 func changesRuntime(k string) bool {
 	if strings.HasPrefix(k, "LD_") || strings.HasPrefix(k, "DYLD_") {
 		return true

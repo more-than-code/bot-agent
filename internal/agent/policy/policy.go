@@ -72,6 +72,50 @@ type Policy struct {
 	Dropped        []Drop
 	// Edge is the v1.15 edge key. It is false on an invalid policy.
 	Edge bool
+	// HostFiles is the v1.18 list in file order. It is empty, not nil, on
+	// a valid policy without the keys and nil on an invalid one.
+	HostFiles []HostFile
+	// AgentUpgrade is the v1.20 agent_upgrade key. It is false on an
+	// invalid policy.
+	AgentUpgrade bool
+	// AgentUpgradeProxy is agent_upgrade_https_proxy (v1.20 item 1), the
+	// only proxy the upgrade download uses. Empty when unset or invalid.
+	AgentUpgradeProxy string
+	// HostNetworkProjects is the v1.21 host_network_projects list. It is
+	// empty, not nil, on a valid policy without the key.
+	HostNetworkProjects []string
+	// HostEnvFiles is the v1.21 host_env_files list in file order, empty
+	// on a valid policy without the key. Keys and SHA256 are set only when
+	// the loader read the files (Files.SkipEnvFiles false).
+	HostEnvFiles []HostEnvFile
+	// ReasonEntry is "<project>/<entry>" when Reason is host_env_file and
+	// the line named a valid entry; empty otherwise. Never a path or value.
+	ReasonEntry string
+	// ConsolePolicy is the v1.22 console_policy key: the host's root lets
+	// org owners and admins change edge, images and projects from the
+	// console. It is false on an invalid policy.
+	ConsolePolicy bool
+	// ContainerCgroupns is the v1.24 container_cgroupns key: the cgroup
+	// namespace mode the helper asks Docker for, CgroupnsPrivate (the
+	// default) or CgroupnsHost. Only the host's root sets it, for a kernel
+	// without cgroup namespaces (OpenVZ); host mode lets a container see
+	// the host's cgroup tree.
+	ContainerCgroupns string
+}
+
+// Container cgroup namespace modes (agent-protocol v1.24).
+const (
+	CgroupnsPrivate = "private"
+	CgroupnsHost    = "host"
+)
+
+// CgroupnsMode is the HostConfig.CgroupnsMode for a container this host
+// creates: CgroupnsHost only when the root set it, else CgroupnsPrivate.
+func (p Policy) CgroupnsMode() string {
+	if p.ContainerCgroupns == CgroupnsHost {
+		return CgroupnsHost
+	}
+	return CgroupnsPrivate
 }
 
 // ImagesEnabled is the hello flag: a valid enabled policy with at least one
@@ -89,6 +133,20 @@ func (p Policy) ImagesEnabled() bool {
 // depend on enabled, images or projects; the edge has no project.
 func (p Policy) EdgeEnabled() bool {
 	return p.Valid && p.Edge
+}
+
+// AgentUpgradeEnabled is the hello programs.agent_upgrade flag and the
+// helper's agent_upgrade gate (agent-protocol v1.20): a valid policy with
+// agent_upgrade = true. It does not depend on enabled, images or projects.
+func (p Policy) AgentUpgradeEnabled() bool {
+	return p.Valid && p.AgentUpgrade
+}
+
+// ConsoleManaged is the hello programs.console_policy flag and the
+// host_policy_apply gate (agent-protocol v1.22): a valid policy with
+// console_policy = true.
+func (p Policy) ConsoleManaged() bool {
+	return p.Valid && p.ConsolePolicy
 }
 
 // OverlappingProjects reports the first pair, in list order, where one slug
@@ -138,6 +196,20 @@ type Files struct {
 	Group     string
 	UID       func(os.FileInfo) (uint32, bool)
 	SkipOwner bool
+	// Exec is the filesystem the v1.18 executable check reads. Nil is the
+	// host's. Only tests set it.
+	Exec ExecFS
+	// SkipEnvFiles checks host_env_files lines without reading the files
+	// (agent-protocol v1.21 item 7). The agent and every helper verb set
+	// it; only policy check reads them here. The helper reads an entry's
+	// file itself when it merges, reports env_hash or redacts logs.
+	SkipEnvFiles bool
+	// EnvOwner replaces the uid and gid of a host env file. Production
+	// leaves it nil; tests set it because they cannot chown to root.
+	EnvOwner HostEnvOwner
+	// EnvRoot is a filesystem prefix for the host env file paths. Only
+	// the helper's tests set it (through Sys.Root); "" is the host.
+	EnvRoot string
 }
 
 // Check parses path with the same rules as Load, including run_as against
@@ -199,6 +271,31 @@ func Load(f Files) Policy {
 			return out
 		}
 	}
+	f.Passwd, f.Group = passwd, group
+	return fromBytes(out, data, f)
+}
+
+// FromBytes validates data with the same rules as Load, except the owner
+// and mode checks, which belong to the file. passwd and group empty mean
+// the host's. The helper uses it to check a rewritten policy before it is
+// written (agent-protocol v1.22).
+func FromBytes(data []byte, passwd, group string, exec ExecFS) Policy {
+	if passwd == "" {
+		passwd = DefaultPasswd
+	}
+	if group == "" {
+		group = DefaultGroup
+	}
+	out := Policy{Exists: true, Hash: hashBytes(data)}
+	if len(data) > MaxBytes {
+		out.Reason = "parse"
+		return out
+	}
+	// Host env files are checked by line only, as every helper verb does.
+	return fromBytes(out, data, Files{Passwd: passwd, Group: group, Exec: exec, SkipEnvFiles: true})
+}
+
+func fromBytes(out Policy, data []byte, f Files) Policy {
 	parsed, reason := parseTOML(data)
 	if reason != "" {
 		out.Reason = reason
@@ -213,9 +310,26 @@ func Load(f Files) Policy {
 		out.Reason = reason
 		return out
 	}
-	users := readAccounts(passwd, group)
+	hostNet, reason := validateHostNetwork(parsed.hostNetwork, parsed.projects)
+	if reason != "" {
+		out.Reason = reason
+		return out
+	}
+	users := readAccounts(f.Passwd, f.Group)
+	hostFiles, reason := validateHostFiles(parsed.hostFiles, users, f.Exec)
+	if reason != "" {
+		out.Reason = reason
+		return out
+	}
+	hostEnv, reason, entry := validateHostEnvFiles(parsed.hostEnv, parsed.hostEnvImgs, parsed.projects, parsed.images, hostFiles, !f.SkipEnvFiles, f.EnvRoot, f.EnvOwner)
+	if reason != "" {
+		out.Reason = reason
+		out.ReasonEntry = entry
+		return out
+	}
 	kept, dropped := filterRunAs(parsed.runAs, users)
 	out.Valid = true
+	out.HostFiles = hostFiles
 	out.Enabled = parsed.enabled
 	out.AllowShell = parsed.allowShell
 	out.MaxPrograms = parsed.maxPrograms
@@ -228,6 +342,12 @@ func Load(f Files) Policy {
 	out.AllowPublicPorts = parsed.allowPublic
 	out.SharedNetworks = shared
 	out.Edge = parsed.edge
+	out.AgentUpgrade = parsed.agentUpgrade
+	out.AgentUpgradeProxy = parsed.upgradeProxy
+	out.HostNetworkProjects = hostNet
+	out.HostEnvFiles = hostEnv
+	out.ConsolePolicy = parsed.consolePolicy
+	out.ContainerCgroupns = parsed.cgroupns
 	out.Accounts = map[string]Account{}
 	for _, name := range kept {
 		out.Accounts[name] = users[name]

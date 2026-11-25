@@ -42,7 +42,7 @@ func TestImageVerbsStayDistinct(t *testing.T) {
 	if KnownVerb("image_deploy") {
 		t.Fatal("task kind was registered as a helper verb")
 	}
-	for _, reason := range []string{ReasonConflict, ReasonDocker, ReasonImage} {
+	for _, reason := range []string{ReasonConflict, ReasonDocker, ReasonImage, ReasonStartFailed} {
 		if FixedReason(reason) != reason {
 			t.Fatalf("collapsed %s", reason)
 		}

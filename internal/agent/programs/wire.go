@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/more-than-code/bot-agent/internal/agent/agentupgrade"
+	"github.com/more-than-code/bot-agent/internal/agent/dockerusage"
 	"github.com/more-than-code/bot-agent/internal/agent/edge"
+	"github.com/more-than-code/bot-agent/internal/agent/hostfiles"
+	"github.com/more-than-code/bot-agent/internal/agent/hostpolicy"
 	"github.com/more-than-code/bot-agent/internal/agent/images"
 )
 
@@ -49,7 +53,10 @@ type UnitInfo struct {
 func FixedReason(reason string) string {
 	switch reason {
 	case ReasonPolicy, ReasonBadSpec, ReasonNotOwned, ReasonVerb, ReasonIO,
-		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker:
+		ReasonConflict, ReasonDocker, ReasonImage, ReasonNetworksDocker, ReasonStartFailed,
+		agentupgrade.ReasonBusy, agentupgrade.ReasonNotNewer,
+		// Only docker_df (agent-protocol v1.25) emits these two.
+		dockerusage.ReasonDisabled, dockerusage.ReasonTimeout:
 		return reason
 	default:
 		return ReasonPolicy
@@ -57,10 +64,14 @@ func FixedReason(reason string) string {
 }
 
 // FrameLimit is the request-body cap for one verb.
-// Image and edge verbs are 2 MiB. Every other verb stays at MaxFrame.
+// Image and edge verbs are 2 MiB; the v1.18 host file verbs 160 KiB.
+// Every other verb stays at MaxFrame.
 func FrameLimit(verb string) int {
 	if images.IsVerb(verb) || edge.IsVerb(verb) {
 		return images.MaxFrame
+	}
+	if verb == hostfiles.VerbApply || verb == hostfiles.VerbStatus {
+		return hostfiles.MaxFrame
 	}
 	return MaxFrame
 }
@@ -81,7 +92,9 @@ const VerbDockerCheck = "docker_check"
 // Image verbs live in the images package so the two lists cannot drift.
 func KnownVerb(verb string) bool {
 	switch verb {
-	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck:
+	case "start", "stop", "restart", "status", "logs", "sockets", "list", VerbDockerCheck,
+		hostfiles.VerbApply, hostfiles.VerbStatus,
+		agentupgrade.VerbStart, agentupgrade.VerbResult, hostpolicy.Verb, dockerusage.Verb:
 		return true
 	default:
 		return images.IsVerb(verb) || edge.IsVerb(verb)
