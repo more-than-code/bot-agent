@@ -1,6 +1,6 @@
 # Spec: Host env files reach only the run the host owner pinned
 
-**Status:** revision 1, **awaiting Joe's approval**. No code before approval.
+**Status:** revision 1 **approved by Joe 2026-11-25 ("approved", H1–H6 defaults)**; implemented on this branch.
 **Tier:** 3 (root helper, `runner.toml`, agent-protocol). Claims **agent-protocol v1.26** (v1.25 is the newest implemented; no open PR in either repo claims v1.26 on 2026-11-25; renumber on this branch if another PR merges it first).
 **Repo:** bot-agent only. No API, console, MCP or database change (see §6).
 **Fixes:** DD `DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e` (P1, 2026-11-23 security review).
@@ -64,7 +64,9 @@ In `hostEnvMerge`, after the image check and before the file is read, for an ent
 | `spec.volumes`, `spec.files` (and the request's `files`) | empty |
 | `spec.env`, `spec.secret_env`, `spec.env_sets` and the request's merged `env` | empty |
 
-The first field that differs refuses the task: `policy_denied`, detail **`host_env_run`**, key = the field name (`command`, `entrypoint`, `healthcheck`, `user`, `volumes`, `files`, `env`). The refusal is logged like today's (`refuse <verb> policy_denied host_env_run <field>`), never with a value. Nothing is pulled or created.
+The first field that differs refuses the task: `policy_denied`, detail **`host_env_run`**, key = the field name (`command`, `entrypoint`, `healthcheck`, `user`, `volumes`, `files`, `env`). The refusal is logged like today's (`refuse <verb> policy_denied host_env_run <field>`), never with a value. No container is created and the file is not read. (The pull is an earlier helper verb with no env; it is unchanged.)
+
+Because the entry's own env is refused first, a key that both the entry and the file set is now `host_env_run env`, not v1.21's `env_conflict <KEY>`; `env_conflict` remains for a file key on the env denylist.
 
 `buildCreate` is unchanged: with these fields fixed it already sends only the pinned `Cmd` and `Healthcheck.Test`, no `Entrypoint`, no `User`, no mounts and only the file's env.
 
@@ -110,7 +112,7 @@ The server needs no new field: the refusal arrives as a v1.19 reason, which the 
 
 ## 7. Acceptance criteria
 
-1. With `host_env_files` for `p/e` and no other new line, a deploy of `p/e` with any non-empty `command`, any `entrypoint`, a `healthcheck`, a `user`, a volume, a file, a spec env key, a secret env ref, an env set, or a merged `env` key is refused `policy_denied` / `host_env_run` / `<field>`; no image is pulled and no container created.
+1. With `host_env_files` for `p/e` and no other new line, a deploy of `p/e` with any non-empty `command`, any `entrypoint`, a `healthcheck`, a `user`, a volume, a file, a spec env key, a secret env ref, an env set, or a merged `env` key is refused `policy_denied` / `host_env_run` / `<field>`; no container is created.
 2. With `host_env_command = ["p/e=api"]`, `command: ["api"]` deploys; `["api","x"]`, `["sh"]` and empty are refused `command`.
 3. With `host_env_healthcheck`, the same for `healthcheck.test`; changed timings with the same `test` deploy.
 4. A job run and an `image_rollback` that pulls are checked the same way; start, restart, stop, logs and the kept-container rollback are not.

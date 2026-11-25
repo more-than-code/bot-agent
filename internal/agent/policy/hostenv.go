@@ -39,9 +39,14 @@ type HostEnvFile struct {
 	Entry   string
 	Path    string
 	// Image is the entry's host_env_images pattern (v1.21 item 7).
-	Image  string
-	Keys   int
-	SHA256 string
+	Image string
+	// Command and Healthcheck are the entry's v1.26 run pins: the exact
+	// argv of host_env_command and host_env_healthcheck, nil without a line
+	// (the image's own CMD and HEALTHCHECK).
+	Command     []string
+	Healthcheck []string
+	Keys        int
+	SHA256      string
 }
 
 // Label is "<project>/<entry>", the name the policy check and the
@@ -124,12 +129,25 @@ func projectListed(projects []string, slug string) bool {
 // path may be a host_files path or sit in a host_files directory. With read
 // set the files themselves are read and checked (policy check); the agent
 // and the helper's verbs check the lines only.
-func validateHostEnvFiles(items, imageItems, projects, patterns []string, hostFiles []HostFile, read bool, root string, owner HostEnvOwner) ([]HostEnvFile, string, string) {
-	if items == nil && imageItems == nil {
+//
+// cmdItems and healthItems are the v1.26 host_env_command and
+// host_env_healthcheck lines, "<project>/<entry>=<argv>": at most one per
+// entry, each for an entry with a file line, with a valid argv (a
+// healthcheck's first argument absolute).
+func validateHostEnvFiles(items, imageItems, cmdItems, healthItems, projects, patterns []string, hostFiles []HostFile, read bool, root string, owner HostEnvOwner) ([]HostEnvFile, string, string) {
+	if items == nil && imageItems == nil && cmdItems == nil && healthItems == nil {
 		return []HostEnvFile{}, "", ""
 	}
-	if len(items) > MaxHostEnvFiles || len(imageItems) > MaxHostEnvFiles {
+	if len(items) > MaxHostEnvFiles || len(imageItems) > MaxHostEnvFiles || len(cmdItems) > MaxHostEnvFiles || len(healthItems) > MaxHostEnvFiles {
 		return nil, "parse", ""
+	}
+	cmdFor, reason, label := hostEnvPins(cmdItems, false)
+	if reason != "" {
+		return nil, reason, label
+	}
+	healthFor, reason, label := hostEnvPins(healthItems, true)
+	if reason != "" {
+		return nil, reason, label
 	}
 	imagesFor := map[string]string{}
 	for _, item := range imageItems {
@@ -159,7 +177,7 @@ func validateHostEnvFiles(items, imageItems, projects, patterns []string, hostFi
 			return nil, ReasonHostEnvFile, label
 		}
 		seen[label] = true
-		f := HostEnvFile{Project: project, Entry: entry, Path: path, Image: pattern}
+		f := HostEnvFile{Project: project, Entry: entry, Path: path, Image: pattern, Command: cmdFor[label], Healthcheck: healthFor[label]}
 		if read {
 			env, sum, err := ReadHostEnv(root, path, owner)
 			if err != nil {
@@ -171,13 +189,79 @@ func validateHostEnvFiles(items, imageItems, projects, patterns []string, hostFi
 		}
 		out = append(out, f)
 	}
-	// An image line without a file line is a typo, not a no-op.
-	for label := range imagesFor {
-		if !seen[label] {
-			return nil, ReasonHostEnvFile, label
+	// An image or pin line without a file line is a typo, not a no-op.
+	for _, lines := range []map[string]string{imagesFor, keysOf(cmdFor), keysOf(healthFor)} {
+		for label := range lines {
+			if !seen[label] {
+				return nil, ReasonHostEnvFile, label
+			}
 		}
 	}
 	return out, "", ""
+}
+
+// Host env run pin limits (agent-protocol v1.26 item 1), the same argv
+// shape as the host_file commands.
+const (
+	MaxHostEnvArgs     = 17
+	MaxHostEnvArgBytes = 256
+)
+
+// hostEnvPins parses v1.26 pin lines into argv by entry label. A line that
+// does not split is "parse"; a bad label, argv or repeat is
+// ReasonHostEnvFile with the label (or "" when the names are invalid).
+// abs requires the first argument to be an absolute path (healthcheck).
+func hostEnvPins(items []string, abs bool) (map[string][]string, string, string) {
+	out := map[string][]string{}
+	for _, item := range items {
+		project, entry, argv, ok := splitEnvItem(item)
+		if !ok {
+			return nil, "parse", ""
+		}
+		label := envLabel(project, entry)
+		if _, dup := out[label]; dup || label == "" {
+			return nil, ReasonHostEnvFile, label
+		}
+		args, ok := splitPinArgv(argv, abs)
+		if !ok {
+			return nil, ReasonHostEnvFile, label
+		}
+		out[label] = args
+	}
+	return out, "", ""
+}
+
+// splitPinArgv splits on single spaces: 1 to 17 arguments (a program and
+// at most 16 arguments), each 1 to 256 bytes of printable ASCII without
+// space, quotes or backslash. No shell is ever involved.
+func splitPinArgv(s string, abs bool) ([]string, bool) {
+	args := strings.Split(s, " ")
+	if len(args) > MaxHostEnvArgs {
+		return nil, false
+	}
+	for _, a := range args {
+		if a == "" || len(a) > MaxHostEnvArgBytes {
+			return nil, false
+		}
+		for i := 0; i < len(a); i++ {
+			c := a[i]
+			if c <= ' ' || c > '~' || c == '"' || c == '\'' || c == '\\' {
+				return nil, false
+			}
+		}
+	}
+	if abs && !strings.HasPrefix(args[0], "/") {
+		return nil, false
+	}
+	return args, true
+}
+
+func keysOf(m map[string][]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k := range m {
+		out[k] = ""
+	}
+	return out
 }
 
 // splitEnvItem splits "<project>/<entry>=<value>".

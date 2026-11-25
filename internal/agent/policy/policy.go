@@ -321,7 +321,7 @@ func fromBytes(out Policy, data []byte, f Files) Policy {
 		out.Reason = reason
 		return out
 	}
-	hostEnv, reason, entry := validateHostEnvFiles(parsed.hostEnv, parsed.hostEnvImgs, parsed.projects, parsed.images, hostFiles, !f.SkipEnvFiles, f.EnvRoot, f.EnvOwner)
+	hostEnv, reason, entry := validateHostEnvFiles(parsed.hostEnv, parsed.hostEnvImgs, parsed.hostEnvCmds, parsed.hostEnvHealth, parsed.projects, parsed.images, hostFiles, !f.SkipEnvFiles, f.EnvRoot, f.EnvOwner)
 	if reason != "" {
 		out.Reason = reason
 		out.ReasonEntry = entry

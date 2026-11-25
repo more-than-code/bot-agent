@@ -228,7 +228,13 @@ const (
 	// DetailHostEnvImage is a deploy of an image the entry's
 	// host_env_images pattern does not match (v1.21 item 7).
 	DetailHostEnvImage = "host_env_image"
+	// DetailHostEnvRun is a deploy of an entry with a host env file whose
+	// run differs from the runner.toml pins (v1.26); the key is the field.
+	DetailHostEnvRun = "host_env_run"
 )
+
+// HostEnvRunFields are the keys a host_env_run refusal may name (v1.26).
+var HostEnvRunFields = []string{"command", "entrypoint", "healthcheck", "user", "volumes", "files", "env"}
 
 // EncodeErrorDetail is {"error":code,"detail":detail[,"key":key]}.
 func EncodeErrorDetail(code, detail, key string) []byte {

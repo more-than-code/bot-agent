@@ -126,11 +126,26 @@ func detailWhy(r imageRefusalBody) string {
 		return whyHostEnvFile
 	case r.detail == images.DetailHostEnvImage && r.code == programs.ReasonPolicy:
 		return whyHostEnvImage
+	case r.detail == images.DetailHostEnvRun && r.code == programs.ReasonPolicy:
+		return hostEnvRunWhy(r.key)
 	case r.detail == images.DetailEnvConflict && r.code == programs.ReasonBadSpec && validEnvKeyName(r.key):
 		return "env_conflict " + r.key + ": the host env file sets a key that the entry's env also sets or that no container env may set"
 	default:
 		return ""
 	}
+}
+
+// hostEnvRunWhy is the v1.26 host_env_run reason. field is named only when
+// it is one of images.HostEnvRunFields, so a helper cannot put other text
+// in the reason.
+func hostEnvRunWhy(field string) string {
+	const why = ": this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env"
+	for _, f := range images.HostEnvRunFields {
+		if field == f {
+			return images.DetailHostEnvRun + " " + field + why
+		}
+	}
+	return images.DetailHostEnvRun + why
 }
 
 // refusalWhy prefers the v1.21 detail sentence over the code's sentence.

@@ -22,6 +22,11 @@ func hostEnvMerge(req images.DeployRequest, pol policy.Policy, sys Sys) (merged 
 	if !hostEnvImageOK(line, req.Spec.Image, req.Digest) {
 		return nil, "", envRefusal(sys, programs.ReasonPolicy, images.DetailHostEnvImage, "")
 	}
+	// v1.26: and only in the run the host owner pinned, so the server
+	// cannot choose code that prints or sends the file's values.
+	if field := hostEnvRunField(line, req); field != "" {
+		return nil, "", envRefusal(sys, programs.ReasonPolicy, images.DetailHostEnvRun, field)
+	}
 	fileEnv, sum, err := policy.ReadHostEnv(sys.Root, line.Path, sys.envOwner)
 	if err != nil {
 		return nil, "", envRefusal(sys, programs.ReasonPolicy, images.DetailHostEnvFile, "")
@@ -125,6 +130,56 @@ func hostEnvImageOK(line policy.HostEnvFile, image, digest string) bool {
 	}
 	pinned, err := images.Parse(ref.Name + "@" + digest)
 	return err == nil && line.HostEnvImageAllowed(pinned)
+}
+
+// hostEnvRunField is the v1.26 run pin check for an entry with a host env
+// file: "" when the request runs the pinned shape, else the first field
+// that differs (one of images.HostEnvRunFields). command and healthcheck
+// test must equal the pins (absent without a line: the image's own); the
+// entrypoint, user, mounts and the entry's own env must be empty, because
+// each of them can change what code runs with the file's values or where
+// that code sends them.
+func hostEnvRunField(line policy.HostEnvFile, req images.DeployRequest) string {
+	spec := req.Spec
+	switch {
+	case !argvEqual(spec.Command, line.Command):
+		return "command"
+	case len(spec.Entrypoint) > 0:
+		return "entrypoint"
+	case !healthcheckPinned(spec.Healthcheck, line.Healthcheck):
+		return "healthcheck"
+	case spec.User != "":
+		return "user"
+	case len(spec.Volumes) > 0:
+		return "volumes"
+	case len(spec.Files) > 0 || len(req.Files) > 0:
+		return "files"
+	case len(spec.Env) > 0 || len(spec.SecretEnv) > 0 || len(spec.EnvSets) > 0 || len(req.Env) > 0:
+		return "env"
+	default:
+		return ""
+	}
+}
+
+// healthcheckPinned: no healthcheck without a pin; with one, the same test
+// argv (the timings stay the entry's).
+func healthcheckPinned(hc *images.Healthcheck, pin []string) bool {
+	if len(pin) == 0 {
+		return hc == nil
+	}
+	return hc != nil && argvEqual(hc.Test, pin)
+}
+
+func argvEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // hostNetDenied is the v1.21 item 7 re-check for a manual rollback, start

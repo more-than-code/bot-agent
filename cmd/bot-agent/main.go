@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -142,8 +143,9 @@ func printPolicyCheck(w io.Writer, path string) error {
 		hostNet = strings.Join(p.HostNetworkProjects, ",")
 	}
 	fmt.Fprintf(w, "host_network_projects=%s\n", hostNet)
+	// v1.26 item 1: then the run pins, as an argument count or "image".
 	for _, f := range p.HostEnvFiles {
-		fmt.Fprintf(w, "host_env_file %s keys=%d sha256=%s image=%s\n", f.Label(), f.Keys, shortSum(f.SHA256), f.Image)
+		fmt.Fprintf(w, "host_env_file %s keys=%d sha256=%s image=%s command=%s healthcheck=%s\n", f.Label(), f.Keys, shortSum(f.SHA256), f.Image, pinCount(f.Command), pinCount(f.Healthcheck))
 	}
 	// v1.22 item 1: the console_policy key.
 	fmt.Fprintf(w, "console_policy=%t\n", p.ConsoleManaged())
@@ -176,4 +178,13 @@ func safeReason(s string) string {
 		}
 	}
 	return s
+}
+
+// pinCount is a v1.26 run pin in policy check: its argument count, or
+// "image" without a line (the image's own).
+func pinCount(argv []string) string {
+	if len(argv) == 0 {
+		return "image"
+	}
+	return strconv.Itoa(len(argv))
 }

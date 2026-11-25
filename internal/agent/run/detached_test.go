@@ -416,6 +416,11 @@ func TestDeployRefusalDetail(t *testing.T) {
 	}{
 		{`{"error":"bad_spec","detail":"env_conflict","key":"DATABASE_URL"}`, "forbidden_spec", "env_conflict DATABASE_URL: the host env file sets a key that the entry's env also sets or that no container env may set"},
 		{`{"error":"policy_denied","detail":"host_env_file"}`, "forbidden_spec", whyHostEnvFile},
+		// v1.26: the field is named only from the fixed list.
+		{`{"error":"policy_denied","detail":"host_env_run","key":"command"}`, "forbidden_spec", "host_env_run command: this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env"},
+		{`{"error":"policy_denied","detail":"host_env_run","key":"env"}`, "forbidden_spec", hostEnvRunWhy("env")},
+		{`{"error":"policy_denied","detail":"host_env_run","key":"` + value + `"}`, "forbidden_spec", hostEnvRunWhy("")},
+		{`{"error":"policy_denied","detail":"host_env_run","key":"DATABASE_URL"}`, "forbidden_spec", hostEnvRunWhy("")},
 		// A key that is not a key name is not repeated.
 		{`{"error":"bad_spec","detail":"env_conflict","key":"` + value + `"}`, "forbidden_spec", codeWhy("bad_spec")},
 		{`{"error":"bad_spec","detail":"other"}`, "forbidden_spec", codeWhy("bad_spec")},
