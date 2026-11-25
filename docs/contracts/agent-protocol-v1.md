@@ -779,3 +779,19 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - Every string is capped at 200 characters (invalid UTF-8 replaced). Nothing else is read from the Engine answer: no labels, env, mounts, host paths, commands, or digests other than the short image id.
 4. **No new `runner.toml` key and no hello field.**
 
+## v1.26 host env files reach only the pinned run (2026-11-25, approved spec `docs/spec-host-env-run-pin.md` rev 1 in bot-agent; fixes DD DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e; gated by `runner.toml`; no API change; not yet released)
+
+1. **`runner.toml` keys** (root only; the v1.22 console rewrite never changes them; an older agent refuses them as `unknown_key`):
+   - `host_env_command = ["<project>/<entry>=<argv>", …]` and `host_env_healthcheck = ["<project>/<entry>=<argv>", …]`, at most 32 items each, one per entry, each for an entry with a `host_env_files` line.
+   - `<argv>` is split on single spaces: 1 to 17 arguments (a program and at most 16 arguments), each 1–256 bytes of printable ASCII without space, `"`, `'` or `\`. A healthcheck's first argument is an absolute path.
+   - An item that does not split into `<project>/<entry>=<value>`, or more than 32 items of either key, is `parse`; a bad argv, a repeated entry or an entry without a `host_env_files` line is `host_env_file` with the entry name.
+   - `policy check` ends each `host_env_file` line with ` command=<n|image> healthcheck=<n|image>` (the argument count, or `image` without a line).
+2. **Helper check** (`container_deploy`: image deploy, rollback by pull and job run), for an entry with a `host_env_files` line, after the image check (v1.21 item 7) and before the file is read:
+   - `spec.command` equals the `host_env_command` argv (empty without a line);
+   - `spec.healthcheck` is absent without a `host_env_healthcheck` line, else present with `test` equal to it (timings are the entry's);
+   - `spec.entrypoint`, `spec.user`, `spec.volumes`, `spec.files` and the task's `files`, `spec.env`, `spec.secret_env`, `spec.env_sets` and the task's `env` are empty.
+   - Else `{"error":"policy_denied","detail":"host_env_run","key":"<field>"}`, field one of `command`, `entrypoint`, `healthcheck`, `user`, `volumes`, `files`, `env` (the first that differs, in that order). No container is created; no value is logged. A key that both the entry and the file set is therefore `host_env_run env`; v1.21 `env_conflict` remains for a file key on the env denylist.
+   - Start, stop, restart, the kept-container rollback (`container_rollback`) and the automatic rollback inside a deploy are not re-checked (a rollback that pulls is a `container_deploy` and is): env is fixed at create, so a container from before v1.26 holds only the values from then (rotate them if anyone but root could deploy the entry).
+3. **Agent:** the v1.19 deploy-result reason is `host_env_run <field>: this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env`; a field outside the list gives the sentence without it.
+4. **Supersedes** v1.21 item 4 where an entry-env key overlaps the file (now `host_env_run env`) and the last sentence of item 7: the file's secrets reach only the named images, run with the pinned command and healthcheck.
+5. **No wire change** beyond the new detail: no frame, hello field or task spec. An API stores the reason text as for v1.21.

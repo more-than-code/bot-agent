@@ -33,6 +33,9 @@ type parsed struct {
 	hostNetwork []string
 	hostEnv     []string
 	hostEnvImgs []string
+	// hostEnvCmds and hostEnvHealth are the v1.26 run pins; nil when absent.
+	hostEnvCmds   []string
+	hostEnvHealth []string
 }
 
 // parseTOML accepts the v1.3 keys, the v1.4 image keys, the v1.13 shared
@@ -190,6 +193,18 @@ func parseTOML(data []byte) (parsed, string) {
 				return parsed{}, "parse"
 			}
 			out.hostEnvImgs = xs
+		case "host_env_command":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.hostEnvCmds = xs
+		case "host_env_healthcheck":
+			xs, ok := parseArray(rest)
+			if !ok {
+				return parsed{}, "parse"
+			}
+			out.hostEnvHealth = xs
 		default:
 			slot := out.hostFiles.field(key)
 			if slot == nil {
@@ -220,7 +235,7 @@ func knownKey(k string) bool {
 		"images", "projects", "max_containers", "allow_public_ports",
 		"shared_networks", "shared_network_projects", "edge", "agent_upgrade",
 		"agent_upgrade_https_proxy", "host_network_projects", "host_env_files", "host_env_images", "console_policy",
-		"container_cgroupns":
+		"container_cgroupns", "host_env_command", "host_env_healthcheck":
 		return true
 	default:
 		return isHostFileKey(k)
