@@ -11,6 +11,9 @@
     },
     "shims": [
       "claude-code"
-    ]
+    ],
+    "local": {
+      "bot-agent-root-helper": ".agents/skills/bot-agent-root-helper"
+    }
   }
 }

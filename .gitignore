@@ -9,6 +9,6 @@ __pycache__/
 *.out
 
 # Skill Forge registry skills: the Project environment installs them in threads; `skf sync` writes them locally
-/.agents/skills/
-/.claude/skills
+/.agents/skills/*
+!/.agents/skills/bot-agent-root-helper/
 /dist/

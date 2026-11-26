@@ -5,9 +5,10 @@ The Deploybot host agent (`cmd/bot-agent`, `internal/agent/`) and its socket-act
 ## Rules
 
 - Do not print, log or commit secrets: join tokens, `/etc/bot-agent/env` values, registry logins or env values. Log only a short redacted error line.
-- Do not commit unless the user asks. Do not push or add a remote.
+- Commit and push only on your own branch and open pull requests into `dev`; never push to, merge into or rewrite `main`. Do not add a remote.
 - Do not install, upgrade or restart the agent, the runner or Telegraf on any host, and do not change pi4, Postgres or systemd from an agent session. Host steps are done by the ops session with Joe.
 - A change to what the helper may do as root (`runner.toml` parsing, the socket peer check, the systemd and Docker calls) is Tier 3: its blast radius is root on every enrolled host.
+- Trust boundary: the helper trusts neither the agent nor the server. It acts only on what the root-owned `runner.toml` allows, for a socket peer that is the `bot-agent` user, and for an upgrade the server names only a version (signature, address and command are fixed on the host; `docs/design.md`). Checklist: skill `bot-agent-root-helper` in `.agents/skills/`.
 
 ## Gates (bot-agent)
 
