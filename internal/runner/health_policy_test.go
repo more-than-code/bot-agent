@@ -108,14 +108,15 @@ func TestHealthPolicyRefusedBeforeEngine(t *testing.T) {
 		name string
 		kind string
 		hp   string
+		hc   bool
 	}{
-		{"unknown key", "service", `{"on_unhealthy":"restart","extra":1}`},
-		{"bad enum", "service", `{"on_deploy_failure":"retry"}`},
-		{"after low", "service", `{"unhealthy_after_sec":5}`},
-		{"actions high", "service", `{"max_actions_per_hour":20}`},
-		{"on job", "job", `{}`},
-		{"keep with action, no healthcheck", "service", `{"on_deploy_failure":"keep","on_unhealthy":"restart"}`},
-		{"keep with action", "service", `{"on_deploy_failure":"keep","on_unhealthy":"rollback"}`},
+		{"unknown key", "service", `{"on_unhealthy":"restart","extra":1}`, false},
+		{"bad enum", "service", `{"on_deploy_failure":"retry"}`, false},
+		{"after low", "service", `{"unhealthy_after_sec":5}`, false},
+		{"actions high", "service", `{"max_actions_per_hour":20}`, false},
+		{"on job", "job", `{}`, false},
+		{"keep with action, no healthcheck", "service", `{"on_deploy_failure":"keep","on_unhealthy":"restart"}`, false},
+		{"keep with action", "service", `{"on_deploy_failure":"keep","on_unhealthy":"rollback"}`, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,6 +124,9 @@ func TestHealthPolicyRefusedBeforeEngine(t *testing.T) {
 			req := serviceDeploy(hashC)
 			if tc.kind == "job" {
 				req = jobDeploy()
+			}
+			if tc.hc {
+				req.Spec.Healthcheck = &images.Healthcheck{Test: []string{"wget"}, IntervalSec: 10, TimeoutSec: 2, Retries: 3}
 			}
 			raw := e.call(images.VerbDeploy, withPolicyRaw(t, req, tc.hp))
 			if string(raw) != `{"error":"`+programs.ReasonBadSpec+`"}` {

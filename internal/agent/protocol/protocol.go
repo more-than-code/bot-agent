@@ -143,9 +143,10 @@ type Programs struct {
 	HostNetwork bool `json:"host_network,omitempty"`
 	// ImageHealthcheckPolicy is the v1.28 item 3 flag: this agent accepts
 	// health_policy.on_unhealthy without spec.healthcheck and fails a
-	// deploy whose container has no Docker health check. Always true. An
-	// API before api-v1 v1.63 refuses a programs object with this key, so
-	// the API is released first.
+	// deploy whose container has no Docker health check. This agent always
+	// sets it, so omitempty only matters for zero values in tests. An API
+	// before api-v1 v1.63 refuses a programs object with this key, so the
+	// API is released first.
 	ImageHealthcheckPolicy bool `json:"image_healthcheck_policy,omitempty"`
 	// ConsolePolicy is the v1.22 opt-in: true only when the policy is valid
 	// and console_policy = true. Sent only when true, so an older API never
