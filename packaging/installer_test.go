@@ -103,15 +103,20 @@ func newRig(t *testing.T) *rig {
 func (rg *rig) env() []string {
 	path := os.Getenv("PATH")
 	if rg.noDocker {
-		// Drop the stub and any host docker so `command -v docker` fails.
+		// Hide the stub and any host docker so `command -v docker` fails. A
+		// PATH directory that holds docker (on CI runners it is /usr/bin,
+		// next to dirname and the rest) is replaced by a copy of symlinks
+		// without docker, not dropped.
 		_ = os.Remove(filepath.Join(rg.stubs, "docker"))
 		var kept []string
-		for _, dir := range filepath.SplitList(path) {
+		for i, dir := range filepath.SplitList(path) {
 			if dir == "" {
 				continue
 			}
 			if _, err := os.Lstat(filepath.Join(dir, "docker")); err == nil {
-				continue
+				if dir = shadowWithout(dir, filepath.Join(filepath.Dir(rg.log), fmt.Sprintf("path%d", i)), "docker"); dir == "" {
+					continue
+				}
 			}
 			kept = append(kept, dir)
 		}
@@ -127,6 +132,28 @@ func (rg *rig) env() []string {
 		"BOT_AGENT_INSTALLER_HELLO_WAIT=0",
 		"PATH="+rg.stubs+string(os.PathListSeparator)+path,
 	)
+}
+
+// shadowWithout fills shadow (once) with symlinks to every entry of dir
+// except the one named skip, and returns shadow. On any error it returns "",
+// and the caller drops dir from PATH as before.
+func shadowWithout(dir, shadow, skip string) string {
+	if _, err := os.Stat(shadow); err == nil {
+		return shadow
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || os.Mkdir(shadow, 0o755) != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.Name() == skip {
+			continue
+		}
+		if os.Symlink(filepath.Join(dir, e.Name()), filepath.Join(shadow, e.Name())) != nil {
+			return ""
+		}
+	}
+	return shadow
 }
 
 func (rg *rig) truncateLog(t *testing.T) {
