@@ -779,7 +779,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - Every string is capped at 200 characters (invalid UTF-8 replaced). Nothing else is read from the Engine answer: no labels, env, mounts, host paths, commands, or digests other than the short image id.
 4. **No new `runner.toml` key and no hello field.**
 
-## v1.26 host env files reach only the pinned run (2026-11-25, approved spec `docs/spec-host-env-run-pin.md` rev 1 in bot-agent; fixes DD DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e; gated by `runner.toml`; no API change; in bot-agent v0.2.18)
+## v1.26 host env files reach only the pinned run (2026-11-25, approved spec `docs/spec-host-env-run-pin.md` rev 1 in bot-agent; fixes DD DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e; gated by `runner.toml`; no API change; in bot-agent v0.2.19, which includes the unpublished v0.2.18)
 
 1. **`runner.toml` keys** (root only; the v1.22 console rewrite never changes them; an older agent refuses them as `unknown_key`):
    - `host_env_command = ["<project>/<entry>=<argv>", …]` and `host_env_healthcheck = ["<project>/<entry>=<argv>", …]`, at most 32 items each, one per entry, each for an entry with a `host_env_files` line.
