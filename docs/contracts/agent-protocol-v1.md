@@ -779,7 +779,7 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
    - Every string is capped at 200 characters (invalid UTF-8 replaced). Nothing else is read from the Engine answer: no labels, env, mounts, host paths, commands, or digests other than the short image id.
 4. **No new `runner.toml` key and no hello field.**
 
-## v1.26 host env files reach only the pinned run (2026-11-25, approved spec `docs/spec-host-env-run-pin.md` rev 1 in bot-agent; fixes DD DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e; gated by `runner.toml`; no API change; in bot-agent v0.2.18)
+## v1.26 host env files reach only the pinned run (2026-11-25, approved spec `docs/spec-host-env-run-pin.md` rev 1 in bot-agent; fixes DD DEF-20261123-host-env-file-secrets-readable-by-anyone-w54e; gated by `runner.toml`; no API change; in bot-agent v0.2.19, which includes the unpublished v0.2.18)
 
 1. **`runner.toml` keys** (root only; the v1.22 console rewrite never changes them; an older agent refuses them as `unknown_key`):
    - `host_env_command = ["<project>/<entry>=<argv>", …]` and `host_env_healthcheck = ["<project>/<entry>=<argv>", …]`, at most 32 items each, one per entry, each for an entry with a `host_env_files` line.
@@ -795,3 +795,9 @@ A value-only env change used to be reported `unchanged` (rule 11 compares digest
 3. **Agent:** the v1.19 deploy-result reason is `host_env_run <field>: this entry gets a host env file, so its command and healthcheck must match host_env_command and host_env_healthcheck in runner.toml, and it may not set entrypoint, user, volumes, files or its own env`; a field outside the list gives the sentence without it.
 4. **Supersedes** v1.21 item 4 where an entry-env key overlaps the file (now `host_env_run env`) and the last sentence of item 7: the file's secrets reach only the named images, run with the pinned command and healthcheck.
 5. **No wire change** beyond the new detail: no frame, hello field or task spec. An API stores the reason text as for v1.21.
+
+## v1.27 release keys (2026-11-25, approved spec `docs/spec-release-workflow.md` rev 1 in bot-agent, with §12 amendments; no API change; in bot-agent v0.2.19)
+
+1. **Supersedes v1.20 item 6.2:** `upgrade-run` verifies `SHA256SUMS.sig` (base64 Ed25519 over the exact `SHA256SUMS` bytes) with **one of** the public keys compiled into the helper, else `signature_invalid`. A helper whose list is empty or holds the placeholder key refuses every bundle.
+2. The list holds Joe's offline recovery key and the CI release key that the release workflow signs with. A key is added or dropped only by a release signed with a key the host already trusts; the host never learns a key any other way (no `runner.toml` key, no frame, no hello field).
+3. **No wire change:** no new reason, frame, hello field or task spec.

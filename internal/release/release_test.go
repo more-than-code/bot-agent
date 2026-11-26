@@ -65,3 +65,33 @@ func TestPlaceholderRefusesEverything(t *testing.T) {
 		t.Fatalf("short key: %v", err)
 	}
 }
+
+func TestVerifyAny(t *testing.T) {
+	pubA, privA := keypair(t)
+	pubB, privB := keypair(t)
+	_, privC := keypair(t)
+	sums := []byte("abc  install.sh\n")
+	keys := []ed25519.PublicKey{pubA, pubB}
+	for name, priv := range map[string]ed25519.PrivateKey{"first": privA, "second": privB} {
+		if err := VerifyAny(keys, sums, EncodeSig(ed25519.Sign(priv, sums))); err != nil {
+			t.Fatalf("%s key: %v", name, err)
+		}
+	}
+	if err := VerifyAny(keys, sums, EncodeSig(ed25519.Sign(privC, sums))); !errors.Is(err, ErrMismatch) {
+		t.Fatalf("unlisted key: %v", err)
+	}
+	if err := VerifyAny(keys, sums, []byte("QUJD\n")); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("bad sig file: %v", err)
+	}
+	good := EncodeSig(ed25519.Sign(privA, sums))
+	if err := VerifyAny(nil, sums, good); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("empty list: %v", err)
+	}
+	zero := ed25519.PublicKey(make([]byte, ed25519.PublicKeySize))
+	if err := VerifyAny([]ed25519.PublicKey{pubA, zero}, sums, good); !errors.Is(err, ErrPlaceholder) {
+		t.Fatalf("placeholder in list: %v", err)
+	}
+	if err := VerifyAny([]ed25519.PublicKey{pubA, {1, 2}}, sums, good); !errors.Is(err, ErrBadKey) {
+		t.Fatalf("short key in list: %v", err)
+	}
+}

@@ -7,6 +7,11 @@
 //	release-sign keygen -out DIR
 //	release-sign sign -key PRIVATE_KEY SHA256SUMS > SHA256SUMS.sig
 //	release-sign verify -pub PUBLIC_KEY SHA256SUMS SHA256SUMS.sig
+//	release-sign verify-compiled SHA256SUMS SHA256SUMS.sig
+//
+// verify-compiled checks the signature with the keys compiled into the
+// helper (internal/release.PublicKeys), as a host will; the release
+// workflow runs it before publishing.
 //
 // Keys are one base64 line. keygen writes DIR/release-key (the private
 // key, mode 0600) and DIR/release-key.pub, and never overwrites a file.
@@ -28,7 +33,8 @@ import (
 const usage = `usage:
   release-sign keygen -out DIR
   release-sign sign -key PRIVATE_KEY SHA256SUMS > SHA256SUMS.sig
-  release-sign verify -pub PUBLIC_KEY SHA256SUMS SHA256SUMS.sig`
+  release-sign verify -pub PUBLIC_KEY SHA256SUMS SHA256SUMS.sig
+  release-sign verify-compiled SHA256SUMS SHA256SUMS.sig`
 
 // maxSums bounds the SHA256SUMS file this tool reads.
 const maxSums = 1 << 20
@@ -48,6 +54,8 @@ func run(args []string, stdout io.Writer) error {
 		return sign(args[2], args[3], stdout)
 	case len(args) == 5 && args[0] == "verify" && args[1] == "-pub":
 		return verify(args[2], args[3], args[4], stdout)
+	case len(args) == 3 && args[0] == "verify-compiled":
+		return verifyCompiled(args[1], args[2], stdout)
 	default:
 		return errors.New(usage)
 	}
@@ -135,6 +143,22 @@ func verify(pubPath, sumsPath, sigPath string, stdout io.Writer) error {
 		return err
 	}
 	if err := release.Verify(ed25519.PublicKey(pub), sums, sig); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "ok")
+	return nil
+}
+
+func verifyCompiled(sumsPath, sigPath string, stdout io.Writer) error {
+	sums, err := readSmall(sumsPath, maxSums)
+	if err != nil {
+		return err
+	}
+	sig, err := readSmall(sigPath, release.MaxSigFile)
+	if err != nil {
+		return err
+	}
+	if err := release.VerifyAny(release.PublicKeys, sums, sig); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "ok")
