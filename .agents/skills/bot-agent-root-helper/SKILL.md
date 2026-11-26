@@ -11,8 +11,8 @@ The helper runs as root on every enrolled host. A change to what it may do, or t
 
 - The helper trusts neither the agent nor the server. The agent is unprivileged and may be compromised, and the server (API) may be compromised. Only the root-owned `/etc/bot-agent/runner.toml` and what is compiled into the binary are trusted.
 - `serve-conn` requires euid 0 and a socket peer uid of `bot-agent` (`cmd/bot-agent-runner/peercred_linux.go`). Do not widen that.
-- Every request is checked against the policy before acting: kind allowlist, `projects`, `images` patterns, closed spec keys and bounds. A refusal is `policy_denied` or `bad_spec`, with a short reason and no secret.
-- Upgrades: the server names only a version. The download address, the redirect hosts, the Ed25519 check against `internal/release.PublicKeys` and the command are fixed on the host (`docs/design.md`, "Agent upgrade from the server"). Changing the key list is Tier 3.
+- Every request is checked against the policy before acting: the helper's fixed verb set, the `runner.toml` switches (`enabled`, `projects`, `images` patterns), closed spec keys and bounds. A refusal is `policy_denied` or `bad_spec`, with a short reason and no secret.
+- Upgrades: the server names only a version. The download address, the redirect hosts, the Ed25519 check against `internal/release.PublicKeys` and the command are fixed on the host (`docs/design.md`, "Agent upgrade from the server"). Changing the key list is Tier 3, and the server keeps a copy (`api/internal/agentrelease.PublicKeys` in bot-control-plane) that changes in a paired PR.
 
 ## Checklist for the spec and the review
 
