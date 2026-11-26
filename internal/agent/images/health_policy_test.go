@@ -72,13 +72,16 @@ func TestHealthPolicyValidate(t *testing.T) {
 	}
 }
 
-func TestHealthPolicyNeedsHealthcheck(t *testing.T) {
+// TestHealthPolicyWithoutHealthcheck: since v1.28 item 1 an action no
+// longer needs spec.healthcheck; keep with an action is still refused.
+func TestHealthPolicyWithoutHealthcheck(t *testing.T) {
 	cases := []struct {
 		hp   string
 		want string
 	}{
-		{`{"on_unhealthy":"restart"}`, "health_policy.on_unhealthy"},
-		{`{"on_unhealthy":"rollback"}`, "health_policy.on_unhealthy"},
+		{`{"on_unhealthy":"restart"}`, ""},
+		{`{"on_unhealthy":"rollback"}`, ""},
+		{`{"on_deploy_failure":"keep","on_unhealthy":"restart"}`, "health_policy"},
 		{`{"on_unhealthy":"none"}`, ""},
 		{`{"on_deploy_failure":"stop"}`, ""},
 		{`{"on_deploy_failure":"keep"}`, ""},

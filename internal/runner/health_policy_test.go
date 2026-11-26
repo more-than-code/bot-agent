@@ -81,6 +81,28 @@ func TestCreatePolicyLabels(t *testing.T) {
 	}
 }
 
+// v1.28 item 1: an action without the entry's healthcheck is created with
+// the policy labels and no Healthcheck, so the image's own HEALTHCHECK runs.
+func TestCreatePolicyLabelsImageHealthcheck(t *testing.T) {
+	e := newImgEnv(t, imagePolicy)
+	req := serviceDeploy(hashC)
+	req.Spec.Healthcheck = nil
+	if raw := e.call(images.VerbDeploy, withPolicyRaw(t, req, `{"on_unhealthy":"restart"}`)); imgCode(t, raw) != "" {
+		t.Fatal(string(raw))
+	}
+	body := e.fake.body(http.MethodPost, "/containers/create")
+	if labels := createLabels(t, body); labels[images.LabelOnUnhealthy] != "restart" {
+		t.Fatalf("labels %v", labels)
+	}
+	var got map[string]json.RawMessage
+	if json.Unmarshal(body, &got) != nil {
+		t.Fatal(string(body))
+	}
+	if _, ok := got["Healthcheck"]; ok {
+		t.Fatalf("create set a Healthcheck: %s", body)
+	}
+}
+
 func TestHealthPolicyRefusedBeforeEngine(t *testing.T) {
 	cases := []struct {
 		name string
@@ -92,7 +114,7 @@ func TestHealthPolicyRefusedBeforeEngine(t *testing.T) {
 		{"after low", "service", `{"unhealthy_after_sec":5}`},
 		{"actions high", "service", `{"max_actions_per_hour":20}`},
 		{"on job", "job", `{}`},
-		{"action without healthcheck", "service", `{"on_unhealthy":"restart"}`},
+		{"keep with action, no healthcheck", "service", `{"on_deploy_failure":"keep","on_unhealthy":"restart"}`},
 		{"keep with action", "service", `{"on_deploy_failure":"keep","on_unhealthy":"rollback"}`},
 	}
 	for _, tc := range cases {

@@ -294,16 +294,12 @@ func checkHealthPolicy(s *ImageSpec) string {
 	if v := h.MaxActionsPerHour; v != nil && !validActions(*v) {
 		return "health_policy.max_actions_per_hour"
 	}
-	// v1.9 rev 2: an action needs the catalog healthcheck (an image's own
-	// HEALTHCHECK is not enough), and a container kept after a failed
-	// deploy is never supervised.
-	if p := s.Health(); p.OnUnhealthy != UnhealthyNone {
-		if s.Healthcheck == nil {
-			return "health_policy.on_unhealthy"
-		}
-		if p.OnDeployFailure == DeployFailKeep {
-			return "health_policy"
-		}
+	// v1.9 rev 2: a container kept after a failed deploy is never
+	// supervised. v1.28 item 1: an action no longer needs the catalog
+	// healthcheck; the image's own HEALTHCHECK feeds the same Docker health,
+	// and a deploy with no check at all fails (run.noDockerHealth).
+	if p := s.Health(); p.OnUnhealthy != UnhealthyNone && p.OnDeployFailure == DeployFailKeep {
+		return "health_policy"
 	}
 	return ""
 }

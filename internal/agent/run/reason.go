@@ -23,6 +23,8 @@ const (
 	whyDockerStarting   = "the Docker health check was still starting when the wait ended"
 	whyNotRunning       = "the container was not running"
 	whyHelper           = "the Docker helper on the host failed"
+	// whyNoDockerHealth is agent-protocol v1.28 item 2.
+	whyNoDockerHealth = "the container has no Docker health check, so on_unhealthy can never act: set a healthcheck on the entry or use an image with a HEALTHCHECK"
 )
 
 // maxReasonBytes is the protocol cap on reason.

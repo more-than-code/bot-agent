@@ -206,7 +206,7 @@ func TestSupervisorRollbackReset(t *testing.T) {
 				t.Fatalf("%s", got)
 			}
 			// Rejected before it runs: no reset.
-			bad := withRunPolicy(serviceSpec(false, 5, 3031), `{"on_unhealthy":"restart"}`)
+			bad := withRunPolicy(serviceSpec(false, 5, 3031), `{"on_deploy_failure":"keep","on_unhealthy":"restart"}`)
 			if _, _, ok := a.execute(context.Background(), imageTask("image_deploy", bad, 30)); ok {
 				t.Fatal("bad spec accepted")
 			}
