@@ -165,7 +165,7 @@ Joe's standing requirement (2026-11-25, "computerless"): releases, signing and k
 
 1. AWS console → KMS → Create key: Asymmetric, Sign and verify, `ECC_NIST_EDWARDS25519`, single region. Alias `bot-agent-release`. Key administrators: yourself only. Key users: none yet (the role below gets its rights from its own policy).
 2. IAM → Identity providers → Add provider: OpenID Connect, URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` (skip if it exists).
-3. IAM → Roles → Create role "Web identity" for that provider, named `bot-agent-release-signer`. Trust policy condition: `token.actions.githubusercontent.com:aud` equals `sts.amazonaws.com` and `token.actions.githubusercontent.com:sub` equals `repo:more-than-code/bot-agent:environment:release` (exactly; no wildcard). Permissions: one inline policy allowing only `kms:Sign` on the key's ARN, with condition `kms:SigningAlgorithm` = `ED25519_SHA_512`. Maximum session 1 hour.
+3. IAM → Roles → Create role "Web identity" for that provider, named `bot-agent-release-signer`. Trust policy condition: `token.actions.githubusercontent.com:aud` equals `sts.amazonaws.com` and `token.actions.githubusercontent.com:sub` equals `repo:more-than-code@48585236/bot-agent@1415417662:environment:release` (exactly; no wildcard; see the subject note after the policy). Permissions: one inline policy allowing only `kms:Sign` on the key's ARN, with condition `kms:SigningAlgorithm` = `ED25519_SHA_512`. Maximum session 1 hour.
 4. GitHub, bot-agent → Settings → Environments → `release` → Environment variables: `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (the role's ARN), `AWS_KMS_KEY_ID` (the key's ARN). No secrets.
 5. KMS → the key → Public key tab → copy the PEM and paste it in the thread. It is public; the thread converts it to the 32-byte key for `PublicKeys`.
 
@@ -184,7 +184,7 @@ Trust policy of `bot-agent-release-signer`:
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {"StringEquals": {
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-      "token.actions.githubusercontent.com:sub": "repo:more-than-code/bot-agent:environment:release"
+      "token.actions.githubusercontent.com:sub": "repo:more-than-code@48585236/bot-agent@1415417662:environment:release"
     }}
   }]
 }
@@ -203,6 +203,8 @@ Its only permission policy:
   }]
 }
 ```
+
+**Subject format (2026-11-26).** GitHub's OIDC `sub` for this repository carries the owner and repository ids: `repo:more-than-code@48585236/bot-agent@1415417662:environment:release` (48585236 is the `more-than-code` organization, 1415417662 the `bot-agent` repository). The first KMS signing run (bot-agent v0.2.20, run 45774164950) was refused by STS (`AccessDenied` on `AssumeRoleWithWebIdentity`) because the trust policy still had the form without ids; CloudTrail's failed event shows the subject GitHub sent in `userIdentity.userName`. The ids make the condition stricter: a repository deleted and recreated under the same name gets a new id and is refused.
 
 **A1 for AWS (2026-11-25).** The AWS side (OIDC provider, role `bot-agent-release-signer`, inline policy `kms-sign-only`) was created by a Claude session through the AWS connector while Joe was signed in as the account root. At Joe's word ("you can help create a proper user … instead of the root user"), the connector then moved to the IAM user `claude-mcp`: `PowerUserAccess` and `IAMReadOnlyAccess`, plus the inline deny policy `protect-release-signing`, which denies `kms:*` on the release key, every non-read IAM action on the signer role and the OIDC provider, and `sts:AssumeRole*` on the signer role. So a session can neither sign, change the key or its policy, nor widen who may assume the role. Joe sets that user's console password himself and signs the connector in as it. Left to Joe: keep the root user for himself only, with MFA, and never sign the connector in as root again.
 
