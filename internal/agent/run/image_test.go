@@ -862,6 +862,7 @@ type imageSeq struct {
 	listN          int
 	listErr        bool
 	listEmpty      bool
+	listState      string
 	stops          int
 	stopped        images.ImageStatus
 	stoppedSet     bool
@@ -932,6 +933,9 @@ func (s *imageSeq) call(verb string, body []byte) ([]byte, error) {
 		}
 		d := imgDigest
 		item := images.ContainerInfo{ID: "abc", Name: "/acme-web", State: "running", Digest: &d}
+		if s.listState != "" {
+			item.State = s.listState
+		}
 		if s.health != nil {
 			v := *s.health
 			item.Health = &v

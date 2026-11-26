@@ -18,7 +18,9 @@ const MaxSigFile = 128
 // PublicKeys are the release keys compiled into the helper; a bundle is
 // accepted when its signature verifies under any of them (agent-protocol
 // v1.27, spec docs/spec-release-workflow.md §5). Keys are added or removed
-// only by a release signed with a key hosts already trust.
+// only by a release signed with a key hosts already trust. bot-control-plane
+// keeps a copy (api/internal/agentrelease.PublicKeys, api-v1 v1.62): change
+// both together.
 //
 //   - Joe's offline release key (`release-sign keygen`, 2026-11-23), first
 //     used for bot-agent v0.2.15. It stays off GitHub and is the recovery

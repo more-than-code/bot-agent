@@ -15,7 +15,7 @@ import (
 
 const (
 	Version      = 1
-	AgentVersion = "0.2.19"
+	AgentVersion = "0.2.20"
 	MaxFrame     = 1 << 20
 	MaxSamples   = 5000
 	CmdlineMax   = 1024
@@ -141,6 +141,13 @@ type Programs struct {
 	// valid and host_network_projects is non-empty. Sent only when true
 	// (v1.21 item 7), so an older API never sees it.
 	HostNetwork bool `json:"host_network,omitempty"`
+	// ImageHealthcheckPolicy is the v1.28 item 3 flag: this agent accepts
+	// health_policy.on_unhealthy without spec.healthcheck and fails a
+	// deploy whose container has no Docker health check. This agent always
+	// sets it, so omitempty only matters for zero values in tests. An API
+	// before api-v1 v1.63 refuses a programs object with this key, so the
+	// API is released first.
+	ImageHealthcheckPolicy bool `json:"image_healthcheck_policy,omitempty"`
 	// ConsolePolicy is the v1.22 opt-in: true only when the policy is valid
 	// and console_policy = true. Sent only when true, so an older API never
 	// sees it.

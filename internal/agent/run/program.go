@@ -59,6 +59,7 @@ func (a *agent) helloPrograms() (*protocol.Programs, []string) {
 	p.Healthcheck = true
 	p.Logging = true
 	p.HealthPolicy = true
+	p.ImageHealthcheckPolicy = true
 	p.Secrets = true
 	p.Projects = []string{}
 	p.SharedNetworks = []protocol.SharedNetwork{}

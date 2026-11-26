@@ -273,7 +273,10 @@ func (a *agent) deployService(ctx context.Context, task protocol.Task, req tasks
 	if code != "" {
 		return a.deployResultWhy(task, outcomeFor(code), digest, nil, st, refusalLines(code, a.tailImage(ctx, req.Project, req.Entry, ex, secrets)), refusalWhy(code, detail), ex)
 	}
-	w := a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
+	w, done := a.noDockerHealth(wait.ctx, wait.by, req)
+	if !done {
+		w = a.waitHealthy(wait.ctx, wait.by, req, healthyNeed(task.Kind, req.Spec.HealthyAfterSec))
+	}
 	if w.err != nil || w.code != "" {
 		outcome := "failed"
 		if w.code != "" {
@@ -411,6 +414,48 @@ func (a *agent) waitHealthy(ctx context.Context, deadline time.Time, req tasks.I
 		return a.waitStable(ctx, deadline, req.Project, req.Entry, need)
 	}
 	return a.waitProbes(ctx, deadline, req.Project, req.Entry, checks)
+}
+
+// noDockerHealth is the agent-protocol v1.28 item 2 check, run after
+// container_deploy in image_deploy and in image_rollback by pull. A service
+// whose on_unhealthy acts but has no healthcheck of its own relies on the
+// image's HEALTHCHECK. Docker sets a health status at start whenever any
+// check is configured, so a listed container with a null health has none,
+// and on_unhealthy could never act: the wait fails with whyNoDockerHealth
+// and on_deploy_failure applies. It polls container_list until the new
+// container is listed; a list error is handled like waitDocker's. done is
+// false when the check does not apply, the container has a health status,
+// or the deadline passed before it was listed; the normal wait then runs.
+func (a *agent) noDockerHealth(ctx context.Context, deadline time.Time, req tasks.ImageReq) (healthStop, bool) {
+	spec := req.Spec
+	if spec == nil || spec.Kind != "service" || spec.Healthcheck != nil || spec.Health().OnUnhealthy == images.UnhealthyNone {
+		return healthStop{}, false
+	}
+	name, ok := images.ContainerName(req.Project, req.Entry)
+	if !ok {
+		return healthStop{err: errHelper}, true
+	}
+	for {
+		if a.expired(ctx, deadline) {
+			return healthStop{}, false
+		}
+		items, _, err := a.listContainers(ctx)
+		if err != nil {
+			return a.waitFail(ctx, deadline, err, missingStatus()), true
+		}
+		if it, found := findListed(items, name); found {
+			// Docker reports health only for a running container (the
+			// Status suffix), so a crashed or restarting one is left to
+			// the normal wait, which names its state.
+			if it.Health != nil || it.State != "running" {
+				return healthStop{}, false
+			}
+			return healthStop{last: statusFromList(it), why: whyNoDockerHealth}, true
+		}
+		if err := a.sleep(ctx, imagePoll); err != nil {
+			return a.waitFail(ctx, deadline, err, missingStatus()), true
+		}
+	}
 }
 
 // waitDocker polls container_list and container_status for the new
